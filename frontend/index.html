@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en" class="h-full antialiased dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spectra Segment</title>
+    <style>
+      :root {
+        --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+        --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+      }
+      html, body { background: #0a0a0a; color: #fafafa; margin: 0; padding: 0; }
+    </style>
+  </head>
+  <body class="min-h-full flex flex-col" style="font-family: var(--font-sans)">
+    <div id="splash" style="position:fixed;inset:0;z-index:100;background:#0a0a0a"></div>
+
+    <div id="root"></div>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

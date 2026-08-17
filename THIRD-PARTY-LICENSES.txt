@@ -1,0 +1,141 @@
+Spectra Segment - Third-Party Licenses
+=======================================
+
+This project uses the following third-party packages and assets.
+All licenses are compatible with the GNU General Public License v3.0.
+
+
+RUNTIME DEPENDENCIES (Python)
+-----------------------------
+
+fastapi
+  License: MIT
+  Copyright: Copyright (c) 2018 Sebastián Ramírez
+
+uvicorn
+  License: BSD-3-Clause
+  Copyright: Copyright (c) 2017-present Encode OSS Ltd.
+
+python-multipart
+  License: Apache-2.0
+  Copyright: Copyright (c) 2017 Andrew Dunham
+
+pillow
+  License: MIT-CMU
+  Copyright: Copyright (c) 1997-2011 by Secret Labs AB, Copyright (c) 1995-2011 by Fredrik Lundh
+
+numpy
+  License: BSD-3-Clause
+  Copyright: Copyright (c) 2005-2025, NumPy Developers. All rights reserved.
+
+opencv-python-headless
+  License: Apache-2.0
+  Copyright: Copyright (C) 2000-2025, Intel Corporation, all rights reserved.
+
+ultralytics
+  License: AGPL-3.0
+  Copyright: Copyright (c) 2016-present, Ultralytics
+
+transformers
+  License: Apache-2.0
+  Copyright: Copyright 2018- The HuggingFace Team
+
+accelerate
+  License: Apache-2.0
+  Copyright: Copyright 2021- The HuggingFace Team
+
+timm
+  License: Apache-2.0
+  Copyright: Copyright (c) 2019, Ross Wightman
+
+einops
+  License: MIT
+  Copyright: Copyright (c) 2018, Alex Rogozhnikov
+
+supervision
+  License: MIT
+  Copyright: Copyright (c) 2022-present, Roboflow
+
+
+RUNTIME DEPENDENCIES (JavaScript/TypeScript)
+--------------------------------------------
+
+react
+  License: MIT
+  Copyright: Copyright (c) Meta Platforms, Inc. and affiliates
+
+react-dom
+  License: MIT
+  Copyright: Copyright (c) Meta Platforms, Inc. and affiliates
+
+jotai
+  License: MIT
+  Copyright: Copyright (c) 2020 Poimandres
+
+clsx
+  License: MIT
+  Copyright: Copyright (c) 2020 Luke Edwards
+
+
+DEV DEPENDENCIES
+----------------
+
+@fontsource-variable/inter
+  License: SIL Open Font License 1.1
+  Copyright: Copyright 2017 The Inter Project Authors
+
+@fontsource/jetbrains-mono
+  License: SIL Open Font License 1.1
+  Copyright: Copyright 2020 The JetBrains Mono Project Authors
+
+@types/react
+  License: MIT
+  Copyright: Copyright (c) Microsoft Corporation
+
+@types/react-dom
+  License: MIT
+  Copyright: Copyright (c) Microsoft Corporation
+
+@unocss/vite
+  License: MIT
+  Copyright: Copyright (c) 2021-PRESENT Anthony Fu
+
+@vitejs/plugin-react
+  License: MIT
+  Copyright: Copyright (c) 2019-present, Yuxi (Evan) You and Vite contributors
+
+typescript
+  License: Apache-2.0
+  Copyright: Copyright (c) Microsoft Corporation
+
+unocss
+  License: MIT
+  Copyright: Copyright (c) 2021-PRESENT Anthony Fu
+
+vite
+  License: MIT
+  Copyright: Copyright (c) 2019-present, VoidZero Inc. and Vite contributors
+
+
+MODEL LICENSES
+--------------
+
+SAM 3 (Segment Anything 3)
+  License: Apache-2.0
+  Copyright: Copyright (c) Meta Platforms, Inc.
+  Note: Model weights may have separate usage terms via SAM License.
+  See: https://ai.meta.com/sam/licenses/
+
+YOLO (Ultralytics)
+  License: AGPL-3.0
+  Copyright: Copyright (c) 2016-present, Ultralytics
+
+
+LICENSE NOTE
+------------
+
+This project (Spectra Segment) is licensed under the GNU General Public
+License v3.0. The AGPL-3.0 licensed dependencies (ultralytics) require
+that any distributed version of this software must also be licensed under
+AGPL-3.0. For local-only use, GPL-3.0 applies. If distributed over a
+network, AGPL-3.0 requirements may apply.

@@ -1,0 +1,149 @@
+@layer utilities {
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(to right, var(--color-orange-500) calc(var(--pct) + 7px), rgba(64, 64, 64, 0.5) calc(var(--pct) + 7px));
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    height: 14px;
+    width: 14px;
+    margin-top: -5px;
+    border-radius: 50%;
+    background: var(--color-orange-500);
+    cursor: pointer;
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+  }
+  input[type="range"]:hover::-webkit-slider-thumb {
+    transform: scale(1.2);
+    box-shadow: 0 0 12px rgba(184, 92, 42, 0.4);
+  }
+  input[type="range"]::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(64, 64, 64, 0.5);
+  }
+  input[type="range"]::-moz-range-progress {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--color-orange-500);
+  }
+  input[type="range"]::-moz-range-thumb {
+    height: 14px;
+    width: 14px;
+    border-radius: 50%;
+    background: var(--color-orange-500);
+    border: 0;
+    cursor: pointer;
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+  }
+  input[type="range"]:hover::-moz-range-thumb {
+    transform: scale(1.2);
+    box-shadow: 0 0 12px rgba(184, 92, 42, 0.4);
+  }
+  input[type="range"]:focus-visible { outline: none; }
+  input[type="range"]:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px rgba(184, 92, 42, 0.45), 0 0 12px rgba(184, 92, 42, 0.35);
+  }
+  input[type="range"]:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 3px rgba(184, 92, 42, 0.45), 0 0 12px rgba(184, 92, 42, 0.35);
+  }
+  input[type="range"]:disabled { opacity: 0.35; }
+  input[type="range"]:disabled::-webkit-slider-thumb { background: #404040; }
+  input[type="range"]:disabled::-moz-range-thumb { background: #404040; }
+
+  .custom-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  .custom-scrollbar:hover {
+    scrollbar-color: #444 transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+  .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .custom-scrollbar::-webkit-scrollbar-thumb { background-color: transparent; border-radius: 20px; }
+  .custom-scrollbar:hover::-webkit-scrollbar-thumb { background-color: #444; }
+
+  .hero-entrance {
+    animation: hero-in 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  .hero-delay-2 { animation-delay: 0.2s; opacity: 0; }
+
+  .smooth-dialog {
+    transition: opacity 0.15s ease, -webkit-backdrop-filter 0.15s ease, backdrop-filter 0.15s ease;
+  }
+
+  .shimmer-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(115deg, transparent 40%, rgba(184, 92, 42, 0.55) 48%, rgba(255, 255, 255, 0.35) 52%, transparent 60%);
+    background-size: 200% 100%;
+    background-repeat: no-repeat;
+    animation: shimmer 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .shimmer-overlay::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: var(--grain-url);
+    background-repeat: repeat;
+    background-size: 256px 256px;
+    opacity: 0.06;
+    mix-blend-mode: screen;
+  }
+
+  .animate-model-load {
+    animation: model-load-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  .grain-bg {
+    position: relative;
+  }
+  .grain-bg::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    border-radius: inherit;
+    background-image: var(--grain-url);
+    background-repeat: repeat;
+    background-size: 256px 256px;
+    opacity: 0.06;
+    mix-blend-mode: screen;
+    animation: grain-shift 12s steps(10) infinite;
+  }
+  .grain-bg-strong::after {
+    opacity: 0.1;
+  }
+}
+
+#splash {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: #0a0a0a;
+  transition: opacity 0.45s ease-out;
+}
+#splash.fade {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

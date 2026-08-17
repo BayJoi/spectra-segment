@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+backend/.venv/
+backend_amd_gpu/.venv/
+
+# Model weights (downloaded separately)
+backend/model_weights/
+backend_amd_gpu/model_weights/
+
+# Package caches
+backend/.uv/
+backend_amd_gpu/.uv/
+backend/.pip/
+backend_amd_gpu/.pip/
+
+# Logs
+backend/logs/
+backend_amd_gpu/logs/
+*.log
+
+# Temp files
+.tmp/
+backend/tmp/
+backend_amd_gpu/tmp/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+backend/web/
+backend_amd_gpu/web/
+
+# Bun
+frontend/bun.lock
+
+# Tools (installed locally)
+tools/
+
+# Config files (generated)
+backend/.local_token
+backend/.backend_pid
+backend/spectra_launcher.cfg
+backend/spectra_launcher.cfg.env
+backend/backend_launch.log
+
+backend_amd_gpu/.local_token
+backend_amd_gpu/.backend_pid
+backend_amd_gpu/spectra_launcher.cfg
+backend_amd_gpu/spectra_launcher.cfg.env
+backend_amd_gpu/backend_launch.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

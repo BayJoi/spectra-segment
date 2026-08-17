@@ -1,0 +1,15 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+pillow>=10.0.0
+numpy>=1.26.0
+opencv-python-headless>=4.8.0
+# SAM 3 requires >=8.3.237; >=8.3.239 auto-installs the correct CLIP package
+# (PyPI's "clip" package breaks SAM3 with "SimpleTokenizer' object is not callable").
+ultralytics>=8.3.239
+transformers>=4.46,<5.0
+accelerate>=0.25.0
+timm>=0.9.0
+einops>=0.6.0
+# CV utilities: detection/mask post-processing, annotation, dataset export
+supervision>=0.29.0
