@@ -34,4 +34,4 @@ if defined SPECTRA_OMP_THREADS (set "OMP_NUM_THREADS=%SPECTRA_OMP_THREADS%") els
 set "KMP_AFFINITY=granularity=fine,compact,1,0"
 set "KMP_BLOCKTIME=1"
 set "KMP_DUPLICATE_LIB_OK=TRUE"
-"%~dp0.venv\Scripts\python.exe" -W ignore::DeprecationWarning -W ignore::FutureWarning -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --log-level error
+"%~dp0.venv\Scripts\python.exe" -X pycache_prefix="%MW%\pycache" -W ignore::DeprecationWarning -W ignore::FutureWarning -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --log-level error
