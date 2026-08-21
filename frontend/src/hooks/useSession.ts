@@ -83,12 +83,15 @@ export function useSession() {
   sam3ModeRef.current = sam3Mode;
   const modelNameRef = useRef(modelName);
   modelNameRef.current = modelName;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
   const uploadingRef = useRef(false);
 
   const createSession = useCallback(
     async (model: string, fileToReUpload?: File | null) => {
       try {
         const res = await api.createSession(model);
+        sessionIdRef.current = res.session_id;
         setSessionId(res.session_id);
         setModelName(res.model_name);
         if (fileToReUpload) {
@@ -124,6 +127,7 @@ export function useSession() {
         return;
       }
       uploadingRef.current = true;
+      let launched = false;
       try {
         let sid = sessionId;
         if (!sid) {
@@ -135,6 +139,7 @@ export function useSession() {
               api.destroySession(res.session_id).catch(() => {});
               return;
             }
+            sessionIdRef.current = res.session_id;
             setSessionId(res.session_id);
             setModelName(res.model_name);
             sid = res.session_id;
@@ -165,6 +170,7 @@ export function useSession() {
         setSelectedSam3Instance(null);
         resetUndoRedoState();
         setImageEncoding(true);
+        launched = true;
         api.uploadImage(sid, file)
           .then((res) => {
             setImageWidth(res.width);
@@ -176,9 +182,10 @@ export function useSession() {
           })
           .finally(() => {
             setImageEncoding(false);
+            uploadingRef.current = false;
           });
       } finally {
-        uploadingRef.current = false;
+        if (!launched) uploadingRef.current = false;
       }
     },
     [sessionId, sam3Mode, setSessionId, setModelName, setImageUrl, setImageFile, setMasks, setLayers, setImageWidth, setImageHeight, setImageEncoding, setModeLock, setModeDialogOpen, setDetections, setSelectedDetection, setSelectedLayers, setShowTransparent, setHideBboxes, setSam3Prompts, setSam3RedoStack, resetUndoRedoState, setUnsupportedFile]
@@ -188,6 +195,11 @@ export function useSession() {
     async (model: string) => {
       if (model === modelName) return;
       resetUndoRedoState();
+      setSam3Prompts([]);
+      setSam3RedoStack([]);
+      setSam3Prompting(false);
+      setSam3Instances([]);
+      setSelectedSam3Instance(null);
       if (sessionId) {
         await api.destroySession(sessionId).catch(() => {});
       }
@@ -200,7 +212,7 @@ export function useSession() {
       setHideBboxes(false);
       await createSession(model, imageFile);
     },
-    [sessionId, modelName, imageFile, createSession, setMasks, setLayers, setDetections, setSelectedDetection, setSelectedLayers, setHideBboxes, resetUndoRedoState]
+    [sessionId, modelName, imageFile, createSession, setMasks, setPerDetectionMasks, setLayers, setDetections, setSelectedDetection, setSelectedLayers, setHideBboxes, resetUndoRedoState, setSam3Prompts, setSam3RedoStack, setSam3Prompting, setSam3Instances, setSelectedSam3Instance]
   );
 
   const endSession = useCallback(async () => {
@@ -215,6 +227,7 @@ export function useSession() {
         previousBlobUrlRef.current = null;
       }
       setSessionId(null);
+      sessionIdRef.current = null;
       setModelName("");
       setImageUrl(null);
       setImageFile(null);
@@ -256,12 +269,14 @@ export function useSession() {
 
   const predict = useCallback(
     (params: { object_id?: number; points?: number[][]; labels?: number[]; bboxes?: number[] }) => {
-      if (!sessionId) return Promise.resolve(null);
+      if (!sessionIdRef.current) return Promise.resolve(null);
       const oid = params.object_id ?? activeObjectIdRef.current;
       setPredictInFlight((c) => c + 1);
       const run = async () => {
         try {
-          const res = await api.predict(sessionId, { ...params, object_id: oid });
+          const sid = sessionIdRef.current;
+          if (!sid) return null;
+          const res = await api.predict(sid, { ...params, object_id: oid });
           setMasks(res.masks);
           setObjectMasks(res.objectMasks ?? {});
           if (params.points?.length || params.bboxes?.length) {
@@ -281,7 +296,7 @@ export function useSession() {
       predictQueueRef.current = next.catch(() => {});
       return next;
     },
-    [sessionId, setMasks, setObjectMasks, recoverSession, setPredictInFlight, setObjectUndoCounts, setObjectRedoCounts]
+    [setMasks, setObjectMasks, recoverSession, setPredictInFlight, setObjectUndoCounts, setObjectRedoCounts]
   );
 
   const undo = useCallback(async () => {

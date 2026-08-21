@@ -1,4 +1,5 @@
 import { atom } from "jotai";
+import { atomWithStorage } from "jotai/utils";
 
 export const settingsOpenAtom = atom(false);
 export const exportOpenAtom = atom(false);
@@ -22,3 +23,9 @@ export const zoomInAtom = atom<(() => void) | null>(null);
 export const zoomOutAtom = atom<(() => void) | null>(null);
 
 export const uploadHoveredAtom = atom(false);
+
+export const consoleOpenAtom = atomWithStorage("consoleOpen", false);
+export type ConsoleFilterKey = "all" | "info" | "warn" | "error";
+export const consoleFilterAtom = atomWithStorage<ConsoleFilterKey>("consoleFilter", "all");
+export const consoleShowTimeAtom = atomWithStorage("consoleShowTime", false);
+export const consoleScrollRatioAtom = atom(1);

@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAtom } from "jotai";
 import { api, BASE } from "@/lib/api";
+import { connectSse } from "@/lib/sse";
 import { cn } from "@/lib/utils";
+import {
+  consoleOpenAtom,
+  consoleFilterAtom,
+  consoleShowTimeAtom,
+  consoleScrollRatioAtom,
+  type ConsoleFilterKey,
+} from "@/store/ui";
+import { modelsAtom } from "@/store/session";
 
 interface LogEntry {
   level: string;
   message: string;
-}
-
-interface ModelStatus {
-  name: string;
-  display_name: string;
-  downloaded: boolean;
-  loaded: boolean;
+  ts?: string;
+  name?: string;
+  pct?: number;
 }
 
 const LEVEL_DOT: Record<string, string> = {
@@ -30,9 +36,7 @@ const LEVEL_RANK: Record<string, number> = {
   DOWNLOAD: -1,
 };
 
-type FilterKey = "all" | "info" | "warn" | "error";
-
-const FILTER_OPTIONS: { key: FilterKey; label: string; minRank: number }[] = [
+const FILTER_OPTIONS: { key: ConsoleFilterKey; label: string; minRank: number }[] = [
   { key: "all", label: "All", minRank: -Infinity },
   { key: "info", label: "Info+", minRank: 0 },
   { key: "warn", label: "Warn+", minRank: 1 },
@@ -40,109 +44,142 @@ const FILTER_OPTIONS: { key: FilterKey; label: string; minRank: number }[] = [
 ];
 
 export function ConsolePanel({ encoding }: { encoding?: boolean }) {
-  const [open, setOpen] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const isAtBottomRef = useRef(true);
-  const [copied, setCopied] = useState(false);
-  const [filter, setFilter] = useState<FilterKey>("all");
-  const [filterOpen, setFilterOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-  const [modelStatuses, setModelStatuses] = useState<ModelStatus[]>([]);
-  const [modelsOpen, setModelsOpen] = useState(false);
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const evtRef = useRef<EventSource | null>(null);
-  const modelEvtRef = useRef<EventSource | null>(null);
+  const [open, setOpen] = useAtom(consoleOpenAtom);
+  const [filter, setFilter] = useAtom(consoleFilterAtom);
+  const [showTime, setShowTime] = useAtom(consoleShowTimeAtom);
+  const [savedScrollRatio, setSavedScrollRatio] = useAtom(consoleScrollRatioAtom);
+  const [models] = useAtom(modelsAtom);
 
-  useEffect(() => {
-    if (!open) {
-      if (evtRef.current) {
-        evtRef.current.close();
-        evtRef.current = null;
-      }
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [search, setSearch] = useState("");
+  const [connected, setConnected] = useState(false);
+  const [unread, setUnread] = useState(0);
+  const [badge, setBadge] = useState<"error" | "warn" | null>(null);
+  const [showJump, setShowJump] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [modelsOpen, setModelsOpen] = useState(false);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pinnedRef = useRef(true);
+  const hoverRef = useRef(false);
+  const lastDownloadTsRef = useRef(0);
+  const openRef = useRef(open);
+  openRef.current = open;
+  const badgeRef = useRef(badge);
+  badgeRef.current = badge;
+  const readyRef = useRef(false);
+  const pendingRef = useRef<LogEntry[]>([]);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const prevOpenRef = useRef(false);
+
+  const appendEntry = useCallback((entry: LogEntry) => {
+    if (!readyRef.current) {
+      pendingRef.current.push(entry);
       return;
     }
+    setLogs((prev) => {
+      const next = [...prev, entry];
+      return next.length > MAX_LOG_ENTRIES ? next.slice(next.length - MAX_LOG_ENTRIES) : next;
+    });
+    if (entry.level === "DOWNLOAD") lastDownloadTsRef.current = Date.now();
+    if (!openRef.current || !pinnedRef.current || hoverRef.current) {
+      if (entry.level === "ERROR") setBadge("error");
+      else if (entry.level === "WARNING" && badgeRef.current !== "error") setBadge("warn");
+      if (!openRef.current) setUnread((u) => u + 1);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
 
     api.getLogs(300).then((res) => {
-      setLogs(
-        res.entries.map((e: { level: string; message: string }) => ({
-          level: e.level,
-          message: e.message,
-        }))
-      );
-    }).catch(() => {});
+      if (cancelled) return;
+      const entries = (res.entries as LogEntry[]).map((e) => ({
+        level: e.level,
+        message: e.message,
+        ts: e.ts,
+        name: e.name,
+        pct: e.pct,
+      }));
+      setLogs(entries.slice(-MAX_LOG_ENTRIES));
+      for (const e of pendingRef.current) appendEntry(e);
+      pendingRef.current = [];
+      readyRef.current = true;
+    }).catch(() => {
+      readyRef.current = true;
+      for (const e of pendingRef.current) appendEntry(e);
+      pendingRef.current = [];
+    });
 
-    const evtSource = new EventSource(`${BASE}/api/logs/stream`);
-    evtRef.current = evtSource;
-
-    evtSource.onmessage = (ev) => {
+    const handle = connectSse(`${BASE}/api/logs/stream`, (data) => {
       try {
-        const entry: LogEntry = JSON.parse(ev.data);
-        setLogs((prev) => {
-          const next = [...prev, entry];
-          return next.length > MAX_LOG_ENTRIES ? next.slice(next.length - MAX_LOG_ENTRIES) : next;
+        appendEntry(JSON.parse(data));
+      } catch {}
+    }, setConnected);
+
+    return () => {
+      cancelled = true;
+      handle.close();
+    };
+  }, [appendEntry]);
+
+  useEffect(() => {
+    if (!open) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const forceFollow = Date.now() - lastDownloadTsRef.current < 1500;
+    if ((pinnedRef.current && !hoverRef.current) || forceFollow) {
+      el.scrollTop = el.scrollHeight;
+      pinnedRef.current = true;
+      setShowJump(false);
+    } else {
+      setShowJump(true);
+    }
+  }, [logs, open]);
+
+  useEffect(() => {
+    if (open && !prevOpenRef.current) {
+      setUnread(0);
+      setBadge(null);
+      const el = scrollRef.current;
+      if (el) {
+        const raf = requestAnimationFrame(() => {
+          const max = el.scrollHeight - el.clientHeight;
+          if (savedScrollRatio < 0.97 && max > 0) {
+            el.scrollTop = savedScrollRatio * max;
+            pinnedRef.current = false;
+            setShowJump(true);
+          } else {
+            el.scrollTop = el.scrollHeight;
+            pinnedRef.current = true;
+            setShowJump(false);
+          }
         });
-      } catch {}
-    };
-
-    evtSource.onerror = () => {
-      evtSource.close();
-      evtRef.current = null;
-    };
-
-    return () => {
-      evtSource.close();
-      evtRef.current = null;
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) {
-      if (modelEvtRef.current) {
-        modelEvtRef.current.close();
-        modelEvtRef.current = null;
+        prevOpenRef.current = true;
+        return () => cancelAnimationFrame(raf);
       }
-      return;
+    } else if (!open && prevOpenRef.current) {
+      prevOpenRef.current = false;
     }
-
-    api.getModels().then((res) => {
-      setModelStatuses(res.models);
-    }).catch(() => {});
-
-    const evtSource = new EventSource(`${BASE}/api/models/stream`);
-    modelEvtRef.current = evtSource;
-
-    evtSource.onmessage = (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        if (data.models) {
-          setModelStatuses(data.models);
-        }
-      } catch {}
-    };
-
-    evtSource.onerror = () => {
-      evtSource.close();
-      modelEvtRef.current = null;
-    };
-
-    return () => {
-      evtSource.close();
-      modelEvtRef.current = null;
-      setModelStatuses([]);
-    };
-  }, [open]);
+  }, [open, savedScrollRatio]);
 
   useEffect(() => {
-    if (isAtBottomRef.current && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [logs]);
+    if (open) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const max = el.scrollHeight - el.clientHeight;
+    setSavedScrollRatio(max > 0 ? el.scrollTop / max : 1);
+  }, [open, setSavedScrollRatio]);
 
   const handleScroll = useCallback(() => {
-    if (!scrollRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
-    isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 30;
+    const el = scrollRef.current;
+    if (!el) return;
+    const { scrollTop, scrollHeight, clientHeight } = el;
+    const atBottom = scrollHeight - scrollTop - clientHeight < 30;
+    pinnedRef.current = atBottom;
+    setShowJump(!atBottom);
   }, []);
 
   useEffect(() => {
@@ -162,16 +199,42 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
     };
   }, []);
 
+  const progressRows = useMemo(() => {
+    const map = new Map<string, { pct: number; message: string }>();
+    for (const l of logs) {
+      if (l.level === "DOWNLOAD" && l.name) map.set(l.name, { pct: l.pct ?? 0, message: l.message });
+    }
+    return [...map.entries()];
+  }, [logs]);
+
   const filteredLogs = useMemo(() => {
     const minRank = FILTER_OPTIONS.find((f) => f.key === filter)?.minRank ?? -Infinity;
+    const q = search.trim().toLowerCase();
     return logs.filter((e) => {
+      if (e.level === "DOWNLOAD") return false;
       const rank = LEVEL_RANK[e.level] ?? 0;
-      return rank >= minRank;
+      if (rank < minRank) return false;
+      if (q && !e.message.toLowerCase().includes(q)) return false;
+      return true;
     });
-  }, [logs, filter]);
+  }, [logs, filter, search]);
+
+  const jumpToLatest = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    hoverRef.current = false;
+    el.scrollTop = el.scrollHeight;
+    pinnedRef.current = true;
+    setShowJump(false);
+  }, []);
 
   const handleCopy = useCallback(async () => {
-    const text = filteredLogs.map((l) => `[${l.level}] ${l.message}`).join("\n");
+    const lines = filteredLogs.map((l) => `[${l.ts ?? "--:--:--"}] [${l.level}] ${l.message}`);
+    if (progressRows.length > 0) {
+      lines.push("", "[downloads]");
+      for (const [name, p] of progressRows) lines.push(`  ${name}: ${p.pct}%`);
+    }
+    const text = lines.join("\n");
     let ok = false;
     if (navigator.clipboard?.writeText && window.isSecureContext) {
       try {
@@ -202,14 +265,16 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
     setCopied(ok);
     if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
     copiedTimerRef.current = setTimeout(() => setCopied(false), 1500);
-  }, [filteredLogs]);
+  }, [filteredLogs, progressRows]);
+
+  const downloadedModels = models.filter((m) => m.downloaded).length;
 
   return (
     <div className="relative z-[85]">
       <button
         onClick={() => setOpen(!open)}
         className={cn(
-          "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-medium font-sans transition-all duration-200 cursor-pointer select-none",
+          "relative inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-medium font-sans transition-all duration-200 cursor-pointer select-none",
           "border hover:scale-105 active:scale-95 grain-bg",
           open
             ? "bg-orange-500/15 border-orange-500/30 text-orange-300 shadow-[0_0_12px_rgba(184,92,42,0.15)] grain-bg-strong"
@@ -223,13 +288,52 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
           <polyline points="4,17 10,11 4,5" /><line x1="12" y1="19" x2="20" y2="19" />
         </svg>
         Logs
+        {!open && unread > 0 && (
+          <span className="absolute -top-1.5 -right-1.5 min-w-[14px] h-[14px] px-0.5 flex items-center justify-center rounded-full bg-orange-500 text-[8px] font-bold text-white tabular-nums">
+            {unread > 99 ? "99+" : unread}
+          </span>
+        )}
+        {!open && unread === 0 && badge && (
+          <span
+            className={cn(
+              "absolute -top-1 -right-1 w-2 h-2 rounded-full",
+              badge === "error" ? "bg-red-500 animate-pulse" : "bg-yellow-400"
+            )}
+          />
+        )}
+        {!open && !badge && !connected && (
+          <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-neutral-600" />
+        )}
       </button>
 
       {open && (
         <div className="absolute top-full right-0 mt-3 w-[380px] bg-[#0a0a0a]/95 border border-neutral-800/80 rounded-xl shadow-2xl shadow-black/60 backdrop-blur-xl overflow-hidden animate-drop-in z-50 grain-bg">
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-neutral-800/60">
-            <span className="text-[10px] text-neutral-500 uppercase tracking-wider font-sans">Console</span>
+            <span className="text-[10px] text-neutral-500 uppercase tracking-wider font-sans">
+              Console
+              <span className={cn("inline-block w-1.5 h-1.5 rounded-full ml-1.5 align-middle", connected ? "bg-green-400/70" : "bg-neutral-600")} />
+            </span>
             <div className="flex items-center gap-2">
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search..."
+                className="w-[90px] h-5 px-1.5 bg-neutral-900/70 border border-neutral-800/60 rounded text-[10px] font-mono text-neutral-300 placeholder:text-neutral-600 outline-none focus:border-neutral-600 transition-colors"
+              />
+              <button
+                onClick={() => setShowTime(!showTime)}
+                title="Toggle timestamps"
+                className={cn(
+                  "flex items-center text-[10px] font-mono px-1.5 py-0.5 rounded border transition-all duration-150 cursor-pointer hover:scale-105 active:scale-95",
+                  showTime
+                    ? "text-orange-400 border-orange-500/30 bg-orange-500/10"
+                    : "text-neutral-500 border-transparent hover:text-neutral-300"
+                )}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <circle cx="12" cy="12" r="9" /><polyline points="12,7 12,12 15.5,13.5" />
+                </svg>
+              </button>
               <div ref={dropdownRef} className="relative">
                 <button
                   onClick={() => setFilterOpen(!filterOpen)}
@@ -273,11 +377,11 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                     : "text-neutral-500 hover:text-neutral-300 hover:bg-neutral-800/60"
                 )}
               >
-                {copied ? "Copied!" : "Copy logs"}
+                {copied ? "Copied!" : "Copy"}
               </button>
             </div>
           </div>
-          {modelStatuses.length > 0 && (
+          {models.length > 0 && (
             <div className="border-b border-neutral-800/60">
               <button
                 onClick={() => setModelsOpen(!modelsOpen)}
@@ -293,16 +397,13 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                 </svg>
                 <span className="text-neutral-600 tracking-wider uppercase font-sans">Models</span>
                 <span className="ml-auto text-neutral-600">
-                  {modelStatuses.filter((m) => m.downloaded).length}/{modelStatuses.length}
+                  {downloadedModels}/{models.length}
                 </span>
               </button>
               {modelsOpen && (
                 <div className="px-3 pb-2 space-y-1">
-                  {modelStatuses.map((m) => (
-                    <div
-                      key={m.name}
-                      className="flex items-center gap-2 text-[10px] font-mono"
-                    >
+                  {models.map((m) => (
+                    <div key={m.name} className="flex items-center gap-2 text-[10px] font-mono">
                       <span className={cn(
                         "w-1.5 h-1.5 rounded-full shrink-0",
                         m.loaded ? "bg-orange-400" : m.downloaded ? "bg-green-400" : "bg-neutral-600"
@@ -321,20 +422,56 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
               )}
             </div>
           )}
-          <div
-            ref={scrollRef}
-            onScroll={handleScroll}
-            className="overflow-y-auto custom-scrollbar px-3 py-2 h-64 font-mono text-[11px] leading-relaxed"
-          >
-            {filteredLogs.length === 0 ? (
-              <p className="text-neutral-600 text-center py-4">No logs yet</p>
-            ) : (
-              filteredLogs.map((entry, i) => (
-                <div key={i} className="flex items-start gap-2 py-[3px] hover:bg-neutral-900/40 rounded px-1 -mx-1">
-                  <span className={cn("w-1.5 h-1.5 rounded-full mt-[5px] shrink-0", LEVEL_DOT[entry.level] || "bg-neutral-600")} />
-                  <span className="text-neutral-300 break-all">{entry.message}</span>
+          {progressRows.length > 0 && (
+            <div className="border-b border-neutral-800/60 px-3 py-2 space-y-1.5">
+              {progressRows.map(([name, p]) => (
+                <div key={name}>
+                  <div className="flex items-center justify-between text-[9px] font-mono text-blue-300/80 mb-0.5">
+                    <span className="truncate mr-2">{name}</span>
+                    <span className="tabular-nums">{p.pct}%</span>
+                  </div>
+                  <div className="h-1 rounded-full bg-neutral-800 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-[width] duration-300"
+                      style={{ width: `${p.pct}%` }}
+                    />
+                  </div>
                 </div>
-              ))
+              ))}
+            </div>
+          )}
+          <div className="relative">
+            <div
+              ref={scrollRef}
+              onScroll={handleScroll}
+              onMouseEnter={() => { hoverRef.current = true; }}
+              onMouseLeave={() => { hoverRef.current = false; }}
+              className="overflow-y-auto custom-scrollbar px-3 py-2 h-64 font-mono text-[11px] leading-relaxed"
+            >
+              {filteredLogs.length === 0 ? (
+                <p className="text-neutral-600 text-center py-4">No logs yet</p>
+              ) : (
+                filteredLogs.map((entry, i) => (
+                  <div key={i} className="flex items-start gap-2 py-[3px] hover:bg-neutral-900/40 rounded px-1 -mx-1">
+                    {showTime && entry.ts && (
+                      <span className="text-neutral-600 tabular-nums shrink-0">{entry.ts}</span>
+                    )}
+                    <span className={cn("w-1.5 h-1.5 rounded-full mt-[5px] shrink-0", LEVEL_DOT[entry.level] || "bg-neutral-600")} />
+                    <span className="text-neutral-300 break-all">{entry.message}</span>
+                  </div>
+                ))
+              )}
+            </div>
+            {showJump && (
+              <button
+                onClick={jumpToLatest}
+                className="absolute bottom-2 right-3 z-10 h-6 px-2.5 rounded-lg text-[10px] font-sans font-medium border border-orange-400/40 bg-orange-500 hover:bg-orange-400 text-white shadow-[0_0_12px_rgba(184,92,42,0.35)] grain-bg grain-bg-strong transition-all duration-200 hover:scale-105 active:scale-95 cursor-pointer select-none flex items-center gap-1"
+              >
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                  <line x1="12" y1="5" x2="12" y2="19" /><polyline points="19,12 12,19 5,12" />
+                </svg>
+                Latest
+              </button>
             )}
           </div>
         </div>

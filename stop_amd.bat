@@ -16,24 +16,18 @@ echo(
 
 call :section "[ 1 / 2 ]  Stopping backend"
 
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*backend_amd_gpu.main:app*') { exit 0 } } catch {}; exit 1" >nul 2>&1
-    if not errorlevel 1 (
-        taskkill /F /PID %%p >nul 2>&1 && echo   [ OK ]  backend killed (PID %%p^)
-    )
-)
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and $p.CommandLine -like '*backend_amd_gpu.main:app*') { Stop-Process -Id $_ -Force; Write-Host '  [ OK ]  backend killed' } }; exit 0"
 
 call :section "[ 2 / 2 ]  Stopping frontend"
 
 call :is_own_web "%ROOT%frontend\node_modules" "%AMD_DIR%\web\node_modules"
 if not errorlevel 1 (
-    for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":3000 " ^| findstr "LISTENING"') do (
-        taskkill /F /PID %%p >nul 2>&1 && echo   [ OK ]  frontend killed (PID %%p^)
-    )
+    powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and ($p.CommandLine -like '*run dev*' -or $p.CommandLine -like '*vite*')) { Stop-Process -Id $_ -Force; Write-Host '  [ OK ]  frontend killed' } }; exit 0"
 )
 
 echo   [ OK ]  All Spectra Segment processes stopped.
 echo(
+pause >nul
 endlocal
 exit /b 0
 

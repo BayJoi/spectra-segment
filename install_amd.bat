@@ -38,59 +38,7 @@ if errorlevel 1 (
     echo           System ROCm SDK is only needed for advanced ROCm development.
 )
 
-call :section "[ 2 / 8 ]  GPU detection"
-set "AMD_GFX="
-
-if defined AMD_GFX_OVERRIDE set "AMD_GFX=%AMD_GFX_OVERRIDE%"& echo   [INFO]  Using user-specified arch: !AMD_GFX!& goto :gpu_detected
-
-py -3 "%AMD_DIR%\detect_amd_gpu.py" >"%AMD_DIR%\.gpu_arch.txt" 2>nul
-if exist "%AMD_DIR%\.gpu_arch.txt" for /f "usebackq delims=" %%a in ("%AMD_DIR%\.gpu_arch.txt") do if not defined AMD_GFX set "AMD_GFX=%%a"
-del "%AMD_DIR%\.gpu_arch.txt" 2>nul
-if defined AMD_GFX goto :gpu_detected
-
-python "%AMD_DIR%\detect_amd_gpu.py" >"%AMD_DIR%\.gpu_arch.txt" 2>nul
-if exist "%AMD_DIR%\.gpu_arch.txt" for /f "usebackq delims=" %%a in ("%AMD_DIR%\.gpu_arch.txt") do if not defined AMD_GFX set "AMD_GFX=%%a"
-del "%AMD_DIR%\.gpu_arch.txt" 2>nul
-if defined AMD_GFX goto :gpu_detected
-
-set "DEV_ID="
-powershell -NoProfile -Command "try{((Get-WmiObject Win32_VideoController|?{$_.PNPDeviceID -match 'VEN_1002'}).PNPDeviceID -replace '.*DEV_([0-9A-F]{4}).*','$1')}catch{}" >"%AMD_DIR%\.gpu_id.txt" 2>nul
-if exist "%AMD_DIR%\.gpu_id.txt" for /f "usebackq delims=" %%a in ("%AMD_DIR%\.gpu_id.txt") do set "DEV_ID=%%a"
-del "%AMD_DIR%\.gpu_id.txt" 2>nul
-if defined DEV_ID if /i "!DEV_ID!"=="744c" set "AMD_GFX=gfx1100"
-if defined DEV_ID if /i "!DEV_ID!"=="73bf" set "AMD_GFX=gfx1030"
-if defined DEV_ID if /i "!DEV_ID!"=="73ff" set "AMD_GFX=gfx1032"
-if defined DEV_ID if /i "!DEV_ID!"=="731f" set "AMD_GFX=gfx1010"
-if defined DEV_ID if /i "!DEV_ID!"=="1681" set "AMD_GFX=gfx1035"
-if defined DEV_ID if /i "!DEV_ID!"=="163f" set "AMD_GFX=gfx1033"
-if defined DEV_ID if /i "!DEV_ID!"=="15bf" set "AMD_GFX=gfx1103"
-if defined DEV_ID if /i "!DEV_ID!"=="150e" set "AMD_GFX=gfx1150"
-if defined DEV_ID if /i "!DEV_ID!"=="7590" set "AMD_GFX=gfx1200"
-if defined DEV_ID if /i "!DEV_ID!"=="7550" set "AMD_GFX=gfx1201"
-if defined AMD_GFX echo   [INFO]  Matched device maps to !AMD_GFX!& goto :gpu_detected
-
-echo   [FAIL]  GPU detection failed.
-echo           Set AMD_GFX_OVERRIDE=gfxXXXX to skip detection, e.g.:
-echo             set AMD_GFX_OVERRIDE=gfx1100 ^&^& install_amd.bat
-echo           Common values: gfx1100 (RDNA3), gfx1030 (RDNA2), gfx1010 (RDNA1)
-pause
-exit /b 1
-
-:gpu_detected
-echo   [ OK ]  AMD GPU arch: !AMD_GFX!
-
-set "TORCH_INDEX_URL=https://rocm.nightlies.amd.com/whl-multi-arch/"
-set "ROCM_SDK_PKG=rocm-sdk-devel"
-if "!AMD_GFX!"=="gfx942" (
-    set "TORCH_INDEX_URL=https://rocm.nightlies.amd.com/v2-staging/gfx942-dcgpu/"
-    set "ROCM_SDK_PKG=rocm[devel,libraries]"
-)
-if "!AMD_GFX!"=="gfx950" (
-    set "TORCH_INDEX_URL=https://rocm.nightlies.amd.com/v2-staging/gfx950-dcgpu/"
-    set "ROCM_SDK_PKG=rocm[devel,libraries]"
-)
-
-call :section "[ 3 / 8 ]  Python + uv"
+call :section "[ 2 / 8 ]  Python + uv"
 set "UV_PYTHON_INSTALL_DIR=%ROOT%tools\python"
 set "UV_PYTHON_INSTALL_BIN=0"
 if exist "%UV_EXE%" (
@@ -120,7 +68,7 @@ if exist "%UV_EXE%" (
     echo   [ OK ]  uv downloaded to %ROOT%tools\uv-amd
 )
 
-call :section "[ 4 / 8 ]  Virtual environment"
+call :section "[ 3 / 8 ]  Virtual environment"
 echo   [INFO]  Creating Python 3.12.13 virtual environment...
 "%UV_EXE%" python install 3.12.13 --cache-dir "%UV_CACHE%" 2>&1
 if errorlevel 1 (
@@ -137,6 +85,46 @@ if errorlevel 1 (
 )
 echo   [ OK ]  venv created at %VENV_DIR%
 
+call :section "[ 4 / 8 ]  GPU detection"
+set "AMD_GFX="
+
+if defined AMD_GFX_OVERRIDE set "AMD_GFX=%AMD_GFX_OVERRIDE%"& echo   [INFO]  Using user-specified arch: !AMD_GFX!& goto :gpu_detected
+
+"%VENV_DIR%\Scripts\python.exe" "%AMD_DIR%\detect_amd_gpu.py" >"%AMD_DIR%\.gpu_arch.txt" 2>nul
+if exist "%AMD_DIR%\.gpu_arch.txt" for /f "usebackq delims=" %%a in ("%AMD_DIR%\.gpu_arch.txt") do if not defined AMD_GFX set "AMD_GFX=%%a"
+del "%AMD_DIR%\.gpu_arch.txt" 2>nul
+if defined AMD_GFX goto :gpu_detected
+
+set "DEV_ID="
+powershell -NoProfile -Command "try{((Get-CimInstance Win32_VideoController|?{$_.PNPDeviceID -match 'VEN_1002'}).PNPDeviceID -replace '.*DEV_([0-9A-F]{4}).*','$1')}catch{}" >"%AMD_DIR%\.gpu_id.txt" 2>nul
+if exist "%AMD_DIR%\.gpu_id.txt" for /f "usebackq delims=" %%a in ("%AMD_DIR%\.gpu_id.txt") do set "DEV_ID=%%a"
+del "%AMD_DIR%\.gpu_id.txt" 2>nul
+if defined DEV_ID if /i "!DEV_ID!"=="744c" set "AMD_GFX=gfx1100"
+if defined DEV_ID if /i "!DEV_ID!"=="73bf" set "AMD_GFX=gfx1030"
+if defined DEV_ID if /i "!DEV_ID!"=="73ff" set "AMD_GFX=gfx1032"
+if defined DEV_ID if /i "!DEV_ID!"=="731f" set "AMD_GFX=gfx1010"
+if defined DEV_ID if /i "!DEV_ID!"=="1681" set "AMD_GFX=gfx1035"
+if defined DEV_ID if /i "!DEV_ID!"=="163f" set "AMD_GFX=gfx1033"
+if defined DEV_ID if /i "!DEV_ID!"=="15bf" set "AMD_GFX=gfx1103"
+if defined DEV_ID if /i "!DEV_ID!"=="150e" set "AMD_GFX=gfx1150"
+if defined DEV_ID if /i "!DEV_ID!"=="7590" set "AMD_GFX=gfx1200"
+if defined DEV_ID if /i "!DEV_ID!"=="7550" set "AMD_GFX=gfx1201"
+if defined AMD_GFX echo   [INFO]  Matched device maps to !AMD_GFX!& goto :gpu_detected
+
+echo   [FAIL]  GPU detection failed.
+echo           Set AMD_GFX_OVERRIDE=gfxXXXX to skip detection, e.g.:
+echo             set AMD_GFX_OVERRIDE=gfx1100 ^&^& install_amd.bat
+echo           Supported: gfx1010-1012 ^(RDNA1^), gfx1030-1036 ^(RDNA2^),
+echo                      gfx1100-1103 ^(RDNA3^), gfx1150-1153 ^(RDNA3.5^),
+echo                      gfx1200-1201 ^(RDNA4^)
+pause
+exit /b 1
+
+:gpu_detected
+echo   [ OK ]  AMD GPU arch: !AMD_GFX!
+set "TORCH_INDEX_URL=https://rocm.nightlies.amd.com/whl-multi-arch/"
+set "ROCM_SDK_PKG=rocm-sdk-devel"
+
 call :section "[ 5 / 8 ]  ROCm SDK + PyTorch"
 echo   [INFO]  Installing ROCm SDK (%ROCM_SDK_PKG%)...
 "%UV_EXE%" pip install --python "%VENV_DIR%" "%ROCM_SDK_PKG%" --index-url "%TORCH_INDEX_URL%" --cache-dir "%UV_CACHE%" 2>&1
@@ -144,17 +132,9 @@ if errorlevel 1 (
     echo   [WARN]  ROCm SDK pip package install failed - continuing without it.
 )
 
-set "USE_DEVICE_EXTRAS=1"
-if "!AMD_GFX!"=="gfx942" set "USE_DEVICE_EXTRAS="
-if "!AMD_GFX!"=="gfx950" set "USE_DEVICE_EXTRAS="
-
-set "TORCH_PKG=torch"
-set "TORCHVISION_PKG=torchvision"
+set "TORCH_PKG=torch[device-!AMD_GFX!]"
+set "TORCHVISION_PKG=torchvision[device-!AMD_GFX!]"
 set "TORCHAUDIO_PKG=torchaudio"
-if defined USE_DEVICE_EXTRAS (
-    set "TORCH_PKG=torch[device-!AMD_GFX!]"
-    set "TORCHVISION_PKG=torchvision[device-!AMD_GFX!]"
-)
 
 echo   [INFO]  Installing ROCm PyTorch (this may take a while)...
 "%UV_EXE%" pip install --python "%VENV_DIR%" ^

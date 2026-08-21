@@ -42,14 +42,24 @@ async function toPredictResponse(r: RawPredictResponse): Promise<PredictResponse
 }
 
 let _token: string | null = null;
+let _tokenPromise: Promise<string> | null = null;
 
-async function getToken(): Promise<string> {
-  if (_token) return _token;
-  const res = await fetch(`${BASE}/api/token`);
-  if (!res.ok) throw new Error("Failed to get local token");
-  const data = await res.json();
-  _token = data.token;
-  return _token!;
+function getToken(): Promise<string> {
+  if (_token) return Promise.resolve(_token);
+  _tokenPromise ??= fetch(`${BASE}/api/token`)
+    .then((res) => {
+      if (!res.ok) throw new Error("Failed to get local token");
+      return res.json() as Promise<{ token: string }>;
+    })
+    .then((data) => {
+      _token = data.token;
+      return _token!;
+    })
+    .catch((err) => {
+      _tokenPromise = null;
+      throw err;
+    });
+  return _tokenPromise;
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit, asBlob?: boolean): Promise<T> {
@@ -62,6 +72,7 @@ async function apiFetch<T>(path: string, init?: RequestInit, asBlob?: boolean): 
   let res = await doFetch(await getToken());
   if (res.status === 401) {
     _token = null;
+    _tokenPromise = null;
     res = await doFetch(await getToken());
   }
 
@@ -178,19 +189,19 @@ export const api = {
   sam3Undo: (sessionId: string) =>
     apiFetch<RawSam3PromptResponse>(`/api/sessions/${sessionId}/sam3-undo`, {
       method: "POST",
-    }).then(async (r): Promise<Sam3PromptResponse> => ({ masks: await decodeMasks(r.masks), scores: r.scores, bboxes: r.bboxes })),
+    }).then((r): Sam3PromptResponse => ({ masks: [], scores: r.scores, bboxes: r.bboxes })),
 
   sam3Redo: (sessionId: string) =>
     apiFetch<RawSam3PromptResponse>(`/api/sessions/${sessionId}/sam3-redo`, {
       method: "POST",
-    }).then(async (r): Promise<Sam3PromptResponse> => ({ masks: await decodeMasks(r.masks), scores: r.scores, bboxes: r.bboxes })),
+    }).then((r): Sam3PromptResponse => ({ masks: [], scores: r.scores, bboxes: r.bboxes })),
 
   sam3RemoveInstance: (sessionId: string, promptIndex: number, instanceIndex: number) =>
     apiFetch<RawSam3PromptResponse>(`/api/sessions/${sessionId}/sam3-remove-instance`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt_index: promptIndex, instance_index: instanceIndex }),
-    }).then(async (r): Promise<Sam3PromptResponse> => ({ masks: await decodeMasks(r.masks), scores: r.scores, bboxes: r.bboxes })),
+    }).then((r): Sam3PromptResponse => ({ masks: [], scores: r.scores, bboxes: r.bboxes })),
 
   setSam3Settings: (params: { keep_loaded?: boolean; encode_dim?: number }) =>
     apiFetch<{ keep_loaded: boolean; encode_dim: number }>("/api/settings/sam3", {

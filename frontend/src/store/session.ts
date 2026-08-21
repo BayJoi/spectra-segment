@@ -24,3 +24,16 @@ export const objectRedoCountsAtom = atom<Record<number, number>>({});
 export const brushPredictInFlightAtom = atom(0);
 
 export const sam3ReadyAtom = atom(false);
+
+export interface ModelInfo {
+  name: string;
+  display_name: string;
+  type: string;
+  detector_type?: string;
+  downloaded: boolean;
+  loaded: boolean;
+  tier: string;
+  perf: string;
+}
+
+export const modelsAtom = atom<ModelInfo[]>([]);

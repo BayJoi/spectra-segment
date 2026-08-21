@@ -88,9 +88,20 @@ export function App() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && modeSwitchTarget) {
+      if (e.key === "Escape") {
         e.preventDefault();
-        setModeSwitchTarget(null);
+        if (modeSwitchTarget) {
+          setModeSwitchTarget(null);
+          return;
+        }
+        const escTarget = e.target as HTMLElement;
+        if (escTarget.tagName === "INPUT" || escTarget.tagName === "TEXTAREA") escTarget.blur();
+        if (!hasImage || imageEncoding) return;
+        if (modeDialogOpen) setModeDialogOpen(false);
+        else if (endSessionOpen) setEndSessionOpen(false);
+        else if (settingsOpen) setSettingsOpen(false);
+        else if (exportOpen) setExportOpen(false);
+        else setSelectedDetection(null);
         return;
       }
       if (!hasImage) return;

@@ -129,6 +129,8 @@ export function useSam3() {
   const undo = useCallback(async () => {
     if (!sessionId || prompting || prompts.length === 0) return;
     const last = prompts[prompts.length - 1];
+    const prevRedo = redoStack;
+    const prevSelected = selectedInstance;
     const next = prompts.slice(0, -1);
     setPrompts(next);
     setRedoStack([...redoStack, last]);
@@ -138,12 +140,18 @@ export function useSam3() {
       await api.sam3Undo(sessionId);
     } catch {
       console.error("SAM3 undo failed");
+      setPrompts(prompts);
+      setRedoStack(prevRedo);
+      syncFromPrompts(prompts);
+      setSelectedInstance(prevSelected);
     }
-  }, [sessionId, prompting, prompts, redoStack, setPrompts, setRedoStack, syncFromPrompts, setSelectedInstance]);
+  }, [sessionId, prompting, prompts, redoStack, selectedInstance, setPrompts, setRedoStack, syncFromPrompts, setSelectedInstance]);
 
   const redo = useCallback(async () => {
     if (!sessionId || prompting || redoStack.length === 0) return;
     const last = redoStack[redoStack.length - 1];
+    const prevPrompts = prompts;
+    const prevRedo = redoStack;
     const next = [...prompts, last];
     setRedoStack(redoStack.slice(0, -1));
     setPrompts(next);
@@ -152,6 +160,9 @@ export function useSam3() {
       await api.sam3Redo(sessionId);
     } catch {
       console.error("SAM3 redo failed");
+      setPrompts(prevPrompts);
+      setRedoStack(prevRedo);
+      syncFromPrompts(prevPrompts);
     }
   }, [sessionId, prompting, prompts, redoStack, setPrompts, setRedoStack, syncFromPrompts]);
 

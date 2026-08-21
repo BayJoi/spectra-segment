@@ -114,7 +114,7 @@ class SAM3Backend(SegmentationBackend):
                     else:
                         raise
                 self._model_path = model_path
-                LOGGER.info("Loaded %s on %s", SAM3_MODEL_DISPLAY, self._device)
+                LOGGER.debug("Loaded %s on %s", SAM3_MODEL_DISPLAY, self._device)
             finally:
                 sys.stderr = _old_stderr
                 torch.load = _orig

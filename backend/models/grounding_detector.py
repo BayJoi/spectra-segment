@@ -206,7 +206,7 @@ def _load_florence_detector(hf_id: str, model_name: str, device: str, local_only
         except Exception as e:
             LOGGER.debug("Florence: pre-warm skipped (%s)", e)
 
-    LOGGER.info("Loaded Florence model: %s on %s (dtype=%s)", model_name, actual_device, dtype)
+    LOGGER.debug("Loaded Florence model: %s on %s (dtype=%s)", model_name, actual_device, dtype)
     return processor, model, actual_device
 
 
@@ -253,7 +253,7 @@ def _load_grounding_dino(hf_id: str, model_name: str, device: str, local_only: b
         except Exception as e:
             LOGGER.debug("GroundingDINO: pre-warm skipped (%s)", e)
 
-    LOGGER.info("Loaded Grounding DINO: %s on %s (dtype=%s)", model_name, actual_device, dtype)
+    LOGGER.debug("Loaded Grounding DINO: %s on %s (dtype=%s)", model_name, actual_device, dtype)
     return processor, model, actual_device
 
 
@@ -341,7 +341,7 @@ class GroundingDetector(DetectorBackend):
                 )
 
         self._model_name = model_name
-        LOGGER.info("Loaded grounding detector: %s (%s)", model_name, hf_id)
+        LOGGER.debug("Loaded grounding detector: %s (%s)", model_name, hf_id)
 
     def unload_model(self) -> None:
         self._processor = None

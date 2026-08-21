@@ -327,26 +327,37 @@ def gfx_override_value(gfx: str | None) -> str | None:
 
 def detect_amd_gpu() -> tuple[str | None, int]:
     _log("AMD GPU detection...")
-    gpus = _detect_wmic()
+    gpus = _detect_powershell()
     if not gpus:
-        _log("wmic failed, trying PowerShell...")
-        gpus = _detect_powershell()
+        _log("PowerShell query failed, trying wmic fallback...")
+        gpus = _detect_wmic()
     if not gpus:
         _log("No AMD GPU detected")
         return None, 0
     _log(f"Found {len(gpus)} AMD GPU(s)")
     for g in gpus:
         _log(f"  {g['name']}  [{g.get('pnp_id', '')}]")
+    best: tuple[int, dict[str, str], str, str] | None = None
     for g in gpus:
         gfx, arch, supported = _match_gpu(g)
-        if gfx and supported:
-            _log(f"Matched: {g['name']} -> {arch} ({gfx})")
-            vram = _match_vram(g)
-            if vram:
-                _log(f"VRAM (best-effort): {vram} MB")
-            return gfx, vram
         if gfx and not supported:
             _log(f"Unsupported GPU: {g['name']} ({arch})")
+            continue
+        if not gfx:
+            continue
+        m = re.search(r"DEV_([0-9A-Fa-f]{4})", g.get("pnp_id", ""))
+        score = (2 if m and m.group(1).lower() in PCI_DEV_TO_GFX else 0) + (
+            1 if ("rx " in g["name"].lower() or "pro " in g["name"].lower()) else 0
+        )
+        if best is None or score > best[0]:
+            best = (score, g, gfx, arch)
+    if best is not None:
+        _, g, gfx, arch = best
+        _log(f"Matched: {g['name']} -> {arch} ({gfx})")
+        vram = _match_vram(g)
+        if vram:
+            _log(f"VRAM (best-effort): {vram} MB")
+        return gfx, vram
     _log("No supported AMD GPU identified")
     return None, 0
 

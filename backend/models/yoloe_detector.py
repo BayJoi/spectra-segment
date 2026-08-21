@@ -133,7 +133,7 @@ class YOLEDetector(DetectorBackend):
 
         self._model_name = model_name
         self._current_classes = []
-        LOGGER.info("Loaded YOLOE detector: %s", model_name)
+        LOGGER.debug("Loaded YOLOE detector: %s", model_name)
 
     def unload_model(self) -> None:
         self._model = None

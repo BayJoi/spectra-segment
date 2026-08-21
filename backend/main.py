@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import time
 import posixpath
 import re
 import sys
@@ -104,6 +105,12 @@ _ANSI_ESC_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _ERASE_LINE_RE = re.compile(r"\[K")
 _BOX_DRAWING_RE = re.compile(r"\u2501|\u2500|\u2577")
 
+_DOWNLOAD_RES = (
+    re.compile(r"^(?P<name>[^:]{1,80}):\s+\S+\s+(?P<pct>\d{1,3})%\s+complete"),
+    re.compile(r"^(?P<name>[^:]{1,80}):\s+(?P<pct>\d{1,3})%\s+—"),
+    re.compile(r"^(?P<name>[^:]{1,80}):\s+(?P<pct>\d{1,3})%\|"),
+)
+
 
 def _clean_message(msg: str) -> str:
     msg = _ANSI_ESC_RE.sub("", msg)
@@ -123,7 +130,18 @@ class _BufferHandler(logging.Handler):
             msg = _clean_message(record.getMessage())
             if not msg:
                 return
-            entry = {"level": record.levelname, "message": msg}
+            entry = {
+                "level": record.levelname,
+                "message": msg,
+                "ts": time.strftime("%H:%M:%S"),
+            }
+            for rx in _DOWNLOAD_RES:
+                m = rx.match(msg)
+                if m and int(m.group("pct")) <= 100:
+                    entry["level"] = "DOWNLOAD"
+                    entry["name"] = m.group("name").strip()
+                    entry["pct"] = int(m.group("pct"))
+                    break
             _log_buffer.append(entry)
             loop = _get_main_loop()
             if loop is None or loop.is_closed():
@@ -141,7 +159,8 @@ class _BufferHandler(logging.Handler):
 
 
 _buf_handler = _BufferHandler()
-_buf_handler.setLevel(logging.DEBUG)
+_ui_level_name = os.environ.get("SPECTRA_UI_LOG_LEVEL", "INFO").upper()
+_buf_handler.setLevel(getattr(logging, _ui_level_name, logging.INFO))
 logging.root.addHandler(_buf_handler)
 
 manager: ModelManager | None = None
@@ -337,6 +356,13 @@ VRAM_OOM_DETAIL = (
     "Switch to a higher profile (or CPU mode) in the launcher "
     "or lower the SAM3 encode dimension."
 )
+
+_FLUSH_EVERY_REQUEST = os.environ.get("SPECTRA_FLUSH_EVERY_REQUEST", "") == "1"
+
+
+async def _maybe_flush_cache() -> None:
+    if _FLUSH_EVERY_REQUEST and _torch.cuda.is_available():
+        await asyncio.to_thread(_torch.cuda.empty_cache)
 
 
 @app.exception_handler(_torch.OutOfMemoryError)
@@ -887,8 +913,7 @@ async def run_prediction(session_id: str, req: StrokeRequest):
         LOGGER.exception("Prediction failed for session %s", session_id)
         raise HTTPException(400, "Invalid prediction request")
 
-    if _torch.cuda.is_available():
-        await asyncio.to_thread(_torch.cuda.empty_cache)
+    await _maybe_flush_cache()
     return _masks_to_predict_response(result)
 
 
@@ -908,8 +933,7 @@ async def segment_batch(session_id: str, req: SegmentBatchRequest):
     except Exception:
         LOGGER.exception("Batch segmentation failed for session %s", session_id)
         raise HTTPException(500, "Batch segmentation failed")
-    if _torch.cuda.is_available():
-        await asyncio.to_thread(_torch.cuda.empty_cache)
+    await _maybe_flush_cache()
     return {"masks": _masks_to_png_list(masks)}
 
 
@@ -964,8 +988,7 @@ async def sam3_prompt(session_id: str, req: Sam3PromptRequest):
         LOGGER.exception("SAM3 prompt failed for session %s (text=%r)", session_id, req.text)
         raise HTTPException(500, "SAM3 prompt failed")
 
-    if _torch.cuda.is_available():
-        await asyncio.to_thread(_torch.cuda.empty_cache)
+    await _maybe_flush_cache()
     return _masks_to_sam3_response(result)
 
 

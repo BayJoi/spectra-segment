@@ -6,9 +6,10 @@ import {
   layerIdCounterAtom,
   type Layer,
 } from "@/store/layers";
-import { masksAtom, objectMasksAtom, perDetectionMasksAtom } from "@/store/session";
+import { masksAtom, objectMasksAtom, perDetectionMasksAtom, objectUndoCountsAtom, objectRedoCountsAtom, sessionIdAtom } from "@/store/session";
 import { detectionsAtom, selectedDetectionAtom } from "@/store/detection";
 import type { PackedMask } from "@/lib/mask";
+import { api } from "@/lib/api";
 
 export function useLayers() {
   const [layers, setLayers] = useAtom(layersAtom);
@@ -19,6 +20,29 @@ export function useLayers() {
   const [, setPerDetectionMasks] = useAtom(perDetectionMasksAtom);
   const [, setDetections] = useAtom(detectionsAtom);
   const [, setSelectedDetection] = useAtom(selectedDetectionAtom);
+  const [sessionId] = useAtom(sessionIdAtom);
+  const [, setObjectUndoCounts] = useAtom(objectUndoCountsAtom);
+  const [, setObjectRedoCounts] = useAtom(objectRedoCountsAtom);
+
+  const clearServerBrushObjects = useCallback(
+    (oids: number[]) => {
+      if (!sessionId || oids.length === 0) return;
+      oids.forEach((oid) => {
+        api.clearObject(sessionId, oid).catch(() => {});
+      });
+      setObjectUndoCounts((prev) => {
+        const next = { ...prev };
+        oids.forEach((oid) => delete next[oid]);
+        return next;
+      });
+      setObjectRedoCounts((prev) => {
+        const next = { ...prev };
+        oids.forEach((oid) => delete next[oid]);
+        return next;
+      });
+    },
+    [sessionId, setObjectUndoCounts, setObjectRedoCounts]
+  );
 
   const addLayer = useCallback(
     (layer: Omit<Layer, "id" | "createdAt">) => {
@@ -71,13 +95,19 @@ export function useLayers() {
         if (!remainingBrush) {
           setMasks([]);
           setObjectMasks({});
+          clearServerBrushObjects(
+            layers.filter((l) => l.type === "brush").map((l) => l.objectId)
+          );
         }
       }
     },
-    [layers, setLayers, setSelectedLayers, setMasks, setObjectMasks, setPerDetectionMasks, setDetections, setSelectedDetection]
+    [layers, setLayers, setSelectedLayers, setMasks, setObjectMasks, setPerDetectionMasks, setDetections, setSelectedDetection, clearServerBrushObjects]
   );
 
   const clearAllLayers = useCallback(() => {
+    clearServerBrushObjects(
+      layers.filter((l) => l.type === "brush").map((l) => l.objectId)
+    );
     setLayers([]);
     setSelectedLayers(new Set<string>());
     setMasks([]);
@@ -85,7 +115,7 @@ export function useLayers() {
     setPerDetectionMasks({});
     setDetections([]);
     setSelectedDetection(null);
-  }, [setLayers, setSelectedLayers, setMasks, setObjectMasks, setPerDetectionMasks, setDetections, setSelectedDetection]);
+  }, [layers, setLayers, setSelectedLayers, setMasks, setObjectMasks, setPerDetectionMasks, setDetections, setSelectedDetection, clearServerBrushObjects]);
 
   const selectLayer = useCallback(
     (id: string, ctrlKey: boolean) => {
@@ -104,6 +134,25 @@ export function useLayers() {
     [setSelectedLayers]
   );
 
+  const syncDetectionLayers = useCallback(
+    (dets: { label: string }[]) => {
+      const base = layers.filter((l) => l.type !== "detection");
+      let counter = layerIdCounter;
+      const detLayers: Layer[] = dets.map((d, i) => ({
+        id: `layer-${++counter}`,
+        type: "detection",
+        label: `#${i + 1} ${d.label}`,
+        preview: null,
+        objectId: 0,
+        detectionIndex: i,
+        createdAt: Date.now(),
+      }));
+      setLayerIdCounter(counter);
+      setLayers([...base, ...detLayers]);
+    },
+    [layers, layerIdCounter, setLayers, setLayerIdCounter]
+  );
+
   return {
     layers,
     selectedLayers,
@@ -111,5 +160,6 @@ export function useLayers() {
     removeLayer,
     clearAllLayers,
     selectLayer,
+    syncDetectionLayers,
   };
 }

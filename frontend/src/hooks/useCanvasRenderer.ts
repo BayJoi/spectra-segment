@@ -420,8 +420,8 @@ export function useCanvasRenderer(
 
     const imgCanvas = refs.imageCanvasRef.current;
     if (imgCanvas) {
-      imgCanvas.width = canvasState.canvasWidth;
-      imgCanvas.height = canvasState.canvasHeight;
+      if (imgCanvas.width !== canvasState.canvasWidth) imgCanvas.width = canvasState.canvasWidth;
+      if (imgCanvas.height !== canvasState.canvasHeight) imgCanvas.height = canvasState.canvasHeight;
       const ctx = imgCanvas.getContext("2d")!;
       ctx.clearRect(0, 0, canvasState.canvasWidth, canvasState.canvasHeight);
 
@@ -451,8 +451,10 @@ export function useCanvasRenderer(
 
     for (const ref of [refs.drawCanvasRef, refs.maskCanvasRef, refs.detectCanvasRef]) {
       if (ref.current) {
-        ref.current.width = canvasState.canvasWidth;
-        ref.current.height = canvasState.canvasHeight;
+        if (ref.current.width !== canvasState.canvasWidth) ref.current.width = canvasState.canvasWidth;
+        if (ref.current.height !== canvasState.canvasHeight) ref.current.height = canvasState.canvasHeight;
+        const ctx = ref.current.getContext("2d");
+        ctx?.clearRect(0, 0, ref.current.width, ref.current.height);
       }
     }
 

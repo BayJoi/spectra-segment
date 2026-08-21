@@ -66,19 +66,17 @@ if !errorlevel! neq 0 (
 )
 
 call :section "[ 4 / 5 ]  Starting backend"
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*main:app*') { exit 0 } } catch {}; exit 1" >nul 2>&1
-    if not errorlevel 1 taskkill /F /PID %%p >nul 2>&1
-)
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":3000 " ^| findstr "LISTENING"') do (
-    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*run dev*' -or $c.CommandLine -like '*vite*') { exit 0 } } catch {}; exit 1" >nul 2>&1
-    if not errorlevel 1 taskkill /F /PID %%p >nul 2>&1
-)
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and $p.CommandLine -like '*main:app*') { Stop-Process -Id $_ -Force } }; exit 0"
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and ($p.CommandLine -like '*run dev*' -or $p.CommandLine -like '*vite*')) { Stop-Process -Id $_ -Force } }; exit 0"
 if exist "%PIDFILE%" del "%PIDFILE%" >nul 2>&1
 if not exist "%ROOT%backend\logs" mkdir "%ROOT%backend\logs"
 start /b cmd /c ""%ROOT%backend\run.cmd" > "%ROOT%backend\backend_launch.log" 2>&1"
 echo   [ OK ]  backend started (port 8000)
 echo   [WAIT]  Waiting for backend at http://127.0.0.1:8000/health ...
+
+set "CURL_OK="
+where curl >nul 2>&1
+if not errorlevel 1 set "CURL_OK=1"
 
 set "WAIT_SECONDS=0"
 :wait_backend
@@ -97,9 +95,14 @@ if !WAIT_SECONDS! geq 30 (
 )
 timeout /t 1 /nobreak >nul
 set /a WAIT_SECONDS+=1
-powershell -NoProfile -Command "try { (New-Object System.Net.WebClient).DownloadString('http://127.0.0.1:8000/health') | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
-if errorlevel 1 goto wait_backend
-goto backend_ready
+if defined CURL_OK (
+    curl -s -o nul --max-time 2 http://127.0.0.1:8000/health >nul 2>&1
+    if not errorlevel 1 goto backend_ready
+) else (
+    powershell -NoProfile -Command "try { (New-Object System.Net.WebClient).DownloadString('http://127.0.0.1:8000/health') | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
+    if errorlevel 1 goto wait_backend
+)
+goto wait_backend
 
 :backend_ready
 for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do (
@@ -130,10 +133,7 @@ if exist "%ROOT%\backend\.backend_pid" (
     taskkill /F /PID !PID! >nul 2>&1
     del "%ROOT%\backend\.backend_pid" >nul 2>&1
 )
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*main:app*') { exit 0 } } catch {}; exit 1" >nul 2>&1
-    if not errorlevel 1 taskkill /F /PID %%p >nul 2>&1
-)
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and $p.CommandLine -like '*main:app*') { Stop-Process -Id $_ -Force } }; exit 0"
 
 echo(
 echo   [ OK ]  Frontend closed, backend stopped.

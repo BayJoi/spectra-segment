@@ -183,39 +183,51 @@ export function Canvas({ interactive = true }: CanvasProps) {
   }, [masks, perDetectionMasks, detections, selectedDetection, showTransparent, hideBboxes, featherRadius, sam3Instances, selectedSam3Instance, redraw, invalidateCache]);
 
   useEffect(() => {
+    const removeDetectionAt = (idx: number) => {
+      setPerDetectionMasks((prev) => {
+        const next: Record<number, PackedMask> = {};
+        for (const [k, v] of Object.entries(prev)) {
+          const ki = Number(k);
+          if (ki < idx) next[ki] = v;
+          else if (ki > idx) next[ki - 1] = v;
+        }
+        return next;
+      });
+      setDetections((prev) => prev.filter((_, i) => i !== idx));
+      setSelectedDetection((prev) => {
+        if (prev === null) return null;
+        if (prev > idx) return prev - 1;
+        return null;
+      });
+      setLayers((prev) => prev
+        .filter((l) => l.detectionIndex !== idx)
+        .map((l) => l.detectionIndex !== undefined && l.detectionIndex > idx
+          ? { ...l, detectionIndex: l.detectionIndex - 1 }
+          : l
+        )
+      );
+      setSelectedLayers(new Set());
+    };
     const handler = (e: KeyboardEvent) => {
       if (!interactive) return;
       if (e.key === "Delete" || e.key === "Backspace") {
+        if (e.repeat) return;
+        const target = e.target as HTMLElement;
+        if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
+        e.preventDefault();
         const cur = selectedDetectionRef.current;
-        if (cur === null) return;
-        setPerDetectionMasks((prev) => {
-          const next: Record<number, PackedMask> = {};
-          for (const [k, v] of Object.entries(prev)) {
-            const ki = Number(k);
-            if (ki < cur) next[ki] = v;
-            else if (ki > cur) next[ki - 1] = v;
-          }
-          return next;
-        });
-        setDetections((prev) => prev.filter((_, i) => i !== cur));
-        setSelectedDetection((prev) => {
-          if (prev === null) return null;
-          if (prev > cur) return prev - 1;
-          return null;
-        });
-        setLayers((prev) => prev
-          .filter((l) => l.detectionIndex !== cur)
-          .map((l) => l.detectionIndex !== undefined && l.detectionIndex > cur
-            ? { ...l, detectionIndex: l.detectionIndex - 1 }
-            : l
-          )
-        );
-        setSelectedLayers(new Set());
+        if (cur !== null) {
+          removeDetectionAt(cur);
+          return;
+        }
+        if (detectMode && detectionsRef.current.length > 0) {
+          removeDetectionAt(detectionsRef.current.length - 1);
+        }
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [setPerDetectionMasks, setDetections, setSelectedDetection, setLayers, setSelectedLayers, interactive]);
+  }, [setPerDetectionMasks, setDetections, setSelectedDetection, setLayers, setSelectedLayers, interactive, detectMode]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -330,6 +342,8 @@ export function Canvas({ interactive = true }: CanvasProps) {
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) active.blur();
       if (!interactive || !imageRef.current || isPanningRef.current || detectMode) return;
       if (e.button === 1 || e.shiftKey) return;
       const pos = getPointerPos(e);
@@ -434,6 +448,8 @@ export function Canvas({ interactive = true }: CanvasProps) {
 
   const handleDetectClick = useCallback(
     async (e: React.MouseEvent) => {
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) active.blur();
       if (!interactive || !detectMode || !detections.length) return;
 
       const pos = getPointerPos(e);
@@ -450,11 +466,7 @@ export function Canvas({ interactive = true }: CanvasProps) {
           const hasMask = i in perDetectionMasksRef.current;
           if (selectedDetection === i) {
             setSelectedDetection(null);
-            setPerDetectionMasks((prev) => {
-              const next = { ...prev };
-              delete next[i];
-              return next;
-            });
+            setSelectedLayers(new Set());
             return;
           }
           setSelectedDetection(i);

@@ -11,6 +11,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from .humantime import format_duration
+
 LOGGER = logging.getLogger(__name__)
 
 ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
@@ -160,12 +162,17 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    SKIP_PATHS = {"/api/logs/stream", "/api/models/stream"}
+    _DEBUG_PATHS = {
+        "/health",
+        "/api/token",
+        "/api/detectors",
+        "/api/logs",
+        "/api/logs/stream",
+        "/api/models/status",
+        "/api/models/stream",
+    }
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in self.SKIP_PATHS:
-            return await call_next(request)
-
         path = request.url.path.replace("\r", "\\r").replace("\n", "\\n")
         start = time.monotonic()
         try:
@@ -180,13 +187,15 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
         duration_ms = (time.monotonic() - start) * 1000
         status = response.status_code
-        msg = "REQUEST %s %s -> %d in %.1fms" % (
+        msg = "REQUEST %s %s -> %d in %s" % (
             request.method,
             path,
             status,
-            duration_ms,
+            format_duration(duration_ms / 1000),
         )
-        if status >= 500:
+        if request.url.path in self._DEBUG_PATHS:
+            LOGGER.debug(msg)
+        elif status >= 500:
             LOGGER.error(msg)
         elif status >= 400:
             LOGGER.warning(msg)

@@ -138,7 +138,7 @@ class UltralyticsBackend(SegmentationBackend):
                         LOGGER.info("SAM2 torch.compile enabled via SAM2_COMPILE=1")
                     except Exception as e:
                         LOGGER.warning("torch.compile failed for SAM2: %s", e)
-                LOGGER.info("Loaded %s on %s", ULTRALYTICS_MODELS[model_path], self._device)
+                LOGGER.debug("Loaded %s on %s", ULTRALYTICS_MODELS[model_path], self._device)
             finally:
                 sys.stderr = _old_stderr
                 torch.load = _orig

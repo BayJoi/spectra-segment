@@ -35,7 +35,7 @@ export function Toolbar() {
     brushSize,
     setBrushSize,
   } = useDetection();
-  const { layers, selectedLayers, clearAllLayers, addLayer } = useLayers();
+  const { layers, selectedLayers, clearAllLayers, addLayer, syncDetectionLayers } = useLayers();
   const [masks, setMasks] = useAtom(masksAtom);
   const [perDetectionMasks, setPerDetectionMasks] = useAtom(perDetectionMasksAtom);
   const [brushObjects, setBrushObjects] = useAtom(brushObjectsAtom);
@@ -73,8 +73,9 @@ export function Toolbar() {
 
   const handleDetect = useCallback(async () => {
     if (!sessionId) return;
-    await detect(sessionId);
-  }, [sessionId, detect]);
+    const dets = await detect(sessionId);
+    if (dets && dets.length) syncDetectionLayers(dets);
+  }, [sessionId, detect, syncDetectionLayers]);
 
   const handleSegmentAll = useCallback(async () => {
     if (!sessionId || !detections.length) return;
@@ -83,13 +84,11 @@ export function Toolbar() {
       const bboxes = detections.map((d) => d.bbox);
       const res = await api.segmentBatch(sessionId, bboxes);
       if (res?.masks) {
-        setPerDetectionMasks((prev) => {
-          const next = { ...prev };
-          res.masks.forEach((mask: PackedMask, idx: number) => {
-            next[idx] = mask;
-          });
-          return next;
+        const next: Record<number, PackedMask> = {};
+        res.masks.forEach((mask: PackedMask, idx: number) => {
+          next[idx] = mask;
         });
+        setPerDetectionMasks(next);
         detections.forEach((det: { label: string; score: number }, idx: number) => {
           if (!layers.some((l) => l.detectionIndex === idx)) {
             addLayer({

@@ -1,9 +1,15 @@
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
-python-multipart>=0.0.9
-pillow>=10.0.0
+# Security floors: CVE-2025-54121/CVE-2024-47874 (starlette multipart DoS),
+# CVE-2024-53981 (python-multipart CPU DoS), CVE-2025-43859 (h11 smuggling),
+# CVE-2026-55380/CVE-2026-42309 (Pillow decompression-bomb bypass/overflow),
+# CVE-2025-53644 (OpenCV JPEG2000 heap write).
+starlette>=0.47.2
+h11>=0.16.0
+python-multipart>=0.0.18
+pillow>=12.3.0
 numpy>=1.26.0
-opencv-python-headless>=4.8.0
+opencv-python-headless>=4.12.0
 # SAM 3 requires >=8.3.237; >=8.3.239 auto-installs the correct CLIP package
 # (PyPI's "clip" package breaks SAM3 with "SimpleTokenizer' object is not callable").
 ultralytics>=8.3.239

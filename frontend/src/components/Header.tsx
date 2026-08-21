@@ -4,23 +4,13 @@ import { SelectNative } from "@/components/ui/Select";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { TierIcon } from "@/components/ui/TierIcon";
-import { imageWidthAtom, imageHeightAtom, hasImageAtom, masksAtom, modelNameAtom, perDetectionMasksAtom, sam3ReadyAtom } from "@/store/session";
+import { imageWidthAtom, imageHeightAtom, hasImageAtom, masksAtom, modelNameAtom, perDetectionMasksAtom, sam3ReadyAtom, modelsAtom, type ModelInfo } from "@/store/session";
 import { showTransparentAtom, settingsOpenAtom, uploadHoveredAtom, endSessionOpenAtom, imageEncodingAtom } from "@/store/ui";
 import { loadedDetectorAtom, detectorsAtom } from "@/store/detection";
 import { useSession } from "@/hooks/useSession";
 import { api, BASE } from "@/lib/api";
+import { connectSse } from "@/lib/sse";
 import { cn } from "@/lib/utils";
-
-interface ModelInfo {
-  name: string;
-  display_name: string;
-  type: string;
-  detector_type?: string;
-  downloaded: boolean;
-  loaded: boolean;
-  tier: string;
-  perf: string;
-}
 
 export function Header({ sam3 = false }: { sam3?: boolean }) {
   const { sessionId, switchModel, uploadImage } = useSession();
@@ -38,7 +28,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [modelLoading, setModelLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [models, setModels] = useAtom(modelsAtom);
   const [modelName] = useAtom(modelNameAtom);
   const [, setLoadedDetector] = useAtom(loadedDetectorAtom);
   const [, setDetectors] = useAtom(detectorsAtom);
@@ -46,8 +36,6 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
   const [unloading, setUnloading] = useState(false);
 
   const unloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const evtRef = useRef<EventSource | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
 
   const segModels = models.filter((m) => m.type === "segment");
@@ -74,19 +62,20 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
   );
 
   useEffect(() => {
-    const evtSource = new EventSource(`${BASE}/api/models/stream`);
-    evtRef.current = evtSource;
+    const applyModelList = (list: ModelInfo[]) => {
+      setModels(list);
+      syncDetectors(list);
+      const loadedDet = list.find((m) => m.type === "detector" && m.loaded);
+      setLoadedDetector(loadedDet ? loadedDet.name : null);
+    };
 
-    evtSource.onmessage = (ev) => {
+    api.getModels().then((res) => applyModelList(res.models)).catch(() => {});
+
+    const handle = connectSse(`${BASE}/api/models/stream`, (data) => {
       try {
-        const data = JSON.parse(ev.data);
-        if (data.models) {
-          setModels(data.models);
-          syncDetectors(data.models);
-          const loadedDet = data.models.find((m: ModelInfo) => m.type === "detector" && m.loaded);
-          setLoadedDetector(loadedDet ? loadedDet.name : null);
-        }
-        if (data.event === "unloading") {
+        const parsed = JSON.parse(data);
+        if (parsed.models) applyModelList(parsed.models);
+        if (parsed.event === "unloading") {
           setLoadingLabel("Unloading model...");
           setUnloading(true);
           if (unloadTimerRef.current) window.clearTimeout(unloadTimerRef.current);
@@ -94,7 +83,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
             setUnloading(false);
             setLoadingLabel("");
           }, 3000);
-        } else if (data.event === "downloading") {
+        } else if (parsed.event === "downloading") {
           setLoadingLabel("Downloading model...");
           setDownloading(true);
           setUnloading(true);
@@ -104,7 +93,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
             setDownloading(false);
             setLoadingLabel("");
           }, 600000);
-        } else if (data.event === "loading") {
+        } else if (parsed.event === "loading") {
           setLoadingLabel("Loading model...");
           setDownloading(false);
           setUnloading(true);
@@ -113,44 +102,23 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
             setUnloading(false);
             setLoadingLabel("");
           }, 30000);
-        } else if (data.event === "loaded") {
+        } else if (parsed.event === "loaded") {
           if (unloadTimerRef.current) window.clearTimeout(unloadTimerRef.current);
           setUnloading(false);
           setDownloading(false);
           setLoadingLabel("");
         }
       } catch {}
-    };
-
-    evtSource.onerror = () => {
-      evtSource.close();
-      evtRef.current = null;
-      pollRef.current = setInterval(() => {
-        api.getModels().then((res) => {
-          setModels(res.models);
-          syncDetectors(res.models);
-        }).catch(() => {});
-      }, 10000);
-    };
-
-    api.getModels().then((res) => {
-      setModels(res.models);
-      syncDetectors(res.models);
-    }).catch(() => {});
+    });
 
     return () => {
-      evtSource.close();
-      evtRef.current = null;
+      handle.close();
       if (unloadTimerRef.current) {
         window.clearTimeout(unloadTimerRef.current);
         unloadTimerRef.current = null;
       }
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
     };
-  }, [syncDetectors]);
+  }, [syncDetectors, setModels, setLoadedDetector]);
 
   const prevLoadingRef = useRef(false);
   useEffect(() => {

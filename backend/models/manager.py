@@ -20,6 +20,7 @@ from .yoloe_detector import YOLOE_MODELS, YOLOE_METADATA, YOLEDetector
 from .sam3_backend import SAM3_MODEL, SAM3Backend, DEFAULT_ENCODE_DIM
 from ..utils.compositing import mask_to_png_b64
 from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
+from ..utils.humantime import format_duration
 
 LOGGER = logging.getLogger(__name__)
 
@@ -264,6 +265,7 @@ class ModelManager:
         except Exception:
             req_mb = 4096
         self._ensure_vram_headroom(req_mb)
+        _load_t0 = time.time()
         backend.load_model(model_name)
 
         with self._lock:
@@ -272,7 +274,7 @@ class ModelManager:
             self._last_seg_use = time.time()
         if self._status_callback:
             self._status_callback("loaded")
-        LOGGER.info("Model ready: %s", model_name)
+        LOGGER.info("Model ready: %s in %s", model_name, format_duration(time.time() - _load_t0))
         return backend
 
     def create_session(self, model_name: str) -> Session:
@@ -382,7 +384,7 @@ class ModelManager:
             LOGGER.exception("SAM encoding failed for session %s — continuing without features", session_id)
             session.backend.reset_image()
 
-        LOGGER.info("Image loaded: %s", image_id)
+        LOGGER.info("Loaded %s (%dx%d) — encoded in %s", image_id, session.image_width, session.image_height, format_duration(time.time() - t0))
 
     def _ensure_model_loaded(self, session: Session) -> None:
         with self._lock:
@@ -983,6 +985,17 @@ class ModelManager:
             })
         return detectors
 
+    def _detector_downloaded(self, detector_name: str) -> bool:
+        if detector_name in GROUNDING_DETECTORS:
+            hf_id = HF_MODEL_IDS.get(detector_name, detector_name)
+            snapshots = HF_HUB_CACHE_DIR / f"models--{hf_id.replace('/', '--')}" / "snapshots"
+            return snapshots.exists() and any(
+                d.is_dir() and any(d.iterdir()) for d in snapshots.iterdir()
+            )
+        if detector_name in YOLOE_MODELS:
+            return (MODEL_WEIGHTS_DIR / f"{detector_name}.pt").exists()
+        return False
+
     def load_detector(self, detector_name: str) -> None:
         with self._lock:
             if self._current_detector == detector_name and self._detector and self._detector.is_loaded:
@@ -1013,9 +1026,13 @@ class ModelManager:
 
         t0 = time.time()
         self._ensure_vram_headroom(2560)
+        if self._status_callback:
+            self._status_callback("downloading" if not self._detector_downloaded(detector_name) else "loading")
         new_detector.load_model(detector_name)
         load_elapsed = time.time() - t0
-        LOGGER.info("Loaded detector %s in %.2fs (device: %s)", detector_name, load_elapsed, getattr(new_detector, '_device', '?'))
+        LOGGER.info("Loaded detector %s in %s (device: %s)", detector_name, format_duration(load_elapsed), getattr(new_detector, '_device', '?'))
+        if self._status_callback:
+            self._status_callback("loaded")
 
         with self._lock:
             self._detector = new_detector
@@ -1071,7 +1088,6 @@ class ModelManager:
             max_detections=max_detections,
         )
         detect_elapsed = time.time() - t0
-        LOGGER.debug("Detection complete in %.2fs — %d detection(s)", detect_elapsed, len(detections))
         if hasattr(detector, '_device'):
             LOGGER.debug("Detector device: %s", detector._device)
 
@@ -1086,6 +1102,11 @@ class ModelManager:
             self._last_detector_use = time.time()
 
         release_gpu_memory()
+
+        LOGGER.info(
+            "Detected '%s' — %d found, %d kept (%s)",
+            query, len(detections), len(det_list), format_duration(detect_elapsed),
+        )
 
         return {
             "detections": det_list,

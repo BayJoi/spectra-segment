@@ -16,6 +16,7 @@ import {
   yoloeMasksEnabledAtom,
 } from "@/store/detection";
 import { api } from "@/lib/api";
+import { perDetectionMasksAtom } from "@/store/session";
 
 export function useDetection() {
   const [detectMode] = useAtom(detectModeAtom);
@@ -31,6 +32,7 @@ export function useDetection() {
   const [isDetecting, setIsDetecting] = useAtom(isDetectingAtom);
   const [yoloeMasksEnabled, setYoloeMasksEnabled] = useAtom(yoloeMasksEnabledAtom);
   const [featherRadius, setFeatherRadius] = useAtom(featherRadiusAtom);
+  const [, setPerDetectionMasks] = useAtom(perDetectionMasksAtom);
 
   const detect = useCallback(
     async (sessionId: string) => {
@@ -39,6 +41,7 @@ export function useDetection() {
       if (!selectedDetector) setSelectedDetector(target);
       setIsDetecting(true);
       setDetections([]);
+      setPerDetectionMasks({});
       setSelectedDetection(null);
       try {
         if (loadedDetector !== target) {
@@ -76,6 +79,7 @@ export function useDetection() {
       setDetections,
       setSelectedDetection,
       setIsDetecting,
+      setPerDetectionMasks,
     ]
   );
 

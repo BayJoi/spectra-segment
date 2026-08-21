@@ -183,20 +183,17 @@ if not errorlevel 1 (
 )
 
 call :section "[ 6 / 7 ]  Starting backend"
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*main:app*') { exit 0 } } catch {}; exit 1" >nul 2>&1
-    if not errorlevel 1 taskkill /F /PID %%p >nul 2>&1
-)
-for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":3000 " ^| findstr "LISTENING"') do (
-    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*run dev*' -or $c.CommandLine -like '*vite*') { exit 0 } } catch {}; exit 1" >nul 2>&1
-    if not errorlevel 1 taskkill /F /PID %%p >nul 2>&1
-)
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and $p.CommandLine -like '*main:app*') { Stop-Process -Id $_ -Force } }; exit 0"
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and ($p.CommandLine -like '*run dev*' -or $p.CommandLine -like '*vite*')) { Stop-Process -Id $_ -Force } }; exit 0"
 
 if not exist "%AMD_DIR%\logs" mkdir "%AMD_DIR%\logs"
 echo   [INFO]  Starting backend (port 8000)...
 start /B "Spectra-Segment-Backend-AMD" cmd /c ""%AMD_DIR%\run.cmd" > "%AMD_DIR%\backend_launch.log" 2>&1"
 
 echo   [WAIT]  Waiting for backend at http://127.0.0.1:8000/health ...
+set "CURL_OK="
+where curl >nul 2>&1
+if not errorlevel 1 set "CURL_OK=1"
 set "RETRIES=0"
 :health_loop
 timeout /t 2 /nobreak >nul
@@ -215,8 +212,13 @@ if !RETRIES! gtr 30 (
     pause
     exit /b 1
 )
-for /f "tokens=*" %%a in ('powershell -NoProfile -Command "try { $null = (New-Object System.Net.WebClient).DownloadString('http://127.0.0.1:8000/health'); 'ok' } catch { 'no' }" 2^>nul') do (
-    if "%%a"=="ok" goto :backend_ready
+if defined CURL_OK (
+    curl -s -o nul --max-time 3 http://127.0.0.1:8000/health >nul 2>&1
+    if not errorlevel 1 goto :backend_ready
+) else (
+    for /f "tokens=*" %%a in ('powershell -NoProfile -Command "try { $null = (New-Object System.Net.WebClient).DownloadString('http://127.0.0.1:8000/health'); 'ok' } catch { 'no' }" 2^>nul') do (
+        if "%%a"=="ok" goto :backend_ready
+    )
 )
 goto :health_loop
 
