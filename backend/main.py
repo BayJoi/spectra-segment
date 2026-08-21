@@ -727,8 +727,6 @@ async def stream_model_status(request: Request):
 async def get_token():
     return {"token": local_token}
 
-
-
 @app.post("/api/sessions", response_model=CreateSessionResponse)
 async def create_session(req: CreateSessionRequest):
     session = await asyncio.to_thread(get_manager().create_session, req.model_name)

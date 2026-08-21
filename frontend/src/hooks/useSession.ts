@@ -30,8 +30,6 @@ import {
 import { api } from "@/lib/api";
 import { isSupportedImage } from "@/lib/utils";
 
-const SAM3_MODEL = "sam3.pt";
-
 export function useSession() {
   const [sessionId, setSessionId] = useAtom(sessionIdAtom);
   const [modelName, setModelName] = useAtom(modelNameAtom);
@@ -83,6 +81,8 @@ export function useSession() {
 
   const sam3ModeRef = useRef(sam3Mode);
   sam3ModeRef.current = sam3Mode;
+  const modelNameRef = useRef(modelName);
+  modelNameRef.current = modelName;
   const uploadingRef = useRef(false);
 
   const createSession = useCallback(
@@ -127,10 +127,11 @@ export function useSession() {
       try {
         let sid = sessionId;
         if (!sid) {
-          if (!sam3ModeRef.current) return;
+          const activeModel = modelNameRef.current;
+          if (!activeModel) return;
           try {
-            const res = await api.createSession(SAM3_MODEL);
-            if (!sam3ModeRef.current) {
+            const res = await api.createSession(activeModel);
+            if (modelNameRef.current !== activeModel) {
               api.destroySession(res.session_id).catch(() => {});
               return;
             }
@@ -138,7 +139,7 @@ export function useSession() {
             setModelName(res.model_name);
             sid = res.session_id;
           } catch (err) {
-            console.error("Failed to create SAM3 session:", err);
+            console.error("Failed to create session:", err);
             return;
           }
         }
@@ -250,7 +251,7 @@ export function useSession() {
   const recoverSession = useCallback(async () => {
     if (!sessionId) return;
     if (await api.sessionHealth(sessionId)) return;
-    await createSession(modelName || "sam2.1_b.pt", imageFile);
+    await createSession(modelName, imageFile);
   }, [sessionId, modelName, imageFile, createSession]);
 
   const predict = useCallback(

@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { useAtom } from "jotai";
 import { useSession } from "@/hooks/useSession";
-import { modelNameAtom } from "@/store/session";
+import { modelNameAtom, sam3ReadyAtom } from "@/store/session";
 import { uploadHoveredAtom, modeSwitchTargetAtom } from "@/store/ui";
 import { sam3ModeAtom } from "@/store/sam3";
 import { Tooltip } from "@/components/ui/Tooltip";
@@ -11,6 +11,7 @@ export function EmptyState() {
   const { uploadImage } = useSession();
   const [modelName] = useAtom(modelNameAtom);
   const [sam3Mode] = useAtom(sam3ModeAtom);
+  const [sam3Ready] = useAtom(sam3ReadyAtom);
   const [, setUploadHovered] = useAtom(uploadHoveredAtom);
   const [, setModeSwitchTarget] = useAtom(modeSwitchTargetAtom);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -35,13 +36,13 @@ export function EmptyState() {
     (e: React.DragEvent) => {
       e.preventDefault();
       setIsDragOver(false);
-      if (!modelName && !sam3Mode) return;
+      if (sam3Mode ? !sam3Ready : !modelName) return;
       const file = e.dataTransfer.files[0];
       if (file && file.type.startsWith("image/")) {
         uploadImage(file);
       }
     },
-    [uploadImage, modelName, sam3Mode]
+    [uploadImage, modelName, sam3Mode, sam3Ready]
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -71,8 +72,10 @@ export function EmptyState() {
         <p className="text-neutral-600 text-xs mt-1.5 font-sans">
           {!modelName && !sam3Mode
             ? "Choose a mode, then drop or upload an image"
-            : sam3Mode
-              ? "Type a text prompt to segment every matching object — e.g. \"person\", \"car\", \"red bottle\""
+            : sam3Mode && !sam3Ready
+              ? "Loading SAM 3 model — upload will be available shortly"
+              : sam3Mode
+                ? "Type a text prompt to segment every matching object — e.g. \"person\", \"car\", \"red bottle\""
               : isDragOver
                 ? "Release to upload"
                 : "Drop an image here or click Upload"}
@@ -114,7 +117,7 @@ export function EmptyState() {
         </Tooltip>
       </div>
 
-      <Tooltip tip={!modelName && !sam3Mode ? "Choose a mode first" : "Upload image"} side="bottom">
+      <Tooltip tip={!modelName && !sam3Mode ? "Choose a mode first" : sam3Mode && !sam3Ready ? "Loading SAM 3 model…" : "Upload image"} side="bottom">
         <span
           onMouseEnter={() => !modelName && !sam3Mode && setUploadHovered(true)}
           onMouseLeave={() => setUploadHovered(false)}
@@ -122,10 +125,10 @@ export function EmptyState() {
         >
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={!modelName && !sam3Mode}
+            disabled={sam3Mode ? !sam3Ready : !modelName}
             className={cn(
               "inline-flex items-center justify-center gap-2 h-10 px-5 rounded-xl text-sm font-medium font-sans transition-all duration-200 select-none grain-bg grain-bg-strong",
-              !modelName && !sam3Mode
+              (sam3Mode ? !sam3Ready : !modelName)
                 ? "bg-neutral-800/50 border border-neutral-800/50 text-neutral-600 cursor-not-allowed opacity-50"
                 : "bg-gradient-to-r from-orange-500 to-orange-600 text-white hover:from-orange-400 hover:to-orange-500 hover:shadow-lg hover:shadow-orange-500/20 hover:scale-105 active:scale-95 cursor-pointer"
             )}

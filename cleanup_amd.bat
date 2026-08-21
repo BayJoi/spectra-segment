@@ -273,6 +273,28 @@ if exist "%MODELS_DIR%" (
 )
 
 echo(
+call :section "Verifying protected files"
+set "PROTECTED_FAIL=0"
+for %%f in (.gitignore README.md THIRD-PARTY-LICENSES.txt LICENSE) do (
+    if exist "%ROOT%%%f" (
+        echo   [ OK ]  %%f
+    ) else (
+        echo   [FAIL]  %%f is MISSING!
+        set "PROTECTED_FAIL=1"
+    )
+)
+if exist "%ROOT%.git" (
+    echo   [ OK ]  .git\
+) else (
+    echo   [FAIL]  .git\ is MISSING!
+    set "PROTECTED_FAIL=1"
+)
+if "!PROTECTED_FAIL!"=="1" (
+    echo(
+    echo   [WARN]  Some protected files were lost. Restore from git or backup.
+)
+
+echo(
 echo  +------------------------------------------------------------+
 echo  ^|  Cleanup complete.                                         ^|
 echo  ^|  To reinstall: install_amd.bat                             ^|

@@ -16,7 +16,7 @@ Remove backgrounds from images using AI. Pick an image, choose a mode, and start
 
 **Detection Mode** — Type what you want to remove (like "person" or "red car"). The AI finds it, shows a box around it, and removes the background when you click. Add as many detections as you want.
 
-**SAM 3 Mode** — Type your prompt and let SAM 3 handle everything from detection to removal automatically. This is the most powerful mode but requires more computing power.
+**SAM 3 Mode** — Type a text prompt and SAM 3 handles detection, segmentation, and masking in one step. The most powerful mode — single model, no tier selection needed.
 
 ### Every Mode Has
 
@@ -36,6 +36,14 @@ Remove backgrounds from images using AI. Pick an image, choose a mode, and start
 - **Multiple detections** — Find and remove several objects at once
 - **Layers panel** — View and manage all detected objects
 - **Batch segmentation** — Segment all detected objects with one click
+
+### SAM 3 Mode Extras
+
+- **Text-to-mask** — Type what to segment, SAM 3 finds and masks it automatically
+- **Encode quality selector** — Fast (512), Balanced (1024), or High (1500) — higher means better masks but slower encoding
+- **Keep loaded toggle** — Prevent the model from unloading between prompts
+- **Layers panel** — View and manage all SAM 3 instances
+- **Undo/Redo** — Undo/redo individual prompts
 
 ---
 
@@ -76,6 +84,14 @@ Remove backgrounds from images using AI. Pick an image, choose a mode, and start
 
 Models download automatically the first time you select them. After that, they're stored locally.
 
+### SAM 3 First Time Setup
+
+1. Switch to SAM 3 mode from the home screen
+2. Select the SAM 3 model from the dropdown in the top bar
+3. The model downloads and loads automatically (~3.3 GB)
+4. Upload an image — the Upload button is disabled until the model is ready
+5. Type a prompt and press Enter to segment
+
 ---
 
 ## How It Works
@@ -104,11 +120,14 @@ Models download automatically the first time you select them. After that, they'r
 
 ### SAM 3 Mode
 
-1. Select SAM 3 from the mode selector
-2. Upload an image (SAM 3 loads automatically)
-3. Type a text prompt (e.g., "person", "red bottle")
-4. SAM 3 finds and segments matching objects
-5. View and export results
+1. Switch to SAM 3 mode from the home screen
+2. Select the SAM 3 model from the dropdown — downloads automatically on first use
+3. Upload an image (the image encodes with the selected quality)
+4. Type a text prompt (e.g., "person", "red bottle")
+5. Press Enter — SAM 3 finds and segments matching objects
+6. Each prompt creates a new layer — stack multiple prompts for complex scenes
+7. Adjust encode quality if masks aren't precise enough
+8. Export your results
 
 ---
 
@@ -121,7 +140,7 @@ Models download automatically the first time you select them. After that, they'r
 - **End session** — Unload models and start fresh
 - **Real-time logs** — Click Logs to see download progress and errors
 - **Keyboard shortcuts** — Ctrl+Z undo, Ctrl+Y redo, Delete to remove
-- **Zoom and pan** — Mouse wheel to zoom, click and drag to pan
+- **Zoom and pan** — Mouse wheel to zoom, Shift+drag to pan
 - **Feather control** — Soften mask edges from 0-20 pixels
 - **Export options** — PNG with transparency or JPG with background color
 
@@ -150,7 +169,7 @@ This removes:
 - Frontend workspace
 - Logs and temp files
 
-> **Note:** Each cleanup script only removes its own backend. `cleanup.bat` removes CPU/NVIDIA files. `cleanup_amd.bat` removes AMD files. They don't touch each other.
+> **Note:** Each cleanup script only removes its own backend. `cleanup.bat` removes CPU/NVIDIA files. `cleanup_amd.bat` removes AMD files. They don't touch each other. Protected files (LICENSE, README, .gitignore, THIRD-PARTY-LICENSES.txt) are never removed.
 
 ---
 

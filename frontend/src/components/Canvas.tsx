@@ -14,14 +14,13 @@ import { api, decodeDetectionMask } from "@/lib/api";
 import type { PackedMask } from "@/lib/mask";
 import { buildStrokePrompt } from "@/lib/strokePrompt";
 
-type CursorMode = "crosshair" | "pointer" | "grab" | "grabbing" | "wait" | "not-allowed";
+type CursorMode = "crosshair" | "pointer" | "grab" | "grabbing" | "not-allowed";
 
 const CURSOR_STYLES: Record<CursorMode, string> = {
   crosshair: "crosshair",
   pointer: "pointer",
   grab: "grab",
   grabbing: "grabbing",
-  wait: "wait",
   "not-allowed": "not-allowed",
 };
 

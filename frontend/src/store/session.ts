@@ -22,3 +22,5 @@ export const activeObjectIdAtom = atom<number>(0);
 export const objectUndoCountsAtom = atom<Record<number, number>>({});
 export const objectRedoCountsAtom = atom<Record<number, number>>({});
 export const brushPredictInFlightAtom = atom(0);
+
+export const sam3ReadyAtom = atom(false);

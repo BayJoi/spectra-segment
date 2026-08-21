@@ -4,7 +4,7 @@ import { SelectNative } from "@/components/ui/Select";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { TierIcon } from "@/components/ui/TierIcon";
-import { imageWidthAtom, imageHeightAtom, hasImageAtom, masksAtom, modelNameAtom, perDetectionMasksAtom } from "@/store/session";
+import { imageWidthAtom, imageHeightAtom, hasImageAtom, masksAtom, modelNameAtom, perDetectionMasksAtom, sam3ReadyAtom } from "@/store/session";
 import { showTransparentAtom, settingsOpenAtom, uploadHoveredAtom, endSessionOpenAtom, imageEncodingAtom } from "@/store/ui";
 import { loadedDetectorAtom, detectorsAtom } from "@/store/detection";
 import { useSession } from "@/hooks/useSession";
@@ -34,6 +34,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
   const [, setEndSessionOpen] = useAtom(endSessionOpenAtom);
   const [uploadHovered, setUploadHovered] = useAtom(uploadHoveredAtom);
   const [imageEncoding] = useAtom(imageEncodingAtom);
+  const [, setSam3Ready] = useAtom(sam3ReadyAtom);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [modelLoading, setModelLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -43,12 +44,11 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
   const [, setDetectors] = useAtom(detectorsAtom);
   const [loadingLabel, setLoadingLabel] = useState<string>("");
   const [unloading, setUnloading] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "loading" | "downloading" | "unloading">("idle");
+
   const unloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const evtRef = useRef<EventSource | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const sam3Ref = useRef(sam3);
-  sam3Ref.current = sam3;
+
 
   const segModels = models.filter((m) => m.type === "segment");
   const hasAnyDownloaded = models.some((m) => m.downloaded);
@@ -87,43 +87,36 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
           setLoadedDetector(loadedDet ? loadedDet.name : null);
         }
         if (data.event === "unloading") {
-          setPhase("unloading");
-          setLoadingLabel(sam3Ref.current ? "Unloading SAM 3…" : "Unloading model...");
+          setLoadingLabel("Unloading model...");
           setUnloading(true);
           if (unloadTimerRef.current) window.clearTimeout(unloadTimerRef.current);
           unloadTimerRef.current = window.setTimeout(() => {
             setUnloading(false);
-            setPhase("idle");
             setLoadingLabel("");
           }, 3000);
         } else if (data.event === "downloading") {
-          setPhase("downloading");
-          setLoadingLabel(sam3Ref.current ? "Downloading SAM 3…" : "Downloading model...");
+          setLoadingLabel("Downloading model...");
           setDownloading(true);
           setUnloading(true);
           if (unloadTimerRef.current) window.clearTimeout(unloadTimerRef.current);
           unloadTimerRef.current = window.setTimeout(() => {
             setUnloading(false);
             setDownloading(false);
-            setPhase("idle");
             setLoadingLabel("");
           }, 600000);
         } else if (data.event === "loading") {
-          setPhase("loading");
-          setLoadingLabel(sam3Ref.current ? "Loading SAM 3…" : "Loading model...");
+          setLoadingLabel("Loading model...");
           setDownloading(false);
           setUnloading(true);
           if (unloadTimerRef.current) window.clearTimeout(unloadTimerRef.current);
           unloadTimerRef.current = window.setTimeout(() => {
             setUnloading(false);
-            setPhase("idle");
             setLoadingLabel("");
           }, 30000);
         } else if (data.event === "loaded") {
           if (unloadTimerRef.current) window.clearTimeout(unloadTimerRef.current);
           setUnloading(false);
           setDownloading(false);
-          setPhase("idle");
           setLoadingLabel("");
         }
       } catch {}
@@ -195,11 +188,18 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
     }
   }, [switchModel, models, sessionId, modelName]);
 
-  const modelOptions = segModels.map((m) => ({
+  const sam3Loaded = models.some((m) => m.type === "sam3" && m.loaded);
+
+  useEffect(() => {
+    setSam3Ready(sam3Loaded);
+  }, [sam3Loaded, setSam3Ready]);
+
+  const sourceModels = sam3 ? models.filter((m) => m.type === "sam3") : segModels;
+  const modelOptions = sourceModels.map((m) => ({
     value: m.name,
     label: m.downloaded ? `\u2713 ${m.display_name}` : m.display_name,
-    icon: <TierIcon tier={m.tier} />,
-    hint: m.perf,
+    icon: sam3 ? undefined : <TierIcon tier={m.tier} />,
+    hint: sam3 ? undefined : m.perf,
     loaded: m.name === modelName,
   }));
 
@@ -227,40 +227,12 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
           </button>
         </Tooltip>
         <div className={cn("w-px h-5 bg-neutral-800/60 transition-opacity duration-200", showHighlight && "opacity-30")} />
-        {sam3 ? (
-          <div className="flex items-center gap-2 ml-1">
-            <div
-              className={cn(
-                "relative overflow-hidden rounded-lg grain-bg transition-all duration-200",
-                phase !== "idle" && "animate-model-load"
-              )}
-            >
-              <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-semibold font-sans bg-gradient-to-r from-orange-500/15 to-orange-600/15 border border-orange-500/30 text-orange-300 select-none">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M4 7h16" /><path d="M4 12h10" /><path d="M4 17h13" />
-                </svg>
-                SAM 3 · Text Segmentation
-              </span>
-              <div
-                className={cn(
-                  "absolute inset-0 flex items-center justify-center bg-[#0d0d0d] backdrop-blur-sm overflow-hidden rounded-lg z-10 pointer-events-none transition-opacity duration-200",
-                  phase !== "idle" ? "opacity-100" : "opacity-0"
-                )}
-              >
-                <div className="shimmer-overlay" />
-                <span className="text-[10px] text-orange-400 font-mono animate-pulse relative z-10">
-                  {loadingLabel}
-                </span>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <>
         <div data-model-selector className={cn(
-            "relative w-[190px] z-10 rounded-lg transition-all duration-200",
-            showHighlight && "animate-model-highlight animate-model-highlight-idle"
+            "relative z-10 rounded-lg transition-all duration-200",
+            !sam3 && "w-[190px]",
+            showHighlight && !sam3 && "animate-model-highlight animate-model-highlight-idle"
           )}>
-            {showHighlight && (
+            {!sam3 && showHighlight && (
               <div className="absolute inset-0 overflow-hidden rounded-lg pointer-events-none">
                 <div className="shimmer-overlay" />
               </div>
@@ -269,7 +241,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
               value={modelName}
               onChange={handleModelSwitch}
               options={modelOptions}
-              placeholder="Choose a model..."
+              placeholder={sam3 ? "Choose a SAM 3 model..." : "Choose a model..."}
               className={cn(modelLoading && "animate-model-load pointer-events-none")}
             />
             <div
@@ -284,7 +256,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
               </span>
             </div>
           </div>
-        {!modelName && !modelLoading && segModels.length > 0 && (
+        {!sam3 && !modelName && !modelLoading && segModels.length > 0 && (
           <div className={cn("flex items-center gap-2 ml-1 transition-opacity duration-200", showHighlight && "opacity-100")}>
             <span className={cn(
               "text-xs font-sans whitespace-nowrap select-none",
@@ -301,8 +273,6 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
               <span className="flex items-center gap-1"><TierIcon tier="large" /> best</span>
             </div>
           </div>
-        )}
-          </>
         )}
       </div>
 
@@ -352,7 +322,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
             </button>
           </Tooltip>
         )}
-        <Tooltip tip={!modelName && !sam3 ? "Select a model first" : hasImage ? "Replace image" : "Upload image"} side="bottom">
+        <Tooltip tip={!modelName && !sam3 ? "Select a model first" : sam3 && !modelName ? "Select a SAM 3 model first" : sam3 && !sam3Loaded ? "Loading SAM 3 model…" : hasImage ? "Replace image" : "Upload image"} side="bottom">
           <span
             onMouseEnter={() => !modelName && !sam3 && setUploadHovered(true)}
             onMouseLeave={() => setUploadHovered(false)}
@@ -360,10 +330,10 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
           >
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={!modelName && !sam3}
+              disabled={sam3 ? !sam3Loaded : !modelName}
               className={cn(
                 "inline-flex items-center justify-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-medium font-sans transition-all duration-200 select-none grain-bg grain-bg-strong",
-                !modelName && !sam3
+                (sam3 ? !sam3Loaded : !modelName)
                   ? "bg-neutral-800/50 border border-neutral-800/50 text-neutral-600 cursor-not-allowed opacity-50"
                   : "bg-gradient-to-r from-orange-500 to-orange-600 text-white hover:from-orange-400 hover:to-orange-500 hover:shadow-lg hover:shadow-orange-500/20 hover:scale-105 active:scale-95 cursor-pointer"
               )}
