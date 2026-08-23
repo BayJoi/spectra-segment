@@ -109,9 +109,4 @@ p {
   *:focus:not(:focus-visible) {
     outline: none;
   }
-
-  select {
-    -webkit-appearance: none;
-    appearance: none;
-  }
 }

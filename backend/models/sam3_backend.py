@@ -83,10 +83,10 @@ class SAM3Backend(SegmentationBackend):
             from backend.utils.model_integrity import download_model_file, PINNED_MODEL_URLS
             url = PINNED_MODEL_URLS.get(model_path)
             if url:
-                LOGGER.info("Model not found locally: %s — downloading from HuggingFace...", model_path)
+                LOGGER.debug("Not cached: %s", model_path)
                 download_model_file(model_path, Path(abs_model), url=url)
             else:
-                LOGGER.info("Model not found locally: %s — Ultralytics will attempt download...", model_path)
+                LOGGER.debug("Not cached: %s", model_path)
 
         with _MODEL_LOAD_LOCK:
             _orig = torch.load
@@ -267,7 +267,7 @@ class SAM3Backend(SegmentationBackend):
             try:
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
-                with cpu_threads(_DEFAULT_THREADS):
+                with cpu_threads(_DEFAULT_THREADS), torch.inference_mode():
                     self._predictor.set_image(proc)
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
@@ -290,7 +290,7 @@ class SAM3Backend(SegmentationBackend):
                     self._proc_shape or self._src_shape,
                     text=[text],
                 )
-            return self._format_result(pred_masks, pred_boxes, confidence=confidence)
+        return self._format_result(pred_masks, pred_boxes, confidence=confidence)
 
     def predict(
         self,
@@ -315,7 +315,7 @@ class SAM3Backend(SegmentationBackend):
                     bboxes=bboxes,
                     labels=labels,
                 )
-            return self._format_result(pred_masks, pred_boxes)
+        return self._format_result(pred_masks, pred_boxes)
 
     def _restore_outputs(self, pred_masks, pred_boxes):
         """Convert processed (padded/downscaled) outputs back to original image space."""

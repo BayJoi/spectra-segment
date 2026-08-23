@@ -17,6 +17,7 @@ import {
 } from "@/store/detection";
 import { api } from "@/lib/api";
 import { perDetectionMasksAtom } from "@/store/session";
+import { pushToast } from "@/store/ui";
 
 export function useDetection() {
   const [detectMode] = useAtom(detectModeAtom);
@@ -62,6 +63,7 @@ export function useDetection() {
         return res.detections;
       } catch (err) {
         console.error("Detection failed:", err);
+        pushToast("Detection failed — check the console for details");
         setLoadedDetector(null);
         return null;
       } finally {

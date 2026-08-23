@@ -42,7 +42,7 @@ class StderrInterceptor:
             return
         m = re.search(r"(\d+)%", chunk)
         if not m:
-            LOGGER.info("%s: %s", self._model or "HF", chunk)
+            LOGGER.debug("%s: %s", self._model or "HF", chunk)
             return
         pct = int(m.group(1))
         desc_m = re.match(r"^([^:]+?):\s", chunk)

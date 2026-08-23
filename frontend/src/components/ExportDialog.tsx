@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useAtom } from "jotai";
-import { exportOpenAtom, isExportingAtom } from "@/store/ui";
+import { exportOpenAtom, isExportingAtom, pushToast } from "@/store/ui";
 import { sessionIdAtom, imageFileAtom, masksAtom, perDetectionMasksAtom, objectMasksAtom } from "@/store/session";
 import { layersAtom } from "@/store/layers";
 import { featherRadiusAtom } from "@/store/detection";
@@ -204,12 +204,13 @@ export function ExportDialog() {
       a.href = url;
       a.download = `${rootName}.zip`;
       a.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
       setExported(true);
       if (exportedTimerRef.current) clearTimeout(exportedTimerRef.current);
       exportedTimerRef.current = setTimeout(() => setExported(false), 2000);
     } catch (err) {
       console.error("Export failed:", err);
+      pushToast("Export failed — check the console for details");
     } finally {
       setIsExporting(false);
     }

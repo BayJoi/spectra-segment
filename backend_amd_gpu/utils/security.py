@@ -179,7 +179,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
         except Exception:
             LOGGER.exception(
-                "REQUEST %s %s -> unhandled error",
+                "%s %s unhandled error",
                 request.method,
                 path,
             )
@@ -187,7 +187,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
         duration_ms = (time.monotonic() - start) * 1000
         status = response.status_code
-        msg = "REQUEST %s %s -> %d in %s" % (
+        msg = "%s %s %d · %s" % (
             request.method,
             path,
             status,
@@ -199,6 +199,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             LOGGER.error(msg)
         elif status >= 400:
             LOGGER.warning(msg)
-        else:
+        elif duration_ms > 1000:
             LOGGER.info(msg)
+        else:
+            LOGGER.debug(msg)
         return response

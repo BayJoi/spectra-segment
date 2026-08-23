@@ -12,6 +12,7 @@ echo  ^|                         Cleanup  (CPU)                     ^|
 echo  ^|  Portable, self-contained. Everything stays in this folder ^|
 echo  +------------------------------------------------------------+
 echo(
+echo    Protected: checks\ folder (health-check script + logs) is never removed.
 
 call :section "[ 1 / 3 ]  Reviewing items to remove"
 echo   The following will be permanently removed:
@@ -128,6 +129,11 @@ for /d /r "%ROOT%backend" %%d in (__pycache__) do (
 )
 if !PYCACHE_COUNT! GTR 0 (
     echo    [DIR]  backend\*\__pycache__\  ^(!PYCACHE_COUNT! directories^)
+    set "HAS_ITEMS=1"
+)
+
+if exist "%ROOT%backend\model_weights\pycache" (
+    echo    [DIR]  backend\model_weights\pycache\  ^(python bytecode cache^)
     set "HAS_ITEMS=1"
 )
 
@@ -315,6 +321,11 @@ for /d /r "%ROOT%backend" %%d in (__pycache__) do (
     if exist "%%d" (
         rmdir /s /q "%%d" >nul 2>&1
     )
+
+if exist "%ROOT%backend\model_weights\pycache" (
+    rmdir /s /q "%ROOT%backend\model_weights\pycache" >nul 2>&1
+)
+
 )
 echo   Done.
 

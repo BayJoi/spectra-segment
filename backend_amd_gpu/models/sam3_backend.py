@@ -14,7 +14,7 @@ import torch
 from .base import SegmentationBackend
 from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
 from ..utils.stderr_progress import StderrInterceptor as _StderrInterceptor
-from ..utils.torch_threads import cpu_threads, resolve_threads
+from ..utils.torch_threads import cpu_threads, resolve_threads, cudnn_disabled
 
 LOGGER = logging.getLogger(__name__)
 _MODEL_LOAD_LOCK = threading.Lock()
@@ -82,10 +82,10 @@ class SAM3Backend(SegmentationBackend):
             from backend_amd_gpu.utils.model_integrity import download_model_file, PINNED_MODEL_URLS
             url = PINNED_MODEL_URLS.get(model_path)
             if url:
-                LOGGER.info("Model not found locally: %s — downloading from HuggingFace...", model_path)
+                LOGGER.debug("Not cached: %s", model_path)
                 download_model_file(model_path, Path(abs_model), url=url)
             else:
-                LOGGER.info("Model not found locally: %s — Ultralytics will attempt download...", model_path)
+                LOGGER.debug("Not cached: %s", model_path)
 
         with _MODEL_LOAD_LOCK:
             _orig = torch.load
@@ -263,26 +263,16 @@ class SAM3Backend(SegmentationBackend):
         )
         with self._infer_lock:
             self._predictor.reset_image()
-            cudnn_saved = None
             try:
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
-                    cudnn_backend = getattr(torch.backends, "cudnn", None)
-                    if cudnn_backend is not None:
-                        cudnn_saved = cudnn_backend.enabled
-                        cudnn_backend.enabled = False
-                with cpu_threads(_DEFAULT_THREADS):
+                with cpu_threads(_DEFAULT_THREADS), cudnn_disabled(), torch.inference_mode():
                     self._predictor.set_image(proc)
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
             except Exception as e:
                 LOGGER.error("set_image: encoding failed: %s", e)
                 raise
-            finally:
-                if cudnn_saved is not None:
-                    cudnn_backend = getattr(torch.backends, "cudnn", None)
-                    if cudnn_backend is not None:
-                        cudnn_backend.enabled = cudnn_saved
         LOGGER.debug("set_image: encoding complete")
         self._image_set = True
 
@@ -299,7 +289,7 @@ class SAM3Backend(SegmentationBackend):
                     self._proc_shape or self._src_shape,
                     text=[text],
                 )
-            return self._format_result(pred_masks, pred_boxes, confidence=confidence)
+        return self._format_result(pred_masks, pred_boxes, confidence=confidence)
 
     def predict(
         self,
@@ -324,7 +314,7 @@ class SAM3Backend(SegmentationBackend):
                     bboxes=bboxes,
                     labels=labels,
                 )
-            return self._format_result(pred_masks, pred_boxes)
+        return self._format_result(pred_masks, pred_boxes)
 
     def _restore_outputs(self, pred_masks, pred_boxes):
         """Convert processed (padded/downscaled) outputs back to original image space."""

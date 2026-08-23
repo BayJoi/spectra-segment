@@ -71,6 +71,8 @@ os.environ["HF_HUB_CACHE"] = str(_HF_CACHE / "hub")
 os.environ["HUGGINGFACE_HUB_CACHE"] = str(_HF_CACHE / "hub")
 os.environ["TRANSFORMERS_CACHE"] = str(_HF_CACHE / "hub")
 os.environ["HF_MODULES_CACHE"] = str(_HF_CACHE / "modules")
+os.environ["HF_XET_CACHE"] = str(_HF_CACHE / "xet")
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["HF_DATASETS_CACHE"] = str(MODEL_WEIGHTS_DIR / "hf_datasets")
 os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(MODEL_WEIGHTS_DIR / "sentence_transformers")
 os.environ["TORCH_HOME"] = str(MODEL_WEIGHTS_DIR / "torch_cache")
@@ -185,13 +187,18 @@ class _BufferHandler(logging.Handler):
                 "message": msg,
                 "ts": time.strftime("%H:%M:%S"),
             }
-            for rx in _DOWNLOAD_RES:
-                m = rx.match(msg)
-                if m and int(m.group("pct")) <= 100:
-                    entry["level"] = "DOWNLOAD"
-                    entry["name"] = m.group("name").strip()
-                    entry["pct"] = int(m.group("pct"))
-                    break
+            dl = getattr(record, "dl", None)
+            if isinstance(dl, dict):
+                entry.update(dl)
+                entry["level"] = "DOWNLOAD"
+            else:
+                for rx in _DOWNLOAD_RES:
+                    m = rx.match(msg)
+                    if m and int(m.group("pct")) <= 100:
+                        entry["level"] = "DOWNLOAD"
+                        entry["name"] = m.group("name").strip()
+                        entry["pct"] = int(m.group("pct"))
+                        break
             _log_buffer.append(entry)
             loop = _get_main_loop()
             if loop is None or loop.is_closed():
@@ -237,10 +244,11 @@ def _get_main_loop() -> asyncio.AbstractEventLoop | None:
     return _main_loop
 
 MAX_IMAGE_PIXELS = 4096 * 4096
+MAX_UPLOAD_PIXELS = 32_000_000
 MAX_IMAGE_DIMENSION = 8192
 
 if Image is not None:
-    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = MAX_UPLOAD_PIXELS
 
 IMAGE_MAGIC_BYTES = {
     b"\xff\xd8\xff": "jpeg",
@@ -281,22 +289,40 @@ def _decode_image(raw: bytes) -> np.ndarray:
         try:
             with Image.open(io.BytesIO(raw)) as _probe:
                 _pw, _ph = _probe.size
-            if _pw * _ph > MAX_IMAGE_PIXELS or _pw > MAX_IMAGE_DIMENSION or _ph > MAX_IMAGE_DIMENSION:
-                LOGGER.warning("Rejected image: header reports %dx%d (over limits)", _pw, _ph)
+            if (
+                _pw * _ph > MAX_UPLOAD_PIXELS
+                or _pw > MAX_IMAGE_DIMENSION * 4
+                or _ph > MAX_IMAGE_DIMENSION * 4
+            ):
+                LOGGER.warning("Rejected image: header reports %dx%d (over hard ceiling)", _pw, _ph)
                 return None
+        except Image.DecompressionBombError:
+            LOGGER.warning("Rejected image: exceeds hard pixel ceiling")
+            return None
         except Exception:
             pass
+
+    def _fit(w: int, h: int) -> tuple[int, int]:
+        scale = min(
+            1.0,
+            (MAX_IMAGE_PIXELS / max(1, w * h)) ** 0.5,
+            MAX_IMAGE_DIMENSION / max(1, w, h),
+        )
+        if scale >= 1.0:
+            return w, h
+        return max(1, int(w * scale)), max(1, int(h * scale))
 
     if Image and ImageOps:
         try:
             pil_img = Image.open(io.BytesIO(raw))
             try:
-                transposed = ImageOps.exif_transpose(pil_img)
-                if transposed is not pil_img:
-                    rgb = np.array(transposed)
-                    transposed.close()
-                else:
-                    rgb = np.array(pil_img)
+                pil_img = ImageOps.exif_transpose(pil_img)
+                w, h = pil_img.size
+                nw, nh = _fit(w, h)
+                if (nw, nh) != (w, h):
+                    LOGGER.info("Resizing upload %dx%d -> %dx%d", w, h, nw, nh)
+                    pil_img = pil_img.resize((nw, nh), Image.LANCZOS)
+                rgb = np.array(pil_img)
                 if rgb.ndim == 2:
                     return cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
                 if rgb.shape[2] == 4:
@@ -304,10 +330,21 @@ def _decode_image(raw: bytes) -> np.ndarray:
                 return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             finally:
                 pil_img.close()
+        except Image.DecompressionBombError:
+            LOGGER.warning("Rejected image: exceeds hard pixel ceiling")
+            return None
         except Exception:
             pass
+
     arr = np.frombuffer(raw, dtype=np.uint8)
-    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if decoded is not None:
+        h, w = decoded.shape[:2]
+        nw, nh = _fit(w, h)
+        if (nw, nh) != (w, h):
+            LOGGER.info("Resizing upload %dx%d -> %dx%d", w, h, nw, nh)
+            decoded = cv2.resize(decoded, (nw, nh), interpolation=cv2.INTER_AREA)
+    return decoded
 
 
 @asynccontextmanager
@@ -323,17 +360,10 @@ async def lifespan(app: FastAPI):
             cap = min(float(vram_cap), 0.95)
             if cap > 0.0:
                 torch.cuda.set_per_process_memory_fraction(cap)
-                total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-                LOGGER.info(
-                    "VRAM hard cap set: %.0f%% of device memory (%.1f GB)",
-                    cap * 100,
-                    total_gb,
-                )
         except Exception as e:
             LOGGER.warning("Could not set VRAM hard cap: %s", e)
 
     device_info = detect_device()
-    LOGGER.info("Device: %s", device_info.description)
 
     if not torch.cuda.is_available():
         LOGGER.warning(
@@ -342,18 +372,19 @@ async def lifespan(app: FastAPI):
         )
     else:
         try:
-            LOGGER.info(
-                "GPU: %s (%s)",
-                torch.cuda.get_device_name(0),
-                torch.cuda.get_device_properties(0),
-            )
+            props = torch.cuda.get_device_properties(0)
+            gpu_line = "%s · %.0f GB" % (torch.cuda.get_device_name(0), props.total_memory / (1024**3))
+            arch = getattr(props, "gcnArchName", "") or ""
+            if arch:
+                gpu_line += " · " + arch.split(":")[0]
+            if torch.version.hip:
+                gpu_line += " · ROCm %s" % torch.version.hip
+            LOGGER.info(gpu_line)
         except Exception:
             pass
 
     try:
         if torch.cuda.is_available() and torch.version.hip:
-            arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
-            LOGGER.info("AMD GPU arch: %s, ROCm: %s", arch, torch.version.hip)
             try:
                 torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
             except Exception:
@@ -362,8 +393,6 @@ async def lifespan(app: FastAPI):
                 torch.backends.cudnn.benchmark = False
             except Exception:
                 pass
-            miopen_status = "enabled" if getattr(torch.backends.cudnn, 'enabled', False) else "disabled"
-            LOGGER.info("ROCm perf: fp16_reduced_precision_reduction=True, cudnn_benchmark=False (immediate mode, no MIOpen tuning), MIOpen=%s", miopen_status)
     except Exception:
         pass
 
@@ -717,25 +746,11 @@ def _notify_model_status(event: str) -> None:
     except Exception:
         LOGGER.debug("Failed to broadcast model status", exc_info=True)
 
-
-def _has_hf_snapshot(model_cache: Path) -> bool:
-    snapshots = model_cache / "snapshots"
-    if snapshots.exists():
-        for entry in snapshots.iterdir():
-            if entry.is_dir() and any(entry.iterdir()):
-                return True
-    return False
-
-
 def _is_hf_model_downloaded(name: str) -> bool:
-    from backend_amd_gpu.models.grounding_detector import HF_MODEL_IDS
+    from backend_amd_gpu.models.grounding_detector import HF_MODEL_IDS, hf_weights_downloaded
+
     hf_id = HF_MODEL_IDS.get(name, name)
-    hf_name = hf_id.replace("/", "--")
-    hf_cache = HF_HUB_CACHE_DIR
-    model_cache = hf_cache / f"models--{hf_name}"
-    if not model_cache.exists():
-        return False
-    return _has_hf_snapshot(model_cache)
+    return hf_weights_downloaded(hf_id)
 
 
 def _check_model_statuses() -> list[dict]:
@@ -882,11 +897,6 @@ async def upload_image(session_id: str, file: UploadFile = File(...)):
     image = _decode_image(raw)
     if image is None:
         raise HTTPException(400, "Failed to decode image")
-    h, w = image.shape[:2]
-    if h * w > MAX_IMAGE_PIXELS:
-        raise HTTPException(400, f"Image too large ({w}x{h}). Max: {MAX_IMAGE_PIXELS} pixels.")
-    if h > MAX_IMAGE_DIMENSION or w > MAX_IMAGE_DIMENSION:
-        raise HTTPException(400, f"Image dimension too large ({w}x{h}). Max: {MAX_IMAGE_DIMENSION}px per side.")
     image_id = _sanitize_filename(file.filename or "upload")
     await asyncio.to_thread(get_manager().load_image, session_id, image, image_id)
     return {"image_id": image_id, "width": image.shape[1], "height": image.shape[0]}
@@ -969,9 +979,9 @@ async def run_prediction(session_id: str, req: StrokeRequest):
             labels=req.labels,
             bboxes=req.bboxes,
         )
-    except ValueError:
+    except ValueError as e:
         LOGGER.exception("Prediction failed for session %s", session_id)
-        raise HTTPException(400, "Invalid prediction request")
+        raise HTTPException(400, f"Invalid prediction request: {e}")
     await _maybe_flush_cache()
     return _masks_to_predict_response(result)
 
@@ -1117,8 +1127,8 @@ async def list_detectors():
 async def load_detector(req: LoadDetectorRequest):
     try:
         await asyncio.to_thread(get_manager().load_detector, req.detector_name)
-    except ValueError:
-        raise HTTPException(400, "Invalid detector name")
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid detector name: {e}")
     except torch.OutOfMemoryError:
         LOGGER.exception("VRAM OOM loading detector %s", req.detector_name)
         raise HTTPException(507, VRAM_OOM_DETAIL)
@@ -1142,9 +1152,9 @@ async def run_detection(session_id: str, req: DetectRequest):
         )
         _log_gpu_mem("after detection")
         return result
-    except ValueError:
+    except ValueError as e:
         LOGGER.exception("Detection validation failed for session %s (query=%r, max_detections=%s)", session_id, req.query, req.max_detections)
-        raise HTTPException(400, "Invalid detection request")
+        raise HTTPException(400, f"Invalid detection request: {e}")
     except torch.OutOfMemoryError:
         LOGGER.exception("VRAM OOM during detection for session %s (query=%r)", session_id, req.query)
         raise HTTPException(507, VRAM_OOM_DETAIL)
@@ -1196,6 +1206,7 @@ async def export_zip(session_id: str, req: ExportZipRequest):
     image_rgb = session.image_rgb
     h, w = image_rgb.shape[:2]
     bg_color = tuple(req.background_color) if req.background_color else None
+    bg_img = np.full_like(image_rgb, bg_color) if bg_color is not None else None
     feather = req.feather_radius
 
     combined = np.zeros((h, w), dtype=bool) if req.include_whole else None
@@ -1214,6 +1225,7 @@ async def export_zip(session_id: str, req: ExportZipRequest):
                 output_format="png",
                 background_color=bg_color,
                 feather_radius=feather,
+                bg_image=bg_img,
             )
             zf.writestr(_safe_arcname(req.root, item.path), png_bytes)
 
@@ -1226,6 +1238,7 @@ async def export_zip(session_id: str, req: ExportZipRequest):
                 output_format="jpg" if use_jpg else "png",
                 background_color=bg_color,
                 feather_radius=feather,
+                bg_image=bg_img,
             )
             whole_name = f"whole.{'jpg' if use_jpg else 'png'}"
             zf.writestr(_safe_arcname(req.root, whole_name), whole_bytes)
@@ -1263,6 +1276,7 @@ async def export_image(session_id: str, req: ExportImageRequest):
     image_rgb = session.image_rgb
     h, w = image_rgb.shape[:2]
     bg_color = tuple(req.background_color) if req.background_color else None
+    bg_img = np.full_like(image_rgb, bg_color) if bg_color is not None else None
 
     combined = np.zeros((h, w), dtype=bool)
     for item in req.files:
@@ -1277,6 +1291,7 @@ async def export_image(session_id: str, req: ExportImageRequest):
         output_format="jpg" if use_jpg else "png",
         background_color=bg_color,
         feather_radius=req.feather_radius,
+        bg_image=bg_img,
     )
     media_type = "image/jpeg" if use_jpg else "image/png"
     return Response(content=out_bytes, media_type=media_type)

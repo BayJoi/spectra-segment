@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import os
@@ -21,7 +21,7 @@ def _detect_rocm() -> tuple[bool, str]:
         import torch
         if torch.cuda.is_available() and torch.version.hip:
             gpu_name = torch.cuda.get_device_name(0)
-            LOGGER.info("AMD ROCm device: %s", gpu_name)
+            LOGGER.debug("AMD ROCm device: %s", gpu_name)
             return True, gpu_name
     except Exception:
         pass
@@ -33,7 +33,7 @@ def _detect_nvidia() -> tuple[bool, str]:
         import torch
         if torch.cuda.is_available() and torch.version.cuda:
             gpu_name = torch.cuda.get_device_name(0)
-            LOGGER.info("NVIDIA CUDA device: %s", gpu_name)
+            LOGGER.debug("NVIDIA CUDA device: %s", gpu_name)
             return True, gpu_name
     except Exception:
         pass
@@ -42,7 +42,7 @@ def _detect_nvidia() -> tuple[bool, str]:
 
 def detect_device() -> DeviceInfo:
     if os.environ.get("SPECTRA_FORCE_CPU") == "1":
-        LOGGER.info("CPU forced by memory profile (SPECTRA_FORCE_CPU=1)")
+        LOGGER.debug("CPU forced by memory profile (SPECTRA_FORCE_CPU=1)")
         return DeviceInfo(
             torch_device="cpu",
             description="CPU (forced by memory profile)",
@@ -62,7 +62,7 @@ def detect_device() -> DeviceInfo:
             description=f"NVIDIA CUDA - {gpu_name}",
         )
 
-    LOGGER.info("No GPU acceleration detected, falling back to CPU")
+    LOGGER.debug("No GPU acceleration detected, falling back to CPU")
     return DeviceInfo(
         torch_device="cpu",
         description="CPU (no acceleration)",

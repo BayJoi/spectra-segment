@@ -1,12 +1,8 @@
-export interface SseHandle {
-  close: () => void;
-}
-
 export function connectSse(
   url: string,
   onMessage: (data: string) => void,
   onStateChange?: (connected: boolean) => void
-): SseHandle {
+): { close: () => void } {
   let es: EventSource | null = null;
   let closed = false;
   let attempt = 0;

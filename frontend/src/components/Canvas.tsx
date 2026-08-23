@@ -95,12 +95,10 @@ export function Canvas({ interactive = true }: CanvasProps) {
 
   const canvasRefs = useMemo(
       () => ({ containerRef, imageCanvasRef, drawCanvasRef, maskCanvasRef, detectCanvasRef, imageRef }),
-      // eslint-disable-next-line react-hooks/exhaustive-deps
       []
   );
   const rendererState = useMemo(
     () => ({ masksRef, detectionsRef, selectedDetectionRef, showTransparentRef, hideBboxesRef, featherRadiusRef, sam3InstancesRef, selectedSam3InstanceRef }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
 
@@ -180,7 +178,12 @@ export function Canvas({ interactive = true }: CanvasProps) {
     if (!imageRef.current) return;
     invalidateCache();
     requestAnimationFrame(() => redraw());
-  }, [masks, perDetectionMasks, detections, selectedDetection, showTransparent, hideBboxes, featherRadius, sam3Instances, selectedSam3Instance, redraw, invalidateCache]);
+  }, [masks, perDetectionMasks, detections, featherRadius, sam3Instances, redraw, invalidateCache]);
+
+  useEffect(() => {
+    if (!imageRef.current) return;
+    requestAnimationFrame(() => redraw());
+  }, [selectedDetection, showTransparent, hideBboxes, selectedSam3Instance, redraw]);
 
   useEffect(() => {
     const removeDetectionAt = (idx: number) => {

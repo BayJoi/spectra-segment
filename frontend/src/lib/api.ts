@@ -27,10 +27,12 @@ async function decodeMasks(masks: string[]): Promise<PackedMask[]> {
 
 async function decodeObjectMasks(obj?: Record<string, string>): Promise<Record<number, PackedMask>> {
   if (!obj) return {};
+  const entries = Object.entries(obj);
+  const decoded = await Promise.all(entries.map(([, v]) => decodeDetectionMask(v)));
   const out: Record<number, PackedMask> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    out[Number(k)] = await decodeDetectionMask(v);
-  }
+  entries.forEach(([k], i) => {
+    out[Number(k)] = decoded[i];
+  });
   return out;
 }
 

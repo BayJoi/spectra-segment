@@ -184,6 +184,40 @@ export function useCanvasRenderer(
     [refs.containerRef, refs.imageRef]
   );
 
+  const redrawRef = useRef<() => void>(() => {});
+
+  const rebuildGateRef = useRef<{
+    last: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    pending: (() => void) | null;
+  }>({ last: 0, timer: null, pending: null });
+
+  const maybeRebuild = useCallback((fn: () => void) => {
+    const gate = rebuildGateRef.current;
+    const now = performance.now();
+    if (now - gate.last >= 80) {
+      gate.last = now;
+      if (gate.timer) {
+        clearTimeout(gate.timer);
+        gate.timer = null;
+        gate.pending = null;
+      }
+      fn();
+      return;
+    }
+    gate.pending = fn;
+    if (!gate.timer) {
+      gate.timer = setTimeout(() => {
+        gate.timer = null;
+        gate.last = performance.now();
+        const p = gate.pending;
+        gate.pending = null;
+        p?.();
+        redrawRef.current();
+      }, 90);
+    }
+  }, []);
+
   const rebuildMaskCache = useCallback((currentMasks: PackedMask[], featherRadius: number) => {
     const img = refs.imageRef.current;
     if (!img || !currentMasks.length) {
@@ -290,18 +324,18 @@ export function useCanvasRenderer(
           return;
         }
 
-        rebuildTransparentComposite(currentMasks, featherRadius);
+        maybeRebuild(() => rebuildTransparentComposite(currentMasks, featherRadius));
         if (transparentCompositeRef.current) {
           ctx.drawImage(transparentCompositeRef.current, ox, oy, dw, dh);
         }
       } else {
-        rebuildMaskCache(currentMasks, featherRadius);
+        maybeRebuild(() => rebuildMaskCache(currentMasks, featherRadius));
         if (maskCacheRef.current) {
           ctx.drawImage(maskCacheRef.current, canvasState.offsetX, canvasState.offsetY, Math.floor(img!.naturalWidth * canvasState.scale), Math.floor(img!.naturalHeight * canvasState.scale));
         }
       }
     },
-    [refs.maskCanvasRef, refs.imageRef, state.masksRef, state.showTransparentRef, state.featherRadiusRef, rebuildMaskCache, rebuildTransparentComposite]
+    [refs.maskCanvasRef, refs.imageRef, state.masksRef, state.showTransparentRef, state.featherRadiusRef, rebuildMaskCache, rebuildTransparentComposite, maybeRebuild]
   );
 
   const renderDetections = useCallback(
@@ -468,6 +502,8 @@ export function useCanvasRenderer(
     transparentCompositeKeyRef.current = "";
     checkerPatternCacheRef.current = null;
   }, []);
+
+  redrawRef.current = redraw;
 
   return { computeState, redraw, invalidateCache };
 }

@@ -68,3 +68,5 @@ desktop.ini
 *.swp
 *.swo
 *~
+# Health check logs
+checks/*.log

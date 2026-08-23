@@ -7,12 +7,12 @@ import ssl
 LOGGER = logging.getLogger(__name__)
 
 _PINNED_HOSTS = [
-    "https://github.com",
     "https://huggingface.co",
+    "https://github.com",
 ]
 
 
-def is_connected(timeout: float = 3.0) -> bool:
+def is_connected(timeout: float = 1.5) -> bool:
     ctx = ssl.create_default_context()
     for host in _PINNED_HOSTS:
         try:

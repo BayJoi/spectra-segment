@@ -10,6 +10,7 @@ import { EndSessionDialog } from "@/components/EndSessionDialog";
 import { UnsupportedFileDialog } from "@/components/UnsupportedFileDialog";
 import { EncodingOverlay } from "@/components/EncodingOverlay";
 import { Sam3Page } from "@/components/Sam3Page";
+import { ToastHost } from "@/components/Toast";
 import { hasImageAtom, masksAtom, modelNameAtom, perDetectionMasksAtom } from "@/store/session";
 import { uploadHoveredAtom, exportOpenAtom, settingsOpenAtom, modeDialogOpenAtom, modeSwitchTargetAtom, showTransparentAtom, endSessionOpenAtom, imageEncodingAtom } from "@/store/ui";
 import { detectorsAtom, detectModeAtom, selectedDetectionAtom } from "@/store/detection";
@@ -184,6 +185,7 @@ export function App() {
       <EndSessionDialog />
       <UnsupportedFileDialog />
       <EncodingOverlay />
+      <ToastHost />
       <div
         className="fixed inset-0 z-50 pointer-events-none transition-opacity duration-200"
         style={{ background: vignetteBg, opacity: showVignette ? 1 : 0 }}

@@ -33,10 +33,11 @@ def composite_rgba(image_rgb: np.ndarray, soft_mask: np.ndarray) -> np.ndarray:
 def composite_background(
     image_rgb: np.ndarray,
     soft_mask: np.ndarray,
-    bg_color: tuple[int, int, int] = (255, 255, 255),
+    background_color: tuple[int, int, int] | None = None,
+    bg_image: np.ndarray | None = None,
 ) -> np.ndarray:
+    bg = bg_image if bg_image is not None else np.full_like(image_rgb, background_color or (255, 255, 255))
     alpha = soft_mask[..., None]
-    bg = np.full_like(image_rgb, bg_color, dtype=np.uint8)
     result = (image_rgb * alpha + bg * (1 - alpha)).clip(0, 255).astype(np.uint8)
     return result
 
@@ -47,12 +48,13 @@ def composite_and_encode(
     output_format: str = "png",
     background_color: tuple[int, int, int] | None = None,
     feather_radius: int = 3,
+    bg_image: np.ndarray | None = None,
 ) -> bytes:
     soft = feather_mask_edge(mask, feather_radius)
     buf = io.BytesIO()
 
     if background_color is not None:
-        result = composite_background(image_rgb, soft, background_color)
+        result = composite_background(image_rgb, soft, background_color=background_color, bg_image=bg_image)
         pil_img = Image.fromarray(result, "RGB")
         if output_format in ("jpg", "jpeg"):
             pil_img.save(buf, format="JPEG", quality=95)

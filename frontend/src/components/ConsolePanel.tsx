@@ -18,13 +18,20 @@ interface LogEntry {
   ts?: string;
   name?: string;
   pct?: number;
+  file?: string;
+  files_done?: number | null;
+  files_total?: number | null;
+  phase?: "starting" | "download" | "verify" | "load" | "done";
+  done_bytes?: number;
+  total_bytes?: number;
+  eta?: string;
 }
 
 const LEVEL_DOT: Record<string, string> = {
   INFO: "bg-neutral-500",
   WARNING: "bg-yellow-400",
   ERROR: "bg-red-400",
-  DOWNLOAD: "bg-blue-400",
+  DOWNLOAD: "bg-orange-400",
 };
 
 const MAX_LOG_ENTRIES = 500;
@@ -72,6 +79,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
   const pendingRef = useRef<LogEntry[]>([]);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const prevOpenRef = useRef(false);
 
   const appendEntry = useCallback((entry: LogEntry) => {
@@ -194,18 +202,64 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
   }, [filterOpen]);
 
   useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, setOpen]);
+
+  useEffect(() => {
     return () => {
       if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
     };
   }, []);
 
   const progressRows = useMemo(() => {
-    const map = new Map<string, { pct: number; message: string }>();
+    interface Row {
+      pct: number;
+      message: string;
+      phase: NonNullable<LogEntry["phase"]>;
+      file?: string;
+      files_done?: number | null;
+      files_total?: number | null;
+      done_bytes?: number;
+      total_bytes?: number;
+      eta?: string;
+    }
+    if (!open) return [] as [string, Row][];
+    const map = new Map<string, Row>();
     for (const l of logs) {
-      if (l.level === "DOWNLOAD" && l.name) map.set(l.name, { pct: l.pct ?? 0, message: l.message });
+      if (l.level !== "DOWNLOAD" || !l.name) continue;
+      const phase = l.phase ?? "download";
+      const filesIncomplete = !!l.files_total && (l.files_done ?? 0) < l.files_total;
+      if (phase === "done" || ((l.pct ?? 0) >= 100 && !filesIncomplete)) {
+        map.delete(l.name);
+        continue;
+      }
+      const prev = map.get(l.name);
+      map.set(l.name, {
+        pct: l.pct ?? prev?.pct ?? 0,
+        message: l.message,
+        phase: phase === "starting" && prev?.phase && prev.phase !== "starting" ? prev.phase : phase,
+        file: l.file ?? prev?.file,
+        files_done: l.files_done ?? prev?.files_done,
+        files_total: l.files_total ?? prev?.files_total,
+        done_bytes: l.done_bytes ?? prev?.done_bytes,
+        total_bytes: l.total_bytes ?? prev?.total_bytes,
+        eta: l.eta ?? prev?.eta,
+      });
     }
     return [...map.entries()];
-  }, [logs]);
+  }, [logs, open]);
 
   const filteredLogs = useMemo(() => {
     const minRank = FILTER_OPTIONS.find((f) => f.key === filter)?.minRank ?? -Infinity;
@@ -232,7 +286,10 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
     const lines = filteredLogs.map((l) => `[${l.ts ?? "--:--:--"}] [${l.level}] ${l.message}`);
     if (progressRows.length > 0) {
       lines.push("", "[downloads]");
-      for (const [name, p] of progressRows) lines.push(`  ${name}: ${p.pct}%`);
+      for (const [name, p] of progressRows) {
+        const files = p.files_total && p.files_total > 1 ? ` files ${p.files_done ?? 0}/${p.files_total}` : "";
+        lines.push(`  ${name}: ${p.pct}%${files}${p.eta ? ` ETA ${p.eta}` : ""}`);
+      }
     }
     const text = lines.join("\n");
     let ok = false;
@@ -270,7 +327,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
   const downloadedModels = models.filter((m) => m.downloaded).length;
 
   return (
-    <div className="relative z-[85]">
+    <div ref={panelRef} className="relative z-[85]">
       <button
         onClick={() => setOpen(!open)}
         className={cn(
@@ -423,21 +480,57 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
             </div>
           )}
           {progressRows.length > 0 && (
-            <div className="border-b border-neutral-800/60 px-3 py-2 space-y-1.5">
-              {progressRows.map(([name, p]) => (
-                <div key={name}>
-                  <div className="flex items-center justify-between text-[9px] font-mono text-blue-300/80 mb-0.5">
-                    <span className="truncate mr-2">{name}</span>
-                    <span className="tabular-nums">{p.pct}%</span>
+            <div className="border-b border-neutral-800/60 px-3 py-2 space-y-2">
+              {progressRows.map(([name, p]) => {
+                const gb = 1024 ** 3;
+                const mb = 1024 ** 2;
+                const sizeText =
+                  p.total_bytes && p.total_bytes >= gb
+                    ? `${((p.done_bytes ?? 0) / gb).toFixed(1)} / ${(p.total_bytes / gb).toFixed(1)} GB`
+                    : p.total_bytes
+                      ? `${Math.round((p.done_bytes ?? 0) / mb)} / ${Math.round(p.total_bytes / mb)} MB`
+                      : null;
+                const chip = p.phase === "verify" ? "Verifying" : p.phase === "starting" ? "Starting" : "Downloading";
+                const hot = p.pct > 90;
+                const files = p.files_total && p.files_total > 1 ? `${p.files_done ?? 0}/${p.files_total}` : null;
+                return (
+                  <div key={name}>
+                    <div className="flex items-center justify-between text-[9px] font-mono text-orange-300/80 mb-0.5">
+                      <span className="truncate mr-2">{name}</span>
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-orange-400">{chip}</span>
+                        <span className="tabular-nums">{p.pct}%</span>
+                      </span>
+                    </div>
+                    <div className="h-1 rounded-full bg-neutral-800 overflow-hidden">
+                      <div
+                        className={cn(
+                          "h-full rounded-full transition-[width] duration-300",
+                          hot ? "bg-orange-400" : "bg-gradient-to-r from-orange-500 to-orange-400"
+                        )}
+                        style={{ width: `${p.pct}%` }}
+                      />
+                    </div>
+                    {(files || sizeText || p.eta) && (
+                      <div className="flex items-center justify-between text-[8px] font-mono text-neutral-500 mt-0.5">
+                        <span className="truncate">{[sizeText, p.file].filter(Boolean).join(" · ")}</span>
+                        <span className="shrink-0 ml-2 flex items-center gap-1.5">
+                          {files && <span>{files}</span>}
+                          {p.eta && <span>ETA {p.eta}</span>}
+                        </span>
+                      </div>
+                    )}
+                    {files && (
+                      <div className="h-0.5 rounded-full bg-neutral-800 overflow-hidden mt-0.5">
+                        <div
+                          className="h-full bg-orange-500/70 transition-[width] duration-300"
+                          style={{ width: `${(((p.files_done ?? 0) / p.files_total!) * 100).toFixed(0)}%` }}
+                        />
+                      </div>
+                    )}
                   </div>
-                  <div className="h-1 rounded-full bg-neutral-800 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-[width] duration-300"
-                      style={{ width: `${p.pct}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
           <div className="relative">

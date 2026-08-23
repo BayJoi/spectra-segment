@@ -18,6 +18,7 @@ echo  ^|                        Cleanup  (AMD)                      ^|
 echo  ^|  Portable, self-contained. Everything stays in this folder ^|
 echo  +------------------------------------------------------------+
 echo(
+echo    Protected: checks\ folder (health-check script + logs) is never removed.
 
 call :section "[ 1 / 3 ]  Reviewing items to remove"
 echo   The following will be permanently removed:
@@ -140,6 +141,11 @@ if !PYCACHE_COUNT! GTR 0 (
     set "HAS_ITEMS=1"
 )
 
+if exist "%MODELS_DIR%\pycache" (
+    echo    [DIR]  model_weights\pycache\  ^(python bytecode cache^)
+    set "HAS_ITEMS=1"
+)
+
 if "%HAS_ITEMS%"=="0" (
     echo   [INFO]  Nothing to clean.
     pause
@@ -227,6 +233,11 @@ if exist "%LOGS_DIR%" (
 echo Removing __pycache__ directories...
 for /d /r "%AMD_DIR%" %%d in (__pycache__) do @if exist "%%d" rmdir /s /q "%%d" 2>nul
 echo  Done.
+
+if exist "%MODELS_DIR%\pycache" (
+    echo Removing model_weights\pycache...
+    rmdir /s /q "%MODELS_DIR%\pycache" 2>nul && echo  Done.
+)
 
 if exist "%AMD_DIR%\.gpu_arch.txt" del /q "%AMD_DIR%\.gpu_arch.txt" && echo  Removed .gpu_arch.txt
 if exist "%AMD_DIR%\.gpu_id.txt" del /q "%AMD_DIR%\.gpu_id.txt" && echo  Removed .gpu_id.txt

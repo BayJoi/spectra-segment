@@ -40,6 +40,31 @@ transformers
   License: Apache-2.0
   Copyright: Copyright 2018- The HuggingFace Team
 
+huggingface_hub
+  License: Apache-2.0
+  Copyright: Copyright 2018- The HuggingFace Team
+
+hf-xet
+  License: Apache-2.0
+  Copyright: Copyright (c) The HuggingFace Team
+  Note: Xet-backed chunked downloads for HuggingFace models.
+
+starlette
+  License: BSD-3-Clause
+  Copyright: Copyright (c) 2018 Sentenz
+
+h11
+  License: MIT
+  Copyright: Copyright (c) 2021 the h11 authors
+
+safetensors
+  License: Apache-2.0
+  Copyright: Copyright 2020- The HuggingFace Team
+
+tokenizers
+  License: Apache-2.0
+  Copyright: Copyright 2019- The HuggingFace Team
+
 accelerate
   License: Apache-2.0
   Copyright: Copyright 2021- The HuggingFace Team
@@ -115,6 +140,29 @@ unocss
 vite
   License: MIT
   Copyright: Copyright (c) 2019-present, VoidZero Inc. and Vite contributors
+
+
+RUNTIME DEPENDENCIES (PyTorch / ROCm stack - installed by install scripts)
+-------------------------------------------------------------------------
+
+torch
+  License: BSD-3-Clause (with portions under Apache-2.0/LLVM-exception and other
+  permissive licenses; the full text ships inside the wheel at torch/LICENSE)
+  Copyright: Copyright (c) Meta Platforms, Inc. and affiliates
+  Note: Installed from AMD's TheRock ROCm wheel index on AMD systems.
+
+torchvision
+  License: BSD-3-Clause
+  Copyright: Copyright (c) Soumith Chintala 2016
+
+rocm-sdk / ROCm libraries (AMD systems)
+  License: Mixed permissive (MIT / NCSA / Apache-2.0 / BSD variants)
+  Copyright: Copyright (c) Advanced Micro Devices, Inc.
+  Note: Provided via TheRock wheels, github.com/ROCm/TheRock.
+
+MIOpen
+  License: MIT
+  Copyright: Copyright (c) 2017-2025 Advanced Micro Devices, Inc.
 
 
 MODEL LICENSES

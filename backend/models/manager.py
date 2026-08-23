@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import os
@@ -15,7 +15,7 @@ import torch as _torch
 from .base import SegmentationBackend
 from .detector_base import DetectorBackend
 from .ultralytics_backend import UltralyticsBackend
-from .grounding_detector import GROUNDING_DETECTORS, DETECTOR_METADATA, GroundingDetector, HF_MODEL_IDS
+from .grounding_detector import GROUNDING_DETECTORS, DETECTOR_METADATA, GroundingDetector, HF_MODEL_IDS, hf_weights_downloaded
 from .yoloe_detector import YOLOE_MODELS, YOLOE_METADATA, YOLEDetector
 from .sam3_backend import SAM3_MODEL, SAM3Backend, DEFAULT_ENCODE_DIM
 from ..utils.compositing import mask_to_png_b64
@@ -60,11 +60,11 @@ class Session:
     sam3_last_masks: np.ndarray | None = None
     sam3_last_scores: np.ndarray | None = None
     sam3_last_bboxes: np.ndarray | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 @dataclass(slots=True)
 class MaskSnapshot:
-    scores: np.ndarray | None = None
     low_res: np.ndarray | None = None
 
 
@@ -96,6 +96,7 @@ class SAM3Snapshot:
     masks: np.ndarray | None = None
     scores: np.ndarray | None = None
     bboxes: np.ndarray | None = None
+    mask_shape: tuple[int, ...] | None = None
 
 
 class ModelManager:
@@ -143,6 +144,12 @@ class ModelManager:
         for obj in evict:
             if not obj.is_loaded:
                 continue
+            infer_lock = getattr(obj, "_infer_lock", None)
+            if infer_lock is not None:
+                if not infer_lock.acquire(blocking=False):
+                    LOGGER.debug("Skipping eviction of model with inference in flight")
+                    continue
+                infer_lock.release()
             try:
                 obj.unload_model()
             except Exception:
@@ -164,6 +171,7 @@ class ModelManager:
         if not _torch.cuda.is_available() or self._device == "cpu":
             return
         try:
+            _torch.cuda.empty_cache()
             free, total = _torch.cuda.mem_get_info()
         except Exception:
             return
@@ -181,10 +189,8 @@ class ModelManager:
             return
 
         LOGGER.info(
-            "VRAM projection %.0f MB > budget %.0f MB (need %d MB) - unloading resident models",
-            projected_mb,
-            budget_mb,
-            required_mb,
+            "Freeing VRAM — over budget by %.0f MB",
+            projected_mb - budget_mb,
         )
         self._evict_loaded_models()
 
@@ -223,7 +229,7 @@ class ModelManager:
         model_dir = MODEL_WEIGHTS_DIR
         model_file = model_dir / model_name
         if not model_file.exists():
-            LOGGER.info("Model not found locally: %s — downloading now...", model_name)
+            LOGGER.info("%s not cached — downloading", model_name)
             if self._status_callback:
                 self._status_callback("downloading")
             from backend.utils.net_check import is_connected
@@ -251,7 +257,7 @@ class ModelManager:
                         f"  Delete the file and re-download it:\n"
                         f"  {model_file}"
                     )
-            LOGGER.info("Loading model: %s ...", model_name)
+            LOGGER.info("Loading %s...", model_name)
 
         if model_name == SAM3_MODEL:
             backend: SegmentationBackend = SAM3Backend(device=self._device)
@@ -274,7 +280,7 @@ class ModelManager:
             self._last_seg_use = time.time()
         if self._status_callback:
             self._status_callback("loaded")
-        LOGGER.info("Model ready: %s in %s", model_name, format_duration(time.time() - _load_t0))
+        LOGGER.info("%s ready in %s", model_name, format_duration(time.time() - _load_t0))
         return backend
 
     def create_session(self, model_name: str) -> Session:
@@ -326,13 +332,13 @@ class ModelManager:
             session.objects.clear()
             LOGGER.debug("Destroyed session %s", session_id)
             if unload_model is not None:
-                LOGGER.info("Unloading model %s (no remaining sessions)", unload_model_name)
+                LOGGER.info("Unloading %s (idle)", unload_model_name)
                 try:
                     unload_model.unload_model()
                 except Exception:
                     LOGGER.exception("Error unloading model %s", unload_model_name)
             if unload_detector is not None and unload_detector.is_loaded:
-                LOGGER.info("Unloading detector %s (no remaining sessions)", unload_detector_name)
+                LOGGER.info("Unloading detector %s (idle)", unload_detector_name)
                 try:
                     unload_detector.unload_model()
                 except Exception:
@@ -384,7 +390,7 @@ class ModelManager:
             LOGGER.exception("SAM encoding failed for session %s — continuing without features", session_id)
             session.backend.reset_image()
 
-        LOGGER.info("Loaded %s (%dx%d) — encoded in %s", image_id, session.image_width, session.image_height, format_duration(time.time() - t0))
+        LOGGER.info("%s · %dx%d · encoded in %s", image_id, session.image_width, session.image_height, format_duration(time.time() - t0))
 
     def _ensure_model_loaded(self, session: Session) -> None:
         with self._lock:
@@ -401,7 +407,7 @@ class ModelManager:
         if self._status_callback:
             self._status_callback("loading")
         try:
-            LOGGER.info("Reloading model %s for session %s ...", session.model_name, session.session_id)
+            LOGGER.debug("Reloading %s", session.model_name)
             self._ensure_encode_headroom(None)
             backend = self.get_or_load_model(session.model_name)
             session.backend = backend
@@ -420,7 +426,7 @@ class ModelManager:
             name = self._last_detector_name
         if not name:
             return None
-        LOGGER.info("Reloading idle detector %s ...", name)
+        LOGGER.info("Reloading detector %s", name)
         self.load_detector(name)
         with self._lock:
             return self._detector
@@ -453,27 +459,28 @@ class ModelManager:
 
         appended = False
         if points or bboxes:
-            if points is not None and len(points) > MAX_REPLAY_POINTS:
-                n = len(points)
-                keep = sorted(set(np.round(np.linspace(0, n - 1, MAX_REPLAY_POINTS)).astype(int).tolist()))
-                points = [points[i] for i in keep]
-                if labels is not None and len(labels) == n:
-                    labels = [labels[i] for i in keep]
-                LOGGER.debug("Stroke points capped to %d", len(points))
-            obj.stroke_history.append(
-                StrokeEntry(
-                    points=points or [],
-                    labels=labels or [],
-                    bboxes=bboxes,
+            with session.lock:
+                if points is not None and len(points) > MAX_REPLAY_POINTS:
+                    n = len(points)
+                    keep = sorted(set(np.round(np.linspace(0, n - 1, MAX_REPLAY_POINTS)).astype(int).tolist()))
+                    points = [points[i] for i in keep]
+                    if labels is not None and len(labels) == n:
+                        labels = [labels[i] for i in keep]
+                    LOGGER.debug("Stroke points capped to %d", len(points))
+                obj.stroke_history.append(
+                    StrokeEntry(
+                        points=points or [],
+                        labels=labels or [],
+                        bboxes=bboxes,
+                    )
                 )
-            )
-            obj.redo_stack.clear()
-            appended = True
+                obj.redo_stack.clear()
+                appended = True
 
-            if len(obj.stroke_history) > MAX_STROKE_HISTORY:
-                excess = len(obj.stroke_history) - MAX_STROKE_HISTORY
-                del obj.stroke_history[:excess]
-                del obj.mask_snapshots[:excess]
+                if len(obj.stroke_history) > MAX_STROKE_HISTORY:
+                    excess = len(obj.stroke_history) - MAX_STROKE_HISTORY
+                    del obj.stroke_history[:excess]
+                    del obj.mask_snapshots[:excess]
 
         LOGGER.debug("Running prediction for object %d in session %s ...", object_id, session_id)
         t0 = time.time()
@@ -483,20 +490,20 @@ class ModelManager:
         LOGGER.debug("Prediction complete in %.2fs — %d mask(s) returned", elapsed, mask_count)
 
         if appended:
-            masks = result["masks"]
-            has_mask = masks is not None and len(masks) > 0
-            obj.mask_snapshots.append(
-                MaskSnapshot(
-                    scores=result.get("scores") if has_mask else None,
-                    low_res=result.get("low_res_masks") if has_mask else None,
+            with session.lock:
+                masks = result["masks"]
+                has_mask = masks is not None and len(masks) > 0
+                obj.mask_snapshots.append(
+                    MaskSnapshot(
+                        low_res=result.get("low_res_masks") if has_mask else None,
+                    )
                 )
-            )
-            if has_mask:
-                obj.last_mask = masks
-                obj.last_low_res_mask = result.get("low_res_masks")
-            else:
-                obj.last_mask = None
-                obj.last_low_res_mask = None
+                if has_mask:
+                    obj.last_mask = masks
+                    obj.last_low_res_mask = result.get("low_res_masks")
+                else:
+                    obj.last_mask = None
+                    obj.last_low_res_mask = None
 
         result["all_masks"], result["all_scores"], result["object_masks"] = self._collect_all_masks(session)
         return result
@@ -550,15 +557,16 @@ class ModelManager:
         if not obj or len(obj.stroke_history) == 0:
             return None
 
-        popped = obj.stroke_history.pop()
-        saved_snapshot = obj.mask_snapshots.pop() if obj.mask_snapshots else None
-        prev = obj.mask_snapshots[-1] if obj.mask_snapshots else None
-        obj.last_mask = None
-        obj.last_low_res_mask = prev.low_res if prev is not None else None
-        obj.redo_stack.append((popped, saved_snapshot))
-        if len(obj.redo_stack) > MAX_STROKE_HISTORY:
-            excess = len(obj.redo_stack) - MAX_STROKE_HISTORY
-            del obj.redo_stack[:excess]
+        with session.lock:
+            popped = obj.stroke_history.pop()
+            saved_snapshot = obj.mask_snapshots.pop() if obj.mask_snapshots else None
+            prev = obj.mask_snapshots[-1] if obj.mask_snapshots else None
+            obj.last_mask = None
+            obj.last_low_res_mask = prev.low_res if prev is not None else None
+            obj.redo_stack.append((popped, saved_snapshot))
+            if len(obj.redo_stack) > MAX_STROKE_HISTORY:
+                excess = len(obj.redo_stack) - MAX_STROKE_HISTORY
+                del obj.redo_stack[:excess]
         if len(obj.stroke_history) == 0:
             obj.last_mask = None
             all_masks, all_scores, object_masks = self._collect_all_masks(session)
@@ -582,10 +590,11 @@ class ModelManager:
         if not obj or len(obj.redo_stack) == 0:
             return None
 
-        entry, saved_snapshot = obj.redo_stack.pop()
-        obj.stroke_history.append(entry)
-        if saved_snapshot is not None:
-            obj.mask_snapshots.append(saved_snapshot)
+        with session.lock:
+            entry, saved_snapshot = obj.redo_stack.pop()
+            obj.stroke_history.append(entry)
+            if saved_snapshot is not None:
+                obj.mask_snapshots.append(saved_snapshot)
         if not session.backend.is_loaded:
             self._ensure_model_loaded(session)
         result = self._replay_history(session, obj)
@@ -627,11 +636,12 @@ class ModelManager:
         mask_count = len(result.get("masks", [])) if hasattr(result.get("masks", []), "__len__") else 0
         LOGGER.debug("SAM3 prompt complete in %.2fs — %d mask(s) returned", elapsed, mask_count)
 
-        session.sam3_prompt_history.append((entry, self._sam3_snapshot(result)))
-        session.sam3_redo_stack.clear()
-        if len(session.sam3_prompt_history) > SAM3_MAX_HISTORY:
-            excess = len(session.sam3_prompt_history) - SAM3_MAX_HISTORY
-            del session.sam3_prompt_history[:excess]
+        with session.lock:
+            session.sam3_prompt_history.append((entry, self._sam3_snapshot(result)))
+            session.sam3_redo_stack.clear()
+            if len(session.sam3_prompt_history) > SAM3_MAX_HISTORY:
+                excess = len(session.sam3_prompt_history) - SAM3_MAX_HISTORY
+                del session.sam3_prompt_history[:excess]
         session.sam3_last_masks = result["masks"]
         session.sam3_last_scores = result["scores"]
         session.sam3_last_bboxes = result["bboxes"]
@@ -649,14 +659,15 @@ class ModelManager:
         if not session.sam3_prompt_history:
             return None
 
-        popped = session.sam3_prompt_history.pop()
-        session.sam3_redo_stack.append(popped)
-        if len(session.sam3_redo_stack) > SAM3_MAX_HISTORY:
-            excess = len(session.sam3_redo_stack) - SAM3_MAX_HISTORY
-            del session.sam3_redo_stack[:excess]
+        with session.lock:
+            popped = session.sam3_prompt_history.pop()
+            session.sam3_redo_stack.append(popped)
+            if len(session.sam3_redo_stack) > SAM3_MAX_HISTORY:
+                excess = len(session.sam3_redo_stack) - SAM3_MAX_HISTORY
+                del session.sam3_redo_stack[:excess]
         prev = session.sam3_prompt_history[-1] if session.sam3_prompt_history else None
         if prev is not None:
-            session.sam3_last_masks = prev[1].masks
+            session.sam3_last_masks = self._unpack_masks(prev[1].masks, prev[1].mask_shape)
             session.sam3_last_scores = prev[1].scores
             session.sam3_last_bboxes = prev[1].bboxes
         else:
@@ -676,7 +687,7 @@ class ModelManager:
 
         entry, snap = session.sam3_redo_stack.pop()
         session.sam3_prompt_history.append((entry, snap))
-        session.sam3_last_masks = snap.masks
+        session.sam3_last_masks = self._unpack_masks(snap.masks, snap.mask_shape)
         session.sam3_last_scores = snap.scores
         session.sam3_last_bboxes = snap.bboxes
         return self._sam3_response(session)
@@ -697,7 +708,7 @@ class ModelManager:
             raise ValueError("Invalid prompt index")
 
         entry, snap = session.sam3_prompt_history[prompt_index]
-        masks = snap.masks
+        masks = self._unpack_masks(snap.masks, snap.mask_shape)
         scores = snap.scores
         bboxes = snap.bboxes
         if masks is None or instance_index < 0 or instance_index >= masks.shape[0]:
@@ -709,15 +720,24 @@ class ModelManager:
         if bboxes is not None and bboxes.shape[0] > instance_index:
             bboxes = np.delete(bboxes, instance_index, axis=0)
 
-        if masks.shape[0] == 0:
-            del session.sam3_prompt_history[prompt_index]
-            session.sam3_redo_stack.clear()
-        else:
-            session.sam3_prompt_history[prompt_index] = (entry, SAM3Snapshot(masks=masks, scores=scores, bboxes=bboxes))
+        with session.lock:
+            if masks.shape[0] == 0:
+                del session.sam3_prompt_history[prompt_index]
+                session.sam3_redo_stack.clear()
+            else:
+                session.sam3_prompt_history[prompt_index] = (
+                    entry,
+                    SAM3Snapshot(
+                        masks=self._pack_masks(masks),
+                        scores=scores,
+                        bboxes=bboxes,
+                        mask_shape=masks.shape,
+                    ),
+                )
 
         if session.sam3_prompt_history:
             _, last = session.sam3_prompt_history[-1]
-            session.sam3_last_masks = last.masks
+            session.sam3_last_masks = self._unpack_masks(last.masks, last.mask_shape)
             session.sam3_last_scores = last.scores
             session.sam3_last_bboxes = last.bboxes
         else:
@@ -727,11 +747,25 @@ class ModelManager:
         return self._sam3_response(session)
 
     @staticmethod
+    def _pack_masks(masks: np.ndarray | None) -> np.ndarray | None:
+        if isinstance(masks, np.ndarray) and masks.dtype == bool:
+            return np.packbits(masks)
+        return masks
+
+    @staticmethod
+    def _unpack_masks(packed: np.ndarray | None, shape: tuple[int, ...] | None) -> np.ndarray | None:
+        if packed is not None and shape and len(shape) == 3:
+            return np.unpackbits(packed)[: int(np.prod(shape))].reshape(shape).astype(bool)
+        return packed
+
+    @staticmethod
     def _sam3_snapshot(result: dict[str, Any]) -> SAM3Snapshot:
+        masks = result.get("masks")
         return SAM3Snapshot(
-            masks=result.get("masks"),
+            masks=ModelManager._pack_masks(masks),
             scores=result.get("scores"),
             bboxes=result.get("bboxes"),
+            mask_shape=masks.shape if isinstance(masks, np.ndarray) else None,
         )
 
     @staticmethod
@@ -934,7 +968,7 @@ class ModelManager:
                             unload_model = self._loaded_models.pop(unload_model_name, None)
                             self._current_model = None
             if unload_model is not None:
-                LOGGER.info("Unloading idle SAM3 model %s (idle for %.0fs)", unload_model_name, seg_idle)
+                LOGGER.info("Unloading SAM3 (idle)")
                 try:
                     unload_model.unload_model()
                 except Exception:
@@ -959,10 +993,7 @@ class ModelManager:
             hf_id = HF_MODEL_IDS.get(name, name)
             hf_name = hf_id.replace("/", "--")
             model_cache = hf_cache / f"models--{hf_name}"
-            downloaded = model_cache.exists() and any(
-                (model_cache / d).exists() and any((model_cache / d).iterdir())
-                for d in ("snapshots",)
-            )
+            downloaded = self._detector_downloaded(name)
             detectors.append({
                 "name": name,
                 "display_name": display,
@@ -988,10 +1019,7 @@ class ModelManager:
     def _detector_downloaded(self, detector_name: str) -> bool:
         if detector_name in GROUNDING_DETECTORS:
             hf_id = HF_MODEL_IDS.get(detector_name, detector_name)
-            snapshots = HF_HUB_CACHE_DIR / f"models--{hf_id.replace('/', '--')}" / "snapshots"
-            return snapshots.exists() and any(
-                d.is_dir() and any(d.iterdir()) for d in snapshots.iterdir()
-            )
+            return hf_weights_downloaded(hf_id)
         if detector_name in YOLOE_MODELS:
             return (MODEL_WEIGHTS_DIR / f"{detector_name}.pt").exists()
         return False
@@ -1025,14 +1053,16 @@ class ModelManager:
             raise ValueError(f"Unknown detector: {detector_name}")
 
         t0 = time.time()
-        self._ensure_vram_headroom(2560)
+        tier = DETECTOR_METADATA.get(detector_name, {}).get("tier", "medium")
+        self._ensure_vram_headroom({"tiny": 1024, "small": 1024, "medium": 1536, "large": 2560}.get(tier, 2048))
+        downloaded = self._detector_downloaded(detector_name)
         if self._status_callback:
-            self._status_callback("downloading" if not self._detector_downloaded(detector_name) else "loading")
+            self._status_callback("detector-downloading" if not downloaded else "detector-loading")
         new_detector.load_model(detector_name)
         load_elapsed = time.time() - t0
-        LOGGER.info("Loaded detector %s in %s (device: %s)", detector_name, format_duration(load_elapsed), getattr(new_detector, '_device', '?'))
+        LOGGER.info("%s loaded in %s", detector_name, format_duration(load_elapsed))
         if self._status_callback:
-            self._status_callback("loaded")
+            self._status_callback("detector-loaded")
 
         with self._lock:
             self._detector = new_detector
@@ -1061,10 +1091,11 @@ class ModelManager:
             raise ValueError("No detector loaded. Call load_detector() first.")
 
         seg_to_unload = None
-        with self._lock:
-            if self._current_model and self._current_model in self._loaded_models:
-                seg_to_unload = self._loaded_models.pop(self._current_model)
-                self._current_model = None
+        if os.environ.get("SPECTRA_KEEP_SEG_ON_DETECT") != "1":
+            with self._lock:
+                if self._current_model and self._current_model in self._loaded_models:
+                    seg_to_unload = self._loaded_models.pop(self._current_model)
+                    self._current_model = None
         if seg_to_unload is not None:
             LOGGER.debug(
                 "Unloading segmentation model %s for detection",

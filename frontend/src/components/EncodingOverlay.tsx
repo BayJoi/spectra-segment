@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useAtom } from "jotai";
-import { imageEncodingAtom } from "@/store/ui";
+import { imageEncodingAtom, encodingMessageAtom } from "@/store/ui";
 
 const EASE = "cubic-bezier(0.16, 1, 0.3, 1)";
 const SWEEP_MS = 850;
@@ -8,6 +8,7 @@ const BACKDROP_FADE_MS = 350;
 
 export function EncodingOverlay() {
   const [encoding] = useAtom(imageEncodingAtom);
+  const [message] = useAtom(encodingMessageAtom);
   const [sweeping, setSweeping] = useState(false);
   const [blocking, setBlocking] = useState(false);
   const prevEncodingRef = useRef(false);
@@ -100,10 +101,12 @@ export function EncodingOverlay() {
 
             <div className="text-center">
               <h2 className="text-sm font-semibold text-neutral-100 font-sans animate-pulse-glow">
-                Encoding image…
+                {message ?? "Encoding image..."}
               </h2>
               <p className="text-[11px] text-neutral-500 font-sans mt-1.5 leading-relaxed">
-                Segmenting unlocks automatically once the image is ready.
+                {message
+                  ? "Large image is being fitted to the working resolution."
+                  : "Segmenting unlocks automatically once the image is ready."}
               </p>
             </div>
           </div>

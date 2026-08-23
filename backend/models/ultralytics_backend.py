@@ -12,7 +12,7 @@ import torch
 from .base import SegmentationBackend
 from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
 from ..utils.stderr_progress import StderrInterceptor as _StderrInterceptor
-from ..utils.torch_threads import cpu_threads, resolve_threads
+from ..utils.torch_threads import cpu_threads, resolve_threads, cudnn_disabled
 
 LOGGER = logging.getLogger(__name__)
 _MODEL_LOAD_LOCK = threading.Lock()
@@ -88,10 +88,10 @@ class UltralyticsBackend(SegmentationBackend):
             from backend.utils.model_integrity import download_model_file, PINNED_MODEL_URLS
             url = PINNED_MODEL_URLS.get(model_path)
             if url:
-                LOGGER.info("Model not found locally: %s — downloading from HuggingFace...", model_path)
+                LOGGER.debug("Not cached: %s", model_path)
                 download_model_file(model_path, Path(abs_model), url=url)
             else:
-                LOGGER.info("Model not found locally: %s — Ultralytics will attempt download...", model_path)
+                LOGGER.debug("Not cached: %s", model_path)
 
         with _MODEL_LOAD_LOCK:
             import sys
@@ -125,7 +125,7 @@ class UltralyticsBackend(SegmentationBackend):
                 ):
                     try:
                         self._predictor.model = self._predictor.model.to(memory_format=torch.channels_last)
-                        LOGGER.info("SAM2 channels_last memory format enabled via SAM2_CHANNELS_LAST=1")
+                        LOGGER.debug("SAM2_CHANNELS_LAST=1")
                     except Exception as e:
                         LOGGER.warning("Could not enable channels_last: %s", e)
                 if (
@@ -135,7 +135,7 @@ class UltralyticsBackend(SegmentationBackend):
                 ):
                     try:
                         self._predictor.model = torch.compile(self._predictor.model)
-                        LOGGER.info("SAM2 torch.compile enabled via SAM2_COMPILE=1")
+                        LOGGER.debug("SAM2_COMPILE=1")
                     except Exception as e:
                         LOGGER.warning("torch.compile failed for SAM2: %s", e)
                 LOGGER.debug("Loaded %s on %s", ULTRALYTICS_MODELS[model_path], self._device)
@@ -235,32 +235,25 @@ class UltralyticsBackend(SegmentationBackend):
         self._encode_image(image)
 
     def _encode_image(self, image: np.ndarray) -> None:
-        cudnn_saved = None
         try:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-                cudnn_backend = getattr(torch.backends, "cudnn", None)
-                if cudnn_backend is not None:
-                    cudnn_saved = cudnn_backend.enabled
-                    cudnn_backend.enabled = False
             with self._infer_lock:
                 self._restore_encoder()
+                if self._device != "cpu" and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 self._predictor.imgsz = [1024, 1024]
-                with cpu_threads(_DEFAULT_THREADS):
+                with cpu_threads(_DEFAULT_THREADS), cudnn_disabled(), torch.inference_mode():
                     self._predictor.set_image(image)
                 self._image_pe = self._predictor.model.sam_prompt_encoder.get_dense_pe()
                 self._warm_decoder()
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 self._offload_encoder()
+                torch.cuda.empty_cache()
         except Exception as e:
             LOGGER.error("set_image: encoding failed: %s", e)
             raise
-        finally:
-            if cudnn_saved is not None:
-                cudnn_backend = getattr(torch.backends, "cudnn", None)
-                if cudnn_backend is not None:
-                    cudnn_backend.enabled = cudnn_saved
         LOGGER.debug("set_image: encoding complete")
         self._image_set = True
 
@@ -380,25 +373,15 @@ class UltralyticsBackend(SegmentationBackend):
             if mask_t.shape[-2:] != (th, tw):
                 mask_t = torch.nn.functional.interpolate(mask_t, size=(th, tw), mode="bilinear", align_corners=False)
 
-        with self._infer_lock:
-            cudnn_saved = None
-            cudnn_backend = getattr(torch.backends, "cudnn", None)
-            if cudnn_backend is not None:
-                cudnn_saved = cudnn_backend.enabled
-                cudnn_backend.enabled = False
-            try:
-                with torch.inference_mode(), cpu_threads(_DEFAULT_THREADS if self._device == "cpu" else 1):
-                    se, de = self._predictor.model.sam_prompt_encoder(points=point_inputs, boxes=None, masks=mask_t)
-                    pm, ps, _, _ = self._predictor.model.sam_mask_decoder(
-                        image_embeddings=img_embed,
-                        image_pe=image_pe,
-                        sparse_prompt_embeddings=se, dense_prompt_embeddings=de,
-                        multimask_output=multimask_output,
-                        repeat_image=False, high_res_features=high_res,
-                    )
-            finally:
-                if cudnn_saved is not None and cudnn_backend is not None:
-                    cudnn_backend.enabled = cudnn_saved
+        with self._infer_lock, torch.inference_mode(), cpu_threads(_DEFAULT_THREADS if self._device == "cpu" else 1), cudnn_disabled():
+            se, de = self._predictor.model.sam_prompt_encoder(points=point_inputs, boxes=None, masks=mask_t)
+            pm, ps, _, _ = self._predictor.model.sam_mask_decoder(
+                image_embeddings=img_embed,
+                image_pe=image_pe,
+                sparse_prompt_embeddings=se, dense_prompt_embeddings=de,
+                multimask_output=multimask_output,
+                repeat_image=False, high_res_features=high_res,
+            )
         pm = pm.flatten(0, 1); ps = ps.flatten(0, 1)
 
         if pm is None or pm.shape[0] == 0:
@@ -462,25 +445,15 @@ class UltralyticsBackend(SegmentationBackend):
             self._image_pe = image_pe
         point_inputs = (pts, lbs)
 
-        with self._infer_lock:
-            cudnn_saved = None
-            cudnn_backend = getattr(torch.backends, "cudnn", None)
-            if cudnn_backend is not None:
-                cudnn_saved = cudnn_backend.enabled
-                cudnn_backend.enabled = False
-            try:
-                with torch.inference_mode(), cpu_threads(_DEFAULT_THREADS if self._device == "cpu" else 1):
-                    se, de = self._predictor.model.sam_prompt_encoder(points=point_inputs, boxes=None, masks=None)
-                    pm, _, _, _ = self._predictor.model.sam_mask_decoder(
-                        image_embeddings=img_embed.expand(b, -1, -1, -1),
-                        image_pe=image_pe,
-                        sparse_prompt_embeddings=se, dense_prompt_embeddings=de,
-                        multimask_output=False,
-                        repeat_image=False, high_res_features=high_res,
-                    )
-            finally:
-                if cudnn_saved is not None and cudnn_backend is not None:
-                    cudnn_backend.enabled = cudnn_saved
+        with self._infer_lock, torch.inference_mode(), cpu_threads(_DEFAULT_THREADS if self._device == "cpu" else 1), cudnn_disabled():
+            se, de = self._predictor.model.sam_prompt_encoder(points=point_inputs, boxes=None, masks=None)
+            pm, _, _, _ = self._predictor.model.sam_mask_decoder(
+                image_embeddings=img_embed.expand(b, -1, -1, -1),
+                image_pe=image_pe,
+                sparse_prompt_embeddings=se, dense_prompt_embeddings=de,
+                multimask_output=False,
+                repeat_image=False, high_res_features=high_res,
+            )
         pm = pm.flatten(0, 1)
 
         if pm is None or pm.shape[0] == 0:

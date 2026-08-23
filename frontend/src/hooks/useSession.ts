@@ -18,7 +18,7 @@ import {
 } from "@/store/session";
 import { layersAtom, selectedLayersAtom } from "@/store/layers";
 import { detectionsAtom, selectedDetectionAtom } from "@/store/detection";
-import { modeLockAtom, modeDialogOpenAtom, showTransparentAtom, hideBboxesAtom, unsupportedFileAtom, imageEncodingAtom } from "@/store/ui";
+import { modeLockAtom, modeDialogOpenAtom, showTransparentAtom, hideBboxesAtom, unsupportedFileAtom, imageEncodingAtom, encodingMessageAtom, pushToast } from "@/store/ui";
 import {
   sam3ModeAtom,
   sam3PromptsAtom,
@@ -28,7 +28,7 @@ import {
   selectedSam3InstanceAtom,
 } from "@/store/sam3";
 import { api } from "@/lib/api";
-import { isSupportedImage } from "@/lib/utils";
+import { isSupportedImage, fitImageFile } from "@/lib/utils";
 
 export function useSession() {
   const [sessionId, setSessionId] = useAtom(sessionIdAtom);
@@ -50,6 +50,7 @@ export function useSession() {
   const [, setHideBboxes] = useAtom(hideBboxesAtom);
   const [, setUnsupportedFile] = useAtom(unsupportedFileAtom);
   const [, setImageEncoding] = useAtom(imageEncodingAtom);
+  const [, setEncodingMessage] = useAtom(encodingMessageAtom);
   const [sam3Mode] = useAtom(sam3ModeAtom);
   const [, setSam3Prompts] = useAtom(sam3PromptsAtom);
   const [, setSam3RedoStack] = useAtom(sam3RedoStackAtom);
@@ -151,10 +152,11 @@ export function useSession() {
         if (previousBlobUrlRef.current) {
           URL.revokeObjectURL(previousBlobUrlRef.current);
         }
-        const url = URL.createObjectURL(file);
+        const { file: uploadFile, resized } = await fitImageFile(file);
+        const url = URL.createObjectURL(uploadFile);
         previousBlobUrlRef.current = url;
         setImageUrl(url);
-        setImageFile(file);
+        setImageFile(uploadFile);
         setMasks([]);
         setPerDetectionMasks({});
         setLayers([]);
@@ -169,9 +171,10 @@ export function useSession() {
         setSam3Instances([]);
         setSelectedSam3Instance(null);
         resetUndoRedoState();
+        setEncodingMessage(resized ? "Resizing & re-encoding..." : null);
         setImageEncoding(true);
         launched = true;
-        api.uploadImage(sid, file)
+        api.uploadImage(sid, uploadFile)
           .then((res) => {
             setImageWidth(res.width);
             setImageHeight(res.height);
@@ -182,13 +185,14 @@ export function useSession() {
           })
           .finally(() => {
             setImageEncoding(false);
+            setEncodingMessage(null);
             uploadingRef.current = false;
           });
       } finally {
         if (!launched) uploadingRef.current = false;
       }
     },
-    [sessionId, sam3Mode, setSessionId, setModelName, setImageUrl, setImageFile, setMasks, setLayers, setImageWidth, setImageHeight, setImageEncoding, setModeLock, setModeDialogOpen, setDetections, setSelectedDetection, setSelectedLayers, setShowTransparent, setHideBboxes, setSam3Prompts, setSam3RedoStack, resetUndoRedoState, setUnsupportedFile]
+    [sessionId, sam3Mode, setSessionId, setModelName, setImageUrl, setImageFile, setMasks, setLayers, setImageWidth, setImageHeight, setImageEncoding, setEncodingMessage, setModeLock, setModeDialogOpen, setDetections, setSelectedDetection, setSelectedLayers, setShowTransparent, setHideBboxes, setSam3Prompts, setSam3RedoStack, resetUndoRedoState, setUnsupportedFile]
   );
 
   const switchModel = useCallback(
@@ -286,6 +290,7 @@ export function useSession() {
           return res;
         } catch (err) {
           console.error("Prediction failed:", err);
+          pushToast("Prediction failed — recovering session");
           await recoverSession();
           return null;
         } finally {

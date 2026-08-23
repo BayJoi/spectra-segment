@@ -1,33 +1,44 @@
 # Spectra Segment
 
-A local image background remover with three editing modes. Everything runs on your own machine — nothing leaves your computer.
+A local image background remover with three editing modes. Everything runs on
+your own machine — nothing leaves your computer.
 
-> **Note:** This project was built entirely from scratch using AI. There is no human-written code.
+> **Note:** This project was built entirely from scratch using AI. There is no
+> human-written code.
 
 ---
 
 ## What It Does
 
-Remove backgrounds from images using AI. Pick an image, choose a mode, and start removing.
+Remove backgrounds from images using AI. Pick an image, choose a mode, and
+start removing.
 
 ### Three Ways to Remove Backgrounds
 
-**Brush Mode** — Draw strokes around the objects you want to keep. Select multiple objects separately. Each object gets its own mask.
+**Brush Mode** — Draw strokes around the objects you want to keep. Select
+multiple objects separately. Each object gets its own mask.
 
-**Detection Mode** — Type what you want to remove (like "person" or "red car"). The AI finds it, shows a box around it, and removes the background when you click. Add as many detections as you want.
+**Detection Mode** — Type what you want to remove (like "person" or "red car").
+The AI finds it, shows a box around it, and removes the background when you
+click. Add as many detections as you want.
 
-**SAM 3 Mode** — Type a text prompt and SAM 3 handles detection, segmentation, and masking in one step. The most powerful mode — single model, no tier selection needed.
+**SAM 3 Mode** — Type a text prompt and SAM 3 handles detection, segmentation,
+and masking in one step. The most powerful mode — single model, no tier
+selection needed.
 
 ### Every Mode Has
 
 - **Transparent button** — View your cutout with a transparent background
 - **Feather slider** — Soften mask edges for smoother results
-- **Export** — Save as PNG or JPG with transparent or colored backgrounds
+- **Export** — Save as PNG or JPG with transparent or colored backgrounds,
+  as a single image or a ZIP per layer/subject
 - **Undo/Redo** — Fix mistakes with Ctrl+Z / Ctrl+Y
+- **Console panel** — Live backend log stream with download progress bars
 
 ### Brush Mode Extras
 
 - **Brush size slider** — Adjust stroke width
+- **Negative strokes** — Right-drag subtracts from the mask
 - **Multiple subjects** — Keep separate objects in separate layers
 - **Subjects panel** — Switch, add, or delete subjects
 
@@ -35,62 +46,96 @@ Remove backgrounds from images using AI. Pick an image, choose a mode, and start
 
 - **Multiple detections** — Find and remove several objects at once
 - **Layers panel** — View and manage all detected objects
-- **Batch segmentation** — Segment all detected objects with one click
+- **Batch segmentation ("All")** — Segment every detection with one click
+- **YOLOE masks toggle** — Use the detector's own masks (faster) or SAM masks
+  (higher quality)
 
 ### SAM 3 Mode Extras
 
-- **Text-to-mask** — Type what to segment, SAM 3 finds and masks it automatically
-- **Encode quality selector** — Fast (512), Balanced (1024), or High (1500) — higher means better masks but slower encoding
+- **Text-to-mask** — Type what to segment, SAM 3 finds and masks automatically
+- **Encode quality selector** — Fast (512), Balanced (1024), High (1500)
 - **Keep loaded toggle** — Prevent the model from unloading between prompts
-- **Layers panel** — View and manage all SAM 3 instances
-- **Undo/Redo** — Undo/redo individual prompts
+- **Per-instance control** — Keep/remove individual instances, undo/redo prompts
 
 ---
 
 ## Getting Started
 
-### CPU (No GPU Required)
+Everything is portable. The installers fetch their own toolchain (uv, Python,
+Bun), the launcher provisions a virtual environment inside the repo folder, and
+all model weights and caches stay under `model_weights\`. Nothing is written
+outside the project directory.
+
+### CPU / NVIDIA GPU
 
 1. Run `install.bat`
 2. Run `start.bat`
-3. Open `http://localhost:3000` in your browser
+3. Open <http://localhost:3000>
 
-### NVIDIA GPU
+On NVIDIA systems the installer detects the GPU automatically and installs the
+CUDA build of PyTorch; otherwise it falls back to CPU.
 
-1. Run `install.bat` (same as CPU — it detects your GPU automatically)
-2. Run `start.bat`
-3. Open `http://localhost:3000`
-
-> **Note:** NVIDIA GPU support has not been tested yet.
+> **Note:** The NVIDIA path has not been broadly tested yet.
 
 ### AMD GPU (Windows Only)
 
 1. Run `install_amd.bat`
 2. Run `start_amd.bat`
-3. Open `http://localhost:3000`
+3. Open <http://localhost:3000>
 
-> **Note:** AMD version is Windows only. Tested on RX 6600 (8GB VRAM). Support for other AMD GPUs is untested — it might work, it might not.
+The AMD path uses AMD's official ROCm PyTorch wheels built by
+[TheRock](https://github.com/ROCm/TheRock). The installer detects your GPU's
+architecture (gfx target) automatically and picks the matching wheel index.
+
+**Only the RX 6600 (8 GB, gfx1032) has been actually tested by this project.**
+Other cards may work — the wheels exist for them — but nothing below is
+verified. Treat it as experimental on any other GPU.
+
+#### AMD Compatibility Notes
+
+Wheel availability comes from TheRock's Windows builds; "app-tested" means
+someone ran Spectra Segment on it.
+
+| Family | Example cards | Wheels (TheRock) | App-tested |
+|---|---|---|---|
+| RDNA 1 | RX 5000 series | published | **no** |
+| RDNA 2 | RX 6600/6700/6800/6900 | published | **RX 6600 only** |
+| RDNA 3 | RX 7000 series | published | **no** |
+| RDNA 3.5 | Strix APUs (880M/890M...) | published | **no** |
+| RDNA 4 | RX 9000 series | published, runtime still being validated upstream | **no** |
+
+If you try an untested card and hit crashes or black outputs, it is most
+likely the wheel/runtime combination rather than the app — check TheRock's
+issues for your gfx target first.
+
+If your system has both an iGPU and a discrete GPU and torch picks the wrong
+one, set `HIP_VISIBLE_DEVICES=1` (or disable the iGPU in BIOS).
 
 ---
 
 ## First Time Setup
 
-1. **Install** — Run the install script for your hardware
-2. **Start** — Run the start script
-3. **Choose mode** — Pick Brush/Detect or SAM 3 from the home screen
-4. **Download model** — Click the model selector in the top left and choose one
-5. **Upload image** — Click Upload or drag an image onto the app
-6. **Start removing** — Draw strokes, type prompts, or let SAM 3 do the work
+1. **Install** — Run the install script for your hardware.
+2. **Start** — Run the start script. On first launch it asks for a memory
+   profile (how much VRAM/RAM to allow); the defaults are fine.
+3. **Choose mode** — Pick Brush/Detect or SAM 3 from the home screen.
+4. **Download model** — Click the model selector in the top left and choose
+   one. Models download automatically with checksum verification on first use.
+5. **Upload image** — Drag an image onto the app or click Upload.
+6. **Start removing** — Draw strokes, type prompts, or let SAM 3 do the work.
 
-Models download automatically the first time you select them. After that, they're stored locally.
+Large photos are fitted to the working resolution automatically before upload
+(the overlay says "Resizing & re-encoding..."), so phone-camera shots just
+work. Images beyond 32 MP are rejected as a safety measure.
 
-### SAM 3 First Time Setup
+### Model Downloads
 
-1. Switch to SAM 3 mode from the home screen
-2. Select the SAM 3 model from the dropdown in the top bar
-3. The model downloads and loads automatically (~3.3 GB)
-4. Upload an image — the Upload button is disabled until the model is ready
-5. Type a prompt and press Enter to segment
+- All checkpoints come from pinned URLs (GitHub releases / HuggingFace).
+- Every file is sha256-verified against published digests after download;
+  first-seen hashes are recorded (TOFU) when no digest is published.
+- HuggingFace-hosted models use chunked Xet downloads when available.
+- Progress appears live in the console panel: one bar for the main weights
+  file plus a per-file counter for the smaller support files.
 
 ---
 
@@ -98,59 +143,66 @@ Models download automatically the first time you select them. After that, they'r
 
 ### Brush Mode
 
-1. Upload an image
-2. The image gets encoded (you'll see a loading screen)
-3. Choose Brush mode
-4. Draw strokes around objects you want to keep
-5. Each stroke creates a mask
-6. Add more subjects with the + button
-7. Toggle transparent view to see results
-8. Export when ready
+1. Upload an image — it gets encoded by the segmentation model.
+2. Draw strokes around objects you want to keep.
+3. Each stroke produces a mask instantly; right-drag subtracts.
+4. Add more subjects with the + button, switch via the subjects panel.
+5. Toggle transparent view to inspect, then export.
 
 ### Detection Mode
 
-1. Upload an image
-2. The image gets encoded
-3. Choose Detect mode
-4. Type what you want to find (e.g., "person", "car", "eyes")
-5. Click Detect or press Enter
-6. Click on detected objects to create masks
-7. Use "All" to segment everything at once
-8. Export your results
+1. Upload an image and load a detector (GroundingDINO, Florence, or YOLOE).
+2. Type what to find — boxes appear over matching objects.
+3. Click a box to segment it, or press "All" for everything at once.
+4. Manage results in the layers panel, then export.
 
 ### SAM 3 Mode
 
-1. Switch to SAM 3 mode from the home screen
-2. Select the SAM 3 model from the dropdown — downloads automatically on first use
-3. Upload an image (the image encodes with the selected quality)
-4. Type a text prompt (e.g., "person", "red bottle")
-5. Press Enter — SAM 3 finds and segments matching objects
-6. Each prompt creates a new layer — stack multiple prompts for complex scenes
-7. Adjust encode quality if masks aren't precise enough
-8. Export your results
+1. Switch to SAM 3 mode and pick the SAM 3 model (~3.3 GB download).
+2. Upload an image — encode quality follows your chosen setting.
+3. Type a prompt like "red bottle" — every matching instance gets masked.
+4. Stack prompts, remove instances, adjust quality, then export.
 
 ---
 
-## Features
+## Performance Notes (AMD / ROCm)
 
-- **Local processing** — Everything stays on your machine
-- **Multiple formats** — Supports JPG, PNG, and WebP
-- **Drag and drop** — Drop images directly onto the app
-- **Replace image** — Swap images without restarting
-- **End session** — Unload models and start fresh
-- **Real-time logs** — Click Logs to see download progress and errors
-- **Keyboard shortcuts** — Ctrl+Z undo, Ctrl+Y redo, Delete to remove
-- **Zoom and pan** — Mouse wheel to zoom, Shift+drag to pan
-- **Feather control** — Soften mask edges from 0-20 pixels
-- **Export options** — PNG with transparency or JPG with background color
+The launcher sets these automatically; they are listed here for reference:
+
+- `TORCH_BLAS_PREFER_HIPBLASLT=1` + `DISABLE_ADDMM_CUDA_LT=1` — hipBLASLt is
+  preferred for speed, but its addmm path is disabled because it crashes on
+  some RDNA2 wheels.
+- `MIOPEN_FIND_MODE=2` — skip MIOpen solver searches (consumer cards have no
+  performance database; searches cost minutes and gain little).
+- `HSA_ENABLE_SDMA=0` — avoids DMA-engine copy stalls reported on Windows.
+- Encoders run under `torch.inference_mode()` — this alone cut SAM2's memory
+  footprint from ~5 GB to ~285 MB per image and made encodes ~6x faster.
+- After any PyTorch/ROCm wheel update, double-click
+  `checks\check_gpu.bat` (or run it from a terminal) to verify nothing
+  regressed. Each run writes a timestamped log next to the script.
+
+## Environment Knobs
+
+Most knobs have sensible defaults set by the launcher:
+
+| Variable | Effect |
+|---|---|
+| `SPECTRA_VRAM_FRACTION` | Fraction of VRAM this app may plan around (profile-based). |
+| `SPECTRA_FORCE_CPU` | Ignore all GPUs. |
+| `SPECTRA_KEEP_SEG_ON_DETECT` | Keep the SAM model resident across detector runs (faster alternating, more VRAM). |
+| `SPECTRA_DETECTOR_FP16` | Load detectors in fp16 on GPU (halves their VRAM; CPU stays fp32). |
+| `SAM2_QUANTIZE`, `SAM3_QUANTIZE` | Working precision override (16 = fp16). |
+| `SAM3_ENCODE_DIM` | Default SAM3 encoding resolution. |
+| `SAM2_OFFLOAD_ENCODER` | Keep the SAM2 image encoder on CPU between images. |
 
 ---
 
 ## System Requirements
 
-- Windows 10 or later
+- Windows 10 or later (AMD GPU path is Windows-only)
 - 8 GB RAM minimum (16 GB recommended)
-- 10-20 GB free disk space
+- 10–20 GB free disk space for models and caches
+- First launch of each model needs internet; everything after that is offline
 
 ---
 
@@ -162,25 +214,17 @@ To remove the app and start fresh:
 2. Confirm with Y
 3. Choose whether to keep downloaded models
 
-This removes:
-- Python and tools
-- Virtual environment
-- Package cache
-- Frontend workspace
-- Logs and temp files
-
-> **Note:** Each cleanup script only removes its own backend. `cleanup.bat` removes CPU/NVIDIA files. `cleanup_amd.bat` removes AMD files. They don't touch each other. Protected files (LICENSE, README, .gitignore, THIRD-PARTY-LICENSES.txt) are never removed.
+This removes the virtual environment, package caches, frontend workspace,
+toolchain binaries, logs, bytecode caches, and temp files. Each cleanup script
+only removes its own backend's files; protected files (LICENSE, README,
+.gitignore, THIRD-PARTY-LICENSES.txt) are never touched.
 
 ---
 
 ## Stopping the App
 
-To stop the app without removing anything:
-
-1. Run `stop.bat` (CPU/NVIDIA) or `stop_amd.bat` (AMD)
-2. This stops the backend and frontend without removing any files
-
-You can restart anytime by running `start.bat` or `start_amd.bat` again.
+Run `stop.bat` or `stop_amd.bat`. This stops the backend and frontend without
+removing files — start again anytime.
 
 ---
 
@@ -188,19 +232,24 @@ You can restart anytime by running `start.bat` or `start_amd.bat` again.
 
 ```
 spectra-segment/
-├── install.bat          # CPU/NVIDIA installer
-├── install_amd.bat      # AMD GPU installer
-├── start.bat            # CPU/NVIDIA launcher
-├── start_amd.bat        # AMD GPU launcher
-├── stop.bat             # Stop CPU/NVIDIA app
-├── stop_amd.bat         # Stop AMD app
-├── cleanup.bat          # Remove CPU/NVIDIA setup
-├── cleanup_amd.bat      # Remove AMD setup
-├── backend/             # Python backend (NVIDIA/CPU)
-├── backend_amd_gpu/     # Python backend (AMD)
-├── frontend/            # Web interface
-└── launcher/            # Memory profile setup
+├── install.bat           # CPU/NVIDIA installer (fetches uv, python, bun)
+├── install_amd.bat       # AMD ROCm installer (TheRock wheels)
+├── start.bat             # CPU/NVIDIA launcher
+├── start_amd.bat         # AMD launcher (memory profile + GPU setup)
+├── stop.bat / stop_amd.bat
+├── cleanup.bat / cleanup_amd.bat
+├── checks/               # health-check script + bat wrapper + run logs
+├── backend/              # FastAPI backend - CUDA/CPU fork
+├── backend_amd_gpu/      # FastAPI backend - ROCm fork
+│   └── model_weights/    # all downloaded models + caches live here
+├── frontend/             # React 19 + Vite UI (served on :3000)
+└── tools/                # portable uv/python/bun (created by installers)
 ```
+
+Backend API highlights: session lifecycle with token auth, stroke/bbox/SAM3
+prompting, detector catalog with live status streaming, server-side compositing
+for exports, SSE log and model-status streams. Both backend forks share the
+same API surface and differ only in hardware-specific loading and tuning.
 
 ---
 
@@ -208,10 +257,14 @@ spectra-segment/
 
 This project is licensed under the GNU General Public License v3.0.
 
-See [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt) for all dependency licenses.
+See [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt) for all dependency
+licenses, including the AGPL-3.0 ultralytics dependency and the Apache-2.0
+huggingface_hub / hf-xet stack.
 
 ---
 
 ## Acknowledgments
 
-ROCm support was heavily inspired by [patientx-cfz/comfyui-rocm](https://github.com/patientx-cfz/comfyui-rocm).
+- ROCm support heavily inspired by
+  [patientx-cfz/comfyui-rocm](https://github.com/patientx-cfz/comfyui-rocm).
+- AMD PyTorch wheels by [TheRock](https://github.com/ROCm/TheRock).

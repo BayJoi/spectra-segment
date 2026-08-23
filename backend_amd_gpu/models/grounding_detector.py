@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
 import logging
+import re
 import sys
+import threading
+import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -46,6 +51,168 @@ HF_MODEL_IDS = {
 TRUSTED_HF_IDS = set(HF_MODEL_IDS.values())
 
 _FLORENCE_MODELS = {"florence-2-base", "florence-2-large", "cogflorence-2.2-large"}
+
+_WEIGHTS_MIN_BYTES = 50 * 1024 * 1024
+_WEIGHTS_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
+
+
+def hf_weights_downloaded(hf_id: str, cache_root: Any = None) -> bool:
+    from pathlib import Path
+
+    root = Path(cache_root) if cache_root else MODEL_WEIGHTS_DIR / "hf_cache"
+    snapshots = root / "hub" / f"models--{hf_id.replace('/', '--')}" / "snapshots"
+    if not snapshots.exists():
+        return False
+    for entry in snapshots.rglob("*"):
+        try:
+            if (
+                entry.is_file()
+                and entry.name.lower().endswith(_WEIGHTS_SUFFIXES)
+                and entry.stat().st_size >= _WEIGHTS_MIN_BYTES
+            ):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+class _NullIO:
+    def write(self, *_a) -> int:
+        return 0
+
+    def flush(self) -> None:
+        pass
+
+
+_WEIGHT_RE = re.compile(r"\.(safetensors|bin|pt|pth|onnx)$", re.IGNORECASE)
+
+
+def _emit(model_name: str, **fields: Any) -> None:
+    payload = {"name": model_name, "phase": "download"}
+    payload.update(fields)
+    LOGGER.info(
+        "%s: %.0f%% · files %s/%s",
+        model_name,
+        payload.get("pct") or 0,
+        payload.get("files_done"),
+        payload.get("files_total"),
+        extra={"dl": payload},
+    )
+
+
+def _snapshot_fetch(hf_id: str, cache_dir: Any, model_name: str) -> bool:
+    try:
+        from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+        from huggingface_hub.utils.tqdm import tqdm as hf_tqdm
+        import sys as _sys
+
+        _fd = _sys.modules["huggingface_hub.file_download"]
+        _ut = _sys.modules["huggingface_hub.utils.tqdm"]
+    except Exception:
+        return False
+
+    hub_dir = str(Path(cache_dir) / "hub")
+    state = {"files_done": 0, "bytes": 0}
+    state_lock = threading.Lock()
+
+    def emit_combined(pct: int = 0, done_bytes: int = 0, total_bytes: int = 0, force: bool = False) -> None:
+        with state_lock:
+            fd, ft = state["files_done"], state["files_total"]
+        _emit(
+            model_name,
+            file=state.get("main_file"),
+            pct=pct,
+            done_bytes=done_bytes,
+            total_bytes=total_bytes,
+            files_done=fd,
+            files_total=ft,
+        )
+
+    try:
+        info = HfApi().model_info(repo_id=hf_id, files_metadata=True)
+        files = [(s.rfilename, int(s.size or 0)) for s in info.siblings if (s.size or 0) > 0]
+    except Exception as e:
+        LOGGER.debug("File listing failed for %s (%s)", hf_id, e)
+        files = []
+    if not files:
+        try:
+            snapshot_download(repo_id=hf_id, cache_dir=hub_dir)
+            return True
+        except Exception as e:
+            LOGGER.warning("Snapshot fetch failed for %s (%s) — falling back", hf_id, e)
+            return False
+
+    weight_files = [(n, s) for n, s in files if _WEIGHT_RE.search(n)]
+    main_name, main_size = max(weight_files or files, key=lambda t: t[1])
+    state["files_total"] = len(files)
+    state["main_file"] = Path(main_name).name
+
+    class _ByteBar(hf_tqdm):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._sp_total = int(kwargs.get("total") or 0)
+            self._sp_initial = int(kwargs.get("initial") or 0)
+            self._sp_desc = str(kwargs.get("desc") or "")
+            self._sp_is_main = Path(self._sp_desc).name == state["main_file"]
+            self._sp_last = 0.0
+            kwargs["file"] = _NullIO()
+            super().__init__(*args, **kwargs)
+
+        def update(self, n: int = 1) -> None:
+            if getattr(self, "disable", False):
+                self.n = getattr(self, "n", 0) + n
+            else:
+                super().update(n)
+            if not self._sp_is_main:
+                return
+            now = time.monotonic()
+            if now - self._sp_last < 0.4 and self.n < self._sp_total:
+                return
+            self._sp_last = now
+            done = min(self._sp_initial + int(self.n), self._sp_total)
+            pct = round(done * 100 / self._sp_total) if self._sp_total else 0
+            with state_lock:
+                state["bytes"] = done
+            emit_combined(pct=pct, done_bytes=done, total_bytes=self._sp_total)
+
+        def close(self) -> None:
+            try:
+                if self._sp_is_main:
+                    emit_combined(
+                        pct=100,
+                        done_bytes=self._sp_total,
+                        total_bytes=self._sp_total,
+                        force=True,
+                    )
+            finally:
+                super().close()
+
+    orig_fd, orig_ut = _fd.tqdm, _ut.tqdm
+    _fd.tqdm = _ByteBar
+    _ut.tqdm = _ByteBar
+    try:
+        others = [n for n, _ in files if n != main_name]
+
+        def fetch_one(fname: str) -> None:
+            hf_hub_download(repo_id=hf_id, filename=fname, cache_dir=hub_dir)
+            with state_lock:
+                state["files_done"] += 1
+            emit_combined(force=True)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as main_pool:
+            main_fut = main_pool.submit(fetch_one, main_name)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(others))) as pool:
+                futures = [pool.submit(fetch_one, n) for n in others]
+                errors = [f.exception() for f in concurrent.futures.as_completed(futures)]
+            main_fut.result()
+        if any(e is not None for e in errors):
+            raise RuntimeError(f"{errors[0]}")
+        emit_combined(pct=100, done_bytes=main_size, total_bytes=main_size, force=True)
+        return True
+    except Exception as e:
+        LOGGER.warning("Snapshot fetch failed for %s (%s) — falling back", hf_id, e)
+        return False
+    finally:
+        _fd.tqdm, _ut.tqdm = orig_fd, orig_ut
 
 
 def _is_trusted_local_path(hf_id: str) -> bool:
@@ -105,11 +272,21 @@ def _clean_florence_config(cache_dir, hf_id: str, local_only: bool = False) -> N
     LOGGER.debug("Cleaned Florence config.json auto_map at %s (removed %s)", config_path, bad_keys)
 
 
+_FLORENCE_SDPA_BROKEN = [False]
+
+
+def _florence_sdpa_broken() -> bool:
+    return bool(_FLORENCE_SDPA_BROKEN[0])
+
+
 def _load_florence_model(hf_id: str, dtype: Any, local_only: bool = False) -> Any:
     from transformers import AutoModelForCausalLM
 
     last_err: Exception | None = None
     for impl in ("sdpa", "eager"):
+        if impl == "sdpa" and _florence_sdpa_broken():
+            LOGGER.debug("Florence: skipping sdpa (transformers build lacks it)")
+            continue
         try:
             model = AutoModelForCausalLM.from_pretrained(
                 hf_id,
@@ -121,6 +298,16 @@ def _load_florence_model(hf_id: str, dtype: Any, local_only: bool = False) -> An
             )
             LOGGER.info("Florence: active attention implementation: %s", impl)
             return model
+        except AttributeError as e:
+            last_err = e
+            if "_supports_sdpa" in str(e):
+                _FLORENCE_SDPA_BROKEN[0] = True
+                LOGGER.debug("Florence sdpa unavailable in this transformers build (%s)", e)
+                continue
+            LOGGER.warning(
+                "Florence: attention implementation '%s' failed to load (%s: %s)",
+                impl, type(e).__name__, e,
+            )
         except Exception as e:
             last_err = e
             LOGGER.warning(
@@ -139,7 +326,11 @@ def _load_florence_detector(hf_id: str, model_name: str, device: str, local_only
             f"Allowed: {sorted(TRUSTED_HF_IDS)}"
         )
 
+    import os
+
     dtype = torch.float32
+    if device != "cpu" and os.environ.get("SPECTRA_DETECTOR_FP16") == "1":
+        dtype = torch.float16
 
     LOGGER.debug("Florence: importing transformers...")
     from transformers import AutoProcessor
@@ -189,6 +380,9 @@ def _load_florence_detector(hf_id: str, model_name: str, device: str, local_only
             LOGGER.warning("Device %s failed for Florence (%s), using CPU", device, e)
             actual_device = "cpu"
             model = model.to("cpu")
+    if actual_device == "cpu" and dtype != torch.float32:
+        model = model.float()
+        LOGGER.info("Florence on CPU: using fp32 (CPU fp16 is emulated and slow)")
 
     model.eval()
 
@@ -213,7 +407,11 @@ def _load_florence_detector(hf_id: str, model_name: str, device: str, local_only
 def _load_grounding_dino(hf_id: str, model_name: str, device: str, local_only: bool = False) -> tuple[Any, Any, str]:
     from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
+    import os
+
     dtype = torch.float32
+    if device != "cpu" and os.environ.get("SPECTRA_DETECTOR_FP16") == "1":
+        dtype = torch.float16
 
     old_stderr = sys.stderr
     sys.stderr = _StderrInterceptor("GroundingDINO")
@@ -236,6 +434,9 @@ def _load_grounding_dino(hf_id: str, model_name: str, device: str, local_only: b
             LOGGER.warning("Device %s failed for detector (%s), using CPU", device, e)
             actual_device = "cpu"
             model = model.to("cpu")
+    if actual_device == "cpu" and dtype != torch.float32:
+        model = model.float()
+        LOGGER.info("Detector on CPU: using fp32 (CPU fp16 is emulated and slow)")
 
     model.eval()
 
@@ -305,7 +506,7 @@ class GroundingDetector(DetectorBackend):
             )
             if snapshot_dirs:
                 local_path = str(snapshot_dirs[0])
-                LOGGER.info("Loading %s from local cache: %s", hf_id, local_path)
+                LOGGER.info("Loading %s (cached)", hf_id)
                 try:
                     if is_florence:
                         self._processor, self._model, self._actual_device = _load_florence_detector(
@@ -322,7 +523,7 @@ class GroundingDetector(DetectorBackend):
                     )
 
         if not loaded:
-            LOGGER.info("Cache miss for '%s' — trying network download", hf_id)
+            LOGGER.info("Not cached — downloading %s", model_name)
             from backend_amd_gpu.utils.net_check import is_connected
             if not is_connected():
                 raise RuntimeError(
@@ -330,15 +531,52 @@ class GroundingDetector(DetectorBackend):
                     f"  Connect to the internet to download, or place the model in:\n"
                     f"  {cache_dir / 'hub'}"
                 ) from None
-            if is_florence:
-                _clean_florence_config(cache_dir, hf_id, local_only=False)
-                self._processor, self._model, self._actual_device = _load_florence_detector(
-                    hf_id, model_name, effective_device, local_only=False
+            fetched = _snapshot_fetch(hf_id, cache_dir, model_name)
+            if fetched and snapshots_dir.exists():
+                snapshot_dirs = sorted(
+                    (d for d in snapshots_dir.iterdir() if d.is_dir()),
+                    key=lambda p: p.stat().st_mtime, reverse=True
                 )
-            else:
-                self._processor, self._model, self._actual_device = _load_grounding_dino(
-                    hf_id, model_name, effective_device, local_only=False
-                )
+                if snapshot_dirs:
+                    local_path = str(snapshot_dirs[0])
+                    LOGGER.info("Downloaded %s — loading from %s", model_name, hf_id)
+                    LOGGER.info(
+                        "%s: download complete",
+                        model_name,
+                        extra={"dl": {"name": model_name, "phase": "done",
+                                      "files_done": None, "files_total": None, "pct": 100}},
+                    )
+                    if is_florence:
+                        self._processor, self._model, self._actual_device = _load_florence_detector(
+                            local_path, model_name, effective_device, local_only=True
+                        )
+                    else:
+                        self._processor, self._model, self._actual_device = _load_grounding_dino(
+                            local_path, model_name, effective_device, local_only=True
+                        )
+                    loaded = True
+            if not loaded:
+                LOGGER.info("Downloading %s via direct load", model_name)
+                disable_progress_bars = None
+                try:
+                    from huggingface_hub.utils import enable_progress_bars, disable_progress_bars
+                    enable_progress_bars()
+                except Exception:
+                    pass
+                try:
+                    if is_florence:
+                        _clean_florence_config(cache_dir, hf_id, local_only=False)
+                        self._processor, self._model, self._actual_device = _load_florence_detector(
+                            hf_id, model_name, effective_device, local_only=False
+                        )
+                    else:
+                        self._processor, self._model, self._actual_device = _load_grounding_dino(
+                            hf_id, model_name, effective_device, local_only=False
+                        )
+                    loaded = True
+                finally:
+                    if disable_progress_bars:
+                        disable_progress_bars()
 
         self._model_name = model_name
         LOGGER.debug("Loaded grounding detector: %s (%s)", model_name, hf_id)
@@ -402,7 +640,8 @@ class GroundingDetector(DetectorBackend):
         inputs = self._processor(text=task_prompt, images=pil_image, return_tensors="pt")
         inputs = self._move_inputs_to_device(inputs)
 
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=False):
+        is_half = next(self._model.parameters()).dtype == torch.float16
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=is_half):
             with torch.inference_mode():
                 generated_ids = self._model.generate(
                     input_ids=inputs["input_ids"],
@@ -463,7 +702,8 @@ class GroundingDetector(DetectorBackend):
         inputs = self._processor(images=pil_image, text=text_labels, return_tensors="pt")
         inputs = self._move_inputs_to_device(inputs)
 
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=False):
+        is_half = next(self._model.parameters()).dtype == torch.float16
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=is_half):
             with torch.inference_mode():
                 outputs = self._model(**inputs)
 

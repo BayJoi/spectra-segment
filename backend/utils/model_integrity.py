@@ -157,13 +157,14 @@ def download_model_file(
     with _download_lock(model_name):
         if dest_path.exists():
             if verify_model(dest_path, model_name):
-                LOGGER.info("Model %s already downloaded — skipping download", model_name)
+                LOGGER.info("%s ready (cached)", model_name)
                 return dest_path
 
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = dest_path.with_suffix(dest_path.suffix + ".part")
 
-        LOGGER.info("Downloading %s from %s", model_name, url)
+        LOGGER.info("Downloading %s", model_name,
+                    extra={"dl": {"name": model_name, "phase": "starting"}})
         try:
             ctx = ssl.create_default_context()
             req = urllib.request.Request(url, headers={"User-Agent": "SpectraSegment/1.0"})
@@ -173,8 +174,17 @@ def download_model_file(
                 total_bytes = int(total) if total else None
                 total_mb = total_bytes / (1024 * 1024) if total_bytes else None
                 downloaded = 0
-                last_log_pct = -1
+                last_log_pct = 0
                 start_time = time.monotonic()
+
+                def _dl_extra(pct, eta=""):
+                    d = {"name": model_name, "phase": "download", "pct": pct}
+                    if total_bytes:
+                        d["done_bytes"] = downloaded
+                        d["total_bytes"] = total_bytes
+                    if eta:
+                        d["eta"] = eta
+                    return {"dl": d}
 
                 with open(tmp_path, "wb") as f:
                     while True:
@@ -193,15 +203,19 @@ def download_model_file(
                                 m, s = divmod(int(remaining), 60)
                                 eta = f"{m}m {s:02d}s" if m else f"{s}s"
                                 LOGGER.info(
-                                    "  %s: %d%% — %.1f / %.1f MB (%.1f MB/s, ETA %s)",
-                                    model_name, pct, downloaded / 1048576, total_mb,
-                                    speed / 1048576, eta,
+                                    "%s: %d%% — %.1f GB / %.1f GB, ETA %s",
+                                    model_name, pct, downloaded / (1024**3), total_mb / 1024, eta,
+                                    extra=_dl_extra(pct, eta),
                                 )
                         else:
                             LOGGER.info(
-                                "  %s: %.1f MB downloaded", model_name, downloaded / 1048576,
+                                "%s: %.1f GB downloaded",
+                                model_name, downloaded / (1024**3),
+                                extra=_dl_extra(0),
                             )
 
+            LOGGER.info("Verifying %s", model_name,
+                        extra={"dl": {"name": model_name, "phase": "verify", "pct": 100}})
             if not verify_model(tmp_path, model_name):
                 tmp_path.unlink(missing_ok=True)
                 raise RuntimeError(f"Integrity check failed for {model_name} after download")
@@ -209,7 +223,9 @@ def download_model_file(
             if dest_path.exists():
                 dest_path.unlink()
             tmp_path.rename(dest_path)
-            LOGGER.info("Downloaded and verified %s (%.1f MB)", model_name, dest_path.stat().st_size / 1048576)
+            LOGGER.info("%s ready (%.1f GB)", model_name, dest_path.stat().st_size / (1024**3))
+            LOGGER.info("%s: download complete", model_name,
+                        extra={"dl": {"name": model_name, "phase": "done", "pct": 100}})
             return dest_path
 
         except Exception:

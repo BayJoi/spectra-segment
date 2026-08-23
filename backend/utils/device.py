@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import os
@@ -29,7 +29,7 @@ def _detect_nvidia() -> tuple[bool, str]:
 
 def detect_device() -> DeviceInfo:
     if os.environ.get("SPECTRA_FORCE_CPU") == "1":
-        LOGGER.info("CPU forced by memory profile (SPECTRA_FORCE_CPU=1)")
+        LOGGER.debug("CPU forced by memory profile (SPECTRA_FORCE_CPU=1)")
         return DeviceInfo(
             torch_device="cpu",
             description="CPU (forced by memory profile)",
@@ -37,13 +37,13 @@ def detect_device() -> DeviceInfo:
 
     is_nvidia, gpu_name = _detect_nvidia()
     if is_nvidia:
-        LOGGER.info("NVIDIA GPU detected: %s", gpu_name)
+        LOGGER.debug("NVIDIA GPU detected: %s", gpu_name)
         return DeviceInfo(
             torch_device="cuda:0",
             description=f"NVIDIA CUDA - {gpu_name}",
         )
 
-    LOGGER.info("No GPU acceleration detected, falling back to CPU")
+    LOGGER.debug("No GPU acceleration detected, falling back to CPU")
     return DeviceInfo(
         torch_device="cpu",
         description="CPU (no acceleration)",
