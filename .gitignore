@@ -68,5 +68,8 @@ desktop.ini
 *.swp
 *.swo
 *~
+
+# OpenCode
+.opencode/
 # Health check logs
 checks/*.log

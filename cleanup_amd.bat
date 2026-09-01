@@ -124,7 +124,11 @@ if exist "%ROOT%tools\python\cpython-3.12*" (
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%tools\bun-amd" (
-    echo    [DIR]  tools\bun-amd\  ^(Bun nightly - AMD^)
+    echo    [DIR]  tools\bun-amd\  ^(Bun - AMD^)
+    set "HAS_ITEMS=1"
+)
+if exist "%ROOT%tools\clip_src" (
+    echo    [DIR]  tools\clip_src\  ^(CLIP source archive - AMD^)
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%\.tmp" (
@@ -221,8 +225,12 @@ if "!PY_REMAIN!"=="0" if exist "%ROOT%tools\python" (
     rmdir /s /q "%ROOT%tools\python" 2>nul && echo  Done.
 )
 if exist "%ROOT%tools\bun-amd" (
-    echo Removing tools\bun-amd ^(Bun nightly - AMD^)...
+    echo Removing tools\bun-amd ^(Bun - AMD^)...
     rmdir /s /q "%ROOT%tools\bun-amd" 2>nul && echo  Done.
+)
+if exist "%ROOT%tools\clip_src" (
+    echo Removing tools\clip_src ^(CLIP source archive - AMD^)...
+    rmdir /s /q "%ROOT%tools\clip_src" 2>nul && echo  Done.
 )
 
 if exist "%LOGS_DIR%" (

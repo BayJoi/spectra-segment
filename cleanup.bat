@@ -33,11 +33,15 @@ if exist "%ROOT%tools\python\cpython-3.11*" (
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%tools\bun-cpu" (
-    echo    [DIR]  tools\bun-cpu\  ^(Bun nightly - CPU^)
+    echo    [DIR]  tools\bun-cpu\  ^(Bun - CPU^)
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%tools\bun" (
     echo    [DIR]  tools\bun\  ^(legacy shared Bun from older installs^)
+    set "HAS_ITEMS=1"
+)
+if exist "%ROOT%tools\clip_src" (
+    echo    [DIR]  tools\clip_src\  ^(CLIP source archive^)
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%backend\.embedded_python" (
@@ -212,7 +216,7 @@ if "!PY_REMAIN!"=="0" if exist "%ROOT%tools\python" (
 )
 
 if exist "%ROOT%tools\bun-cpu" (
-    echo Removing tools\bun-cpu\ ^(Bun nightly - CPU^)...
+    echo Removing tools\bun-cpu\ ^(Bun - CPU^)...
     rmdir /s /q "%ROOT%tools\bun-cpu"
     if exist "%ROOT%tools\bun-cpu" (
         echo   [WARN]  Failed to remove tools\bun-cpu\ ^(files may be in use^)
@@ -226,6 +230,16 @@ if exist "%ROOT%tools\bun" (
     rmdir /s /q "%ROOT%tools\bun"
     if exist "%ROOT%tools\bun" (
         echo   [WARN]  Failed to remove tools\bun\ ^(files may be in use^)
+    ) else (
+        echo   Done.
+    )
+)
+
+if exist "%ROOT%tools\clip_src" (
+    echo Removing tools\clip_src\ ^(CLIP source archive^)...
+    rmdir /s /q "%ROOT%tools\clip_src"
+    if exist "%ROOT%tools\clip_src" (
+        echo   [WARN]  Failed to remove tools\clip_src\ ^(files may be in use^)
     ) else (
         echo   Done.
     )

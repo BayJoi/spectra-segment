@@ -71,6 +71,14 @@ class SAM3Backend(SegmentationBackend):
         os.environ["ULTRALYTICS_HOME"] = str(model_dir)
         os.environ["YOLO_CONFIG_DIR"] = str(model_dir)
 
+        try:
+            import clip
+        except ImportError:
+            raise RuntimeError(
+                "SAM 3 requires the 'clip' text-encoder package, which is missing.\n"
+                "  Re-run install.bat to install it."
+            ) from None
+
         abs_model = str(model_dir / model_path)
         if not Path(abs_model).exists():
             from backend.utils.net_check import is_connected
@@ -106,7 +114,7 @@ class SAM3Backend(SegmentationBackend):
                     with cpu_threads(_DEFAULT_THREADS):
                         self._predictor = self._build_predictor(abs_model)
                 except Exception as e:
-                    if self._device != "cpu":
+                    if self._device != "cpu" and not (isinstance(e, ModuleNotFoundError) or "clip" in str(e).lower()):
                         LOGGER.warning("Device %s failed (%s), falling back to CPU", self._device, e)
                         self._device = "cpu"
                         with cpu_threads(_DEFAULT_THREADS):

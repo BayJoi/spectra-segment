@@ -88,7 +88,7 @@ if exist "%VENV_PYTHON%" (
     goto :skip_venv
 )
 echo   [INFO]  Creating virtual environment with Python %PY_VERSION%...
-"%UV_EXE%" venv --python %PY_VERSION% "%VENV_DIR%"
+"%UV_EXE%" venv --python %PY_VERSION% --seed "%VENV_DIR%"
 if !errorlevel! neq 0 (
     echo   [FAIL]  Failed to create virtual environment.
     pause
@@ -135,6 +135,22 @@ if exist "%ROOT%backend\requirements.txt" (
     )
 )
 
+echo   [INFO]  Installing SAM 3 CLIP text-encoder dependency...
+set "CLIP_SRC=%ROOT%tools\clip_src"
+if not exist "%CLIP_SRC%" mkdir "%CLIP_SRC%" 2>nul
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $wc=New-Object System.Net.WebClient; $zip=Join-Path '%TEMP%' 'clip.zip'; $wc.DownloadFile('https://codeload.github.com/ultralytics/CLIP/zip/refs/heads/main',$zip); Expand-Archive -Path $zip -DestinationPath '%CLIP_SRC%' -Force; Remove-Item $zip -ErrorAction SilentlyContinue" >nul 2>&1
+set "CLIP_DL_ERR=!errorlevel!"
+set "CLIP_DIR="
+if exist "%CLIP_SRC%" for /d %%d in ("%CLIP_SRC%\*") do set "CLIP_DIR=%%d"
+if "!CLIP_DL_ERR!"=="0" if defined CLIP_DIR (
+    "%UV_EXE%" pip install --python "%VENV_PYTHON%" "!CLIP_DIR!" --cache-dir "%UV_CACHE%"
+    if !errorlevel! neq 0 (
+        echo   [WARN]  Failed to install CLIP - SAM 3 mode will be unavailable.
+    )
+) else (
+    echo   [WARN]  Failed to download CLIP - SAM 3 mode will be unavailable.
+)
+
 set "WEB_DIR=%ROOT%backend\web"
 echo   [INFO]  Preparing frontend workspace at backend\web ...
 call "%ROOT%frontend\use_web.bat" "%WEB_DIR%"
@@ -174,7 +190,7 @@ echo  +------------------------------------------------------------+
 echo(
 echo   [INFO]  Layout:
 echo   [INFO]    tools\uv-cpu\      - uv binary (CPU)
-echo   [INFO]    tools\bun-cpu\     - Bun nightly (canary)
+echo   [INFO]    tools\bun-cpu\     - Bun (stable, latest)
 echo   [INFO]    tools\python\      - Python %PY_VERSION%
 echo   [INFO]    backend\.venv\     - Virtual environment
 echo   [INFO]    backend\.uv\cache\ - Package cache

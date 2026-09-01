@@ -11,8 +11,7 @@ if (Test-Path -LiteralPath (Join-Path $Dir 'bun.exe')) {
     exit 0
 }
 
-$apiUrl = 'https://api.github.com/repos/oven-sh/bun/releases/tags/canary'
-$zipUrl = 'https://github.com/oven-sh/bun/releases/download/canary/bun-windows-x64.zip'
+$apiUrl = 'https://api.github.com/repos/oven-sh/bun/releases/latest'
 
 $zipFile = Join-Path $Dir 'bun.zip'
 $marker  = Join-Path $Dir '.bun_sha256'
@@ -22,23 +21,29 @@ $web = New-Object System.Net.WebClient
 $web.Headers.Add('User-Agent', 'spectra-segment')
 
 $expected = $null
+$zipUrl   = $null
 try {
     $json = $web.DownloadString($apiUrl)
     $rel = $json | ConvertFrom-Json
-    $expected = ($rel.assets | Where-Object { $_.name -eq 'bun-windows-x64.zip' } | Select-Object -First 1).digest
-    if ($expected) {
-        $expected = ($expected -replace '^sha256:', '').Trim().ToLower()
+    $tagName = $rel.tag_name
+    $asset = $rel.assets | Where-Object { $_.name -eq 'bun-windows-x64.zip' } | Select-Object -First 1
+    if ($asset) {
+        $expected = $asset.digest
+        if ($expected) {
+            $expected = ($expected -replace '^sha256:', '').Trim().ToLower()
+        }
+        $zipUrl = "https://github.com/oven-sh/bun/releases/download/$tagName/bun-windows-x64.zip"
     }
 } catch {
     $expected = $null
 }
 
-if (-not $expected) {
+if (-not $expected -or -not $zipUrl) {
     if (Test-Path -LiteralPath $exe) {
         Write-Output '[BUN] Could not reach GitHub API; using existing project bun.exe.'
         exit 0
     }
-    Write-Output '[BUN] Could not reach GitHub API to fetch the canary checksum.'
+    Write-Output '[BUN] Could not reach GitHub API to fetch the latest stable release.'
     exit 1
 }
 
@@ -47,11 +52,11 @@ if (Test-Path -LiteralPath $marker) {
     $applied = (Get-Content -LiteralPath $marker | Select-Object -First 1).Trim()
 }
 if ((Test-Path -LiteralPath $exe) -and ($applied -eq $expected)) {
-    Write-Output "[BUN] Project bun.exe is up to date (canary sha $expected)."
+    Write-Output "[BUN] Project bun.exe is up to date (stable sha $expected)."
     exit 0
 }
 
-Write-Output '[BUN] A new canary build is available. Downloading bun-windows-x64.zip...'
+Write-Output '[BUN] A new stable release is available. Downloading bun-windows-x64.zip...'
 $installed = $false
 for ($attempt = 1; $attempt -le 4; $attempt++) {
     if ($attempt -gt 1) {
@@ -79,11 +84,11 @@ for ($attempt = 1; $attempt -le 4; $attempt++) {
         }
         Set-Content -LiteralPath $marker -Value $expected -Encoding ascii
         Remove-Item -LiteralPath $zipFile -Force -ErrorAction SilentlyContinue
-        Write-Output "[BUN] Installed verified canary build (sha $expected)."
+        Write-Output "[BUN] Installed verified stable build (sha $expected)."
         $installed = $true
         break
     } catch {
-        Write-Output "[BUN] Failed to fetch latest canary: $($_.Exception.Message)"
+        Write-Output "[BUN] Failed to fetch latest stable release: $($_.Exception.Message)"
         Remove-Item -LiteralPath $zipFile -Force -ErrorAction SilentlyContinue
         break
     }

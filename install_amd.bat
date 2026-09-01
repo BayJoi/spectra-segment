@@ -77,7 +77,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-"%UV_EXE%" venv --python 3.12.13 "%VENV_DIR%" --cache-dir "%UV_CACHE%" 2>&1
+"%UV_EXE%" venv --python 3.12.13 --seed "%VENV_DIR%" --cache-dir "%UV_CACHE%" 2>&1
 if errorlevel 1 (
     echo   [FAIL]  uv venv creation failed
     pause
@@ -159,6 +159,22 @@ if errorlevel 1 (
     echo   [WARN]  Some packages failed to install. Check requirements.txt.
 )
 echo   [ OK ]  Python requirements installed
+
+echo   [INFO]  Installing SAM 3 CLIP text-encoder dependency...
+set "CLIP_SRC=%ROOT%tools\clip_src"
+if not exist "%CLIP_SRC%" mkdir "%CLIP_SRC%" 2>nul
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $wc=New-Object System.Net.WebClient; $zip=Join-Path '%TEMP%' 'clip.zip'; $wc.DownloadFile('https://codeload.github.com/ultralytics/CLIP/zip/refs/heads/main',$zip); Expand-Archive -Path $zip -DestinationPath '%CLIP_SRC%' -Force; Remove-Item $zip -ErrorAction SilentlyContinue" >nul 2>&1
+set "CLIP_DL_ERR=!errorlevel!"
+set "CLIP_DIR="
+if exist "%CLIP_SRC%" for /d %%d in ("%CLIP_SRC%\*") do set "CLIP_DIR=%%d"
+if "!CLIP_DL_ERR!"=="0" if defined CLIP_DIR (
+    "%UV_EXE%" pip install --python "%VENV_DIR%" "!CLIP_DIR!" --cache-dir "%UV_CACHE%"
+    if !errorlevel! neq 0 (
+        echo   [WARN]  Failed to install CLIP - SAM 3 mode will be unavailable.
+    )
+) else (
+    echo   [WARN]  Failed to download CLIP - SAM 3 mode will be unavailable.
+)
 
 call :section "[ 7 / 8 ]  ROCm runtime + verification"
 echo   [INFO]  Initializing ROCm SDK...
