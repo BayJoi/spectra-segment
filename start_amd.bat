@@ -19,7 +19,7 @@ echo  ^|  Portable, self-contained. Everything stays in this folder ^|
 echo  +------------------------------------------------------------+
 echo(
 
-call :section "[ 1 / 7 ]  Preflight"
+call :section "[ 1 / 6 ]  Preflight"
 if not exist "%VENV_PYTHON%" (
     echo   [FAIL]  AMD venv not found at %AMD_DIR%\.venv
     echo           Run install_amd.bat first.
@@ -27,7 +27,7 @@ if not exist "%VENV_PYTHON%" (
     exit /b 1
 )
 
-call :section "[ 2 / 7 ]  Configuring AMD GPU"
+call :section "[ 2 / 6 ]  Configuring AMD GPU"
 set "PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512"
 set "PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512"
 set "MIOPEN_DEBUG_DISABLE_FIND_DB=0"
@@ -103,7 +103,7 @@ if defined AMD_GFX (
     )
 )
 
-call :section "[ 3 / 7 ]  Memory profile"
+call :section "[ 3 / 6 ]  Memory profile"
 set "FORCE_CPU_ARG="
 if defined AMD_GFX (
     choice /c GC /n /m "  [INFO]  AMD GPU detected - use (G)PU or (C)PU? "
@@ -130,7 +130,7 @@ if defined SPECTRA_VRAM_MODE (
     if "!SPECTRA_VRAM_MODE!"=="cpu" echo   [INFO]  CPU mode: forcing CPU inference
 )
 
-call :section "[ 4 / 7 ]  Preparing model caches"
+call :section "[ 4 / 6 ]  Preparing model caches"
 md "%MODEL_WEIGHTS%\hf_cache" 2>nul
 md "%MODEL_WEIGHTS%\torch_cache" 2>nul
 md "%MODEL_WEIGHTS%\cache" 2>nul
@@ -168,24 +168,7 @@ set "MIOPEN_USER_DB_PATH=%MODEL_WEIGHTS%\miopen"
 set "MIOPEN_CUSTOM_CACHE_DIR=%MODEL_WEIGHTS%\miopen\cache"
 set "PYTORCH_TUNABLEOP_CACHE_DIR=%MODEL_WEIGHTS%\tunableop_cache"
 
-call :section "[ 5 / 7 ]  Initializing ROCm SDK"
-where rocm-sdk >nul 2>&1
-if not errorlevel 1 (
-    echo   [INFO]  Initializing ROCm SDK...
-    for /f "delims=" %%a in ('rocm-sdk init 2^>nul') do set "ROCM_INIT=%%a"
-    if defined ROCM_INIT if exist "!ROCM_INIT!" call "!ROCM_INIT!"
-    for /f "delims=" %%a in ('rocm-sdk path --root 2^>nul') do set "HIP_PATH=%%a"
-    if defined HIP_PATH (
-        set "ROCM_PATH=!HIP_PATH!"
-        echo   [INFO]  ROCm SDK initialized ^(HIP_PATH=!HIP_PATH!^)
-    ) else (
-        echo   [WARN]  Could not determine ROCm SDK root path
-    )
-) else (
-    echo   [INFO]  rocm-sdk CLI not found - portable HIP DLLs from pip package are sufficient.
-)
-
-call :section "[ 6 / 7 ]  Starting backend"
+call :section "[ 5 / 6 ]  Starting backend"
 powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and $p.CommandLine -like '*main:app*') { Stop-Process -Id $_ -Force } }; exit 0"
 powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and ($p.CommandLine -like '*run dev*' -or $p.CommandLine -like '*vite*')) { Stop-Process -Id $_ -Force } }; exit 0"
 
@@ -228,7 +211,7 @@ goto :health_loop
 :backend_ready
 echo   [ OK ]  Backend is ready
 
-call :section "[ 7 / 7 ]  Starting frontend"
+call :section "[ 6 / 6 ]  Starting frontend"
 set "WEB_DIR=%AMD_DIR%\web"
 set "BUN_DIR_OVERRIDE=%ROOT%tools\bun-amd"
 call "%ROOT%frontend\bun_env.cmd"
@@ -252,7 +235,7 @@ if not exist "%WEB_DIR%\node_modules\vite\package.json" (
 )
 echo   [INFO]  Starting frontend via project Bun ^(port 3000^)...
 pushd "%ROOT%\frontend"
-start /B "Spectra-Segment-Frontend" cmd /c ""!BUN_EXE!" run dev --host 127.0.0.1 --port 3000"
+start /B "Spectra-Segment-Frontend" cmd /c ""!BUN_EXE!" "%ROOT%frontend\node_modules\vite\bin\vite.js" --host 127.0.0.1 --port 3000"
 popd
 
 :amd_done

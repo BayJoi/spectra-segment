@@ -30,13 +30,10 @@ if exist "%VENV_DIR%\Scripts\python.exe" (
     goto :done
 )
 
-echo   [INFO]  AMD ROCm SDK check...
-where rocm-sdk >nul 2>&1
-if errorlevel 1 (
-    echo   [INFO]  rocm-sdk CLI not found - optional.
-    echo           The rocm-sdk-devel pip package provides portable HIP DLLs.
-    echo           System ROCm SDK is only needed for advanced ROCm development.
-)
+echo   [INFO]  ROCm runtime check...
+echo           The ROCm PyTorch wheels bundle the HIP runtime and math
+echo           libraries (rocm-sdk-core / rocm-sdk-libraries), so no system-wide
+echo           ROCm install is required.
 
 call :section "[ 2 / 8 ]  Python + uv"
 set "UV_PYTHON_INSTALL_DIR=%ROOT%tools\python"
@@ -123,14 +120,12 @@ exit /b 1
 :gpu_detected
 echo   [ OK ]  AMD GPU arch: !AMD_GFX!
 set "TORCH_INDEX_URL=https://rocm.nightlies.amd.com/whl-multi-arch/"
-set "ROCM_SDK_PKG=rocm-sdk-devel"
 
-call :section "[ 5 / 8 ]  ROCm SDK + PyTorch"
-echo   [INFO]  Installing ROCm SDK (%ROCM_SDK_PKG%)...
-"%UV_EXE%" pip install --python "%VENV_DIR%" "%ROCM_SDK_PKG%" --index-url "%TORCH_INDEX_URL%" --cache-dir "%UV_CACHE%" 2>&1
-if errorlevel 1 (
-    echo   [WARN]  ROCm SDK pip package install failed - continuing without it.
-)
+call :section "[ 5 / 8 ]  ROCm PyTorch"
+rem The ROCm runtime and host libraries arrive automatically as dependencies of
+rem the torch[device-...] extra (rocm-sdk-core / rocm-sdk-libraries). The
+rem rocm-sdk-devel development package is intentionally NOT installed: it is
+rem only needed to compile HIP code and its _devel.tar is ~1.4 GB.
 
 set "TORCH_PKG=torch[device-!AMD_GFX!]"
 set "TORCHVISION_PKG=torchvision[device-!AMD_GFX!]"
@@ -176,23 +171,7 @@ if "!CLIP_DL_ERR!"=="0" if defined CLIP_DIR (
     echo   [WARN]  Failed to download CLIP - SAM 3 mode will be unavailable.
 )
 
-call :section "[ 7 / 8 ]  ROCm runtime + verification"
-echo   [INFO]  Initializing ROCm SDK...
-where rocm-sdk >nul 2>&1
-if not errorlevel 1 (
-    for /f "delims=" %%a in ('rocm-sdk init 2^>nul') do set "ROCM_INIT=%%a"
-    if defined ROCM_INIT if exist "!ROCM_INIT!" call "!ROCM_INIT!"
-    for /f "delims=" %%a in ('rocm-sdk path --root 2^>nul') do set "HIP_PATH=%%a"
-    if defined HIP_PATH (
-        set "ROCM_PATH=!HIP_PATH!"
-        echo   [ OK ]  HIP runtime initialized  ^(HIP_PATH=!HIP_PATH!^)
-    ) else (
-        echo   [WARN]  Could not determine ROCm SDK root path
-    )
-) else (
-    echo   [INFO]  rocm-sdk CLI not used - portable HIP DLLs from pip package handle runtime
-)
-
+call :section "[ 7 / 8 ]  Verification"
 echo   [INFO]  Checking installation...
 "%VENV_DIR%\Scripts\python.exe" -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.cuda.is_available()); v = getattr(torch.version, 'hip', None); print('HIP:', v)" 2>&1
 if errorlevel 1 (

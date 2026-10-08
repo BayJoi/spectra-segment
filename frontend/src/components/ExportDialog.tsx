@@ -3,18 +3,20 @@ import { useAtom } from "jotai";
 import { exportOpenAtom, isExportingAtom, pushToast } from "@/store/ui";
 import { sessionIdAtom, imageFileAtom, masksAtom, perDetectionMasksAtom, objectMasksAtom } from "@/store/session";
 import { layersAtom } from "@/store/layers";
+import { sam3ModeAtom, sam3InstancesAtom } from "@/store/sam3";
 import { featherRadiusAtom } from "@/store/detection";
 import { api, encodeMaskPng } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type ExportMode = "everything" | "layer" | "sublayers";
 
-type ExportKind = "detection" | "brush";
+type ExportKind = "detection" | "brush" | "sam3";
 
 interface GroupSub {
   key: string;
   detectionIndex?: number;
   brushOid?: number;
+  maskIndex?: number;
   name: string;
   hasMask: boolean;
   kind: ExportKind;
@@ -30,6 +32,7 @@ interface FileEntry {
   kind: ExportKind;
   detectionIndex?: number;
   brushOid?: number;
+  maskIndex?: number;
 }
 
 function slugify(s: string): string {
@@ -66,6 +69,8 @@ export function ExportDialog() {
   const [perDetectionMasks] = useAtom(perDetectionMasksAtom);
   const [masks] = useAtom(masksAtom);
   const [objectMasks] = useAtom(objectMasksAtom);
+  const [sam3Mode] = useAtom(sam3ModeAtom);
+  const [sam3Instances] = useAtom(sam3InstancesAtom);
   const [feather, setFeather] = useAtom(featherRadiusAtom);
 
   const [mode, setMode] = useState<ExportMode>("everything");
@@ -90,7 +95,10 @@ export function ExportDialog() {
   }, [imageFile]);
 
   const hasDetectionLayers = layers.some((l) => l.detectionIndex !== undefined);
-  const isBrush = !hasDetectionLayers && masks.length > 0;
+  const isSam3 = sam3Mode && sam3Instances.length > 0;
+  const isBrush = !isSam3 && !hasDetectionLayers && masks.length > 0;
+  const itemPlural = isSam3 ? "segments" : isBrush ? "subjects" : "layers";
+  const itemSingular = isSam3 ? "segment" : isBrush ? "subject" : "layer";
 
   const brushSubs: GroupSub[] = useMemo(() => {
     const oids = Object.keys(objectMasks).map(Number).sort((a, b) => a - b);
@@ -112,7 +120,28 @@ export function ExportDialog() {
     }));
   }, [objectMasks, masks]);
 
+  const sam3Subs: GroupSub[] = useMemo(
+    () =>
+      sam3Instances.map((inst, i) => ({
+        key: `sam3::${i}`,
+        maskIndex: i,
+        name: inst.text || "segment",
+        hasMask: i < masks.length,
+        kind: "sam3" as const,
+      })),
+    [sam3Instances, masks]
+  );
+
   const groups: Group[] = useMemo(() => {
+    if (isSam3) {
+      const byPrompt = new Map<string, GroupSub[]>();
+      sam3Subs.forEach((s) => {
+        const folder = safeFolder(s.name || "segments");
+        if (!byPrompt.has(folder)) byPrompt.set(folder, []);
+        byPrompt.get(folder)!.push(s);
+      });
+      return Array.from(byPrompt, ([name, subs]) => ({ name, subs }));
+    }
     if (isBrush) {
       return brushSubs.map((s) => ({ name: s.name, subs: [s] }));
     }
@@ -130,7 +159,7 @@ export function ExportDialog() {
       });
     }
     return Array.from(map, ([name, subs]) => ({ name, subs }));
-  }, [isBrush, brushSubs, layers, perDetectionMasks]);
+  }, [isSam3, sam3Subs, isBrush, brushSubs, layers, perDetectionMasks]);
 
   const effectiveGroup =
     selectedGroup && groups.some((g) => g.name === selectedGroup) ? selectedGroup : groups[0]?.name ?? null;
@@ -145,6 +174,12 @@ export function ExportDialog() {
               path: `${rootName}_subj${s.brushOid! + 1}.png`,
               kind: "brush",
               brushOid: s.brushOid,
+            });
+          } else if (s.kind === "sam3") {
+            files.push({
+              path: `${safeFolder(g.name)}/${slugify(s.name)}_${i + 1}.png`,
+              kind: "sam3",
+              maskIndex: s.maskIndex,
             });
           } else {
             files.push({
@@ -164,8 +199,12 @@ export function ExportDialog() {
     } else {
       groups.forEach((g) => addGroup(g, (s) => selectedSubs.has(s.key)));
     }
-    return files.filter((f) => (f.kind === "detection" ? f.detectionIndex! in perDetectionMasks : true));
-  }, [mode, groups, effectiveGroup, selectedSubs, perDetectionMasks, rootName]);
+    return files.filter((f) => {
+      if (f.kind === "detection") return f.detectionIndex! in perDetectionMasks;
+      if (f.kind === "sam3") return f.maskIndex !== undefined && f.maskIndex < masks.length;
+      return true;
+    });
+  }, [mode, groups, effectiveGroup, selectedSubs, perDetectionMasks, masks, rootName]);
 
   const includeWhole = mode === "everything";
 
@@ -185,7 +224,12 @@ export function ExportDialog() {
     try {
       const encoded: { path: string; mask_b64: string }[] = [];
       for (const f of filesToExport) {
-        const mask = f.kind === "brush" ? objectMasks[f.brushOid!] ?? masks[f.brushOid!] : perDetectionMasks[f.detectionIndex!];
+        const mask =
+          f.kind === "brush"
+            ? objectMasks[f.brushOid!] ?? masks[f.brushOid!]
+            : f.kind === "sam3"
+              ? masks[f.maskIndex!]
+              : perDetectionMasks[f.detectionIndex!];
         if (!mask) continue;
         encoded.push({ path: f.path, mask_b64: encodeMaskPng(mask) });
       }
@@ -221,7 +265,7 @@ export function ExportDialog() {
   const groupCount = (g: Group) => g.subs.filter((s) => s.hasMask).length;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true" aria-label={isBrush ? "Export subjects" : "Export layers"}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true" aria-label={isSam3 ? "Export segments" : isBrush ? "Export subjects" : "Export layers"}>
       <div
         className="absolute inset-0 bg-black/60 backdrop-blur-md smooth-dialog"
         onClick={() => setExportOpen(false)}
@@ -241,7 +285,7 @@ export function ExportDialog() {
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-orange-400"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7,10 12,15 17,10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 </div>
                 <div>
-                  <h3 className="text-sm font-semibold text-neutral-100 font-sans">{isBrush ? "Export Subjects" : "Export Layers"}</h3>
+                  <h3 className="text-sm font-semibold text-neutral-100 font-sans">{isSam3 ? "Export Segments" : isBrush ? "Export Subjects" : "Export Layers"}</h3>
                   <p className="text-[10px] text-neutral-500 font-sans">{`${rootName}.zip`}</p>
                 </div>
               </div>
@@ -258,9 +302,9 @@ export function ExportDialog() {
               <label className="text-[10px] text-neutral-500 uppercase tracking-widest font-sans block mb-2">What to export</label>
               <div className="grid grid-cols-3 gap-2">
                 {([
-                  { key: "everything", title: "Everything", desc: isBrush ? "All subjects + composite" : "All layers + whole" },
-                  { key: "layer", title: isBrush ? "One subject" : "One layer", desc: isBrush ? "Single subject" : "Single group" },
-                  { key: "sublayers", title: isBrush ? "Pick subjects" : "Sublayers", desc: isBrush ? "Pick specific" : "Pick specific" },
+                  { key: "everything", title: "Everything", desc: isBrush || isSam3 ? `All ${itemPlural} + composite` : "All layers + whole" },
+                  { key: "layer", title: isBrush || isSam3 ? `One ${itemSingular}` : "One layer", desc: isBrush || isSam3 ? `Single ${itemSingular}` : "Single group" },
+                  { key: "sublayers", title: isBrush || isSam3 ? `Pick ${itemPlural}` : "Sublayers", desc: "Pick specific" },
                 ] as const).map((m) => (
                   <button
                     key={m.key}
@@ -332,7 +376,7 @@ export function ExportDialog() {
                             )}>
                               {checked && <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" className="text-green-400"><path d="M20 6 9 17l-5-5"/></svg>}
                             </span>
-                            <span className="text-[11px] text-neutral-300 font-sans truncate flex-1">{s.kind === "brush" ? s.name : `${g.name} ${s.detectionIndex! + 1}`}</span>
+                            <span className="text-[11px] text-neutral-300 font-sans truncate flex-1">{s.kind === "detection" ? `${g.name} ${s.detectionIndex! + 1}` : s.name}</span>
                             <span className={cn("w-1.5 h-1.5 rounded-full flex-shrink-0", s.hasMask ? "bg-green-400" : "bg-neutral-600")} />
                           </button>
                         );
@@ -345,7 +389,7 @@ export function ExportDialog() {
 
             {includeWhole && (
               <div className="mb-3">
-                <label className="text-[10px] text-neutral-500 uppercase tracking-widest font-sans block mb-2">{isBrush ? "Composite format" : "Whole image format"}</label>
+                <label className="text-[10px] text-neutral-500 uppercase tracking-widest font-sans block mb-2">{isBrush || isSam3 ? "Composite format" : "Whole image format"}</label>
                 <div className="grid grid-cols-2 gap-2">
                   {(["png", "jpg"] as const).map((f) => (
                 <button
@@ -515,7 +559,7 @@ export function ExportDialog() {
                 ) : (
                   <>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7,10 12,15 17,10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                    Export {filesToExport.length} {filesToExport.length === 1 ? "file" : "files"}{includeWhole ? (isBrush ? " + composite" : " + whole") : ""}
+                    Export {filesToExport.length} {filesToExport.length === 1 ? "file" : "files"}{includeWhole ? (isBrush || isSam3 ? " + composite" : " + whole") : ""}
                   </>
                 )}
             </button>

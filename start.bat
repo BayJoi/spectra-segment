@@ -124,7 +124,7 @@ if not exist "%WEB_DIR%\node_modules\vite\package.json" (
     popd
 )
 cd /d "%ROOT%frontend"
-call "%BUN_EXE%" run dev --host 127.0.0.1 --port 3000
+call "%BUN_EXE%" "%ROOT%frontend\node_modules\vite\bin\vite.js" --host 127.0.0.1 --port 3000
 
 :frontend_done
 

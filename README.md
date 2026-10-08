@@ -63,8 +63,10 @@ selection needed.
 
 Everything is portable. The installers fetch their own toolchain (uv, Python,
 Bun), the launcher provisions a virtual environment inside the repo folder, and
-all model weights and caches stay under `model_weights\`. Nothing is written
-outside the project directory.
+model weights and runtime caches stay under `model_weights\`. The package cache
+lives in the backend folder (`backend\.uv\` or `backend_amd_gpu\.uv_cache_amd\`),
+and the installers and launchers redirect temp and cache paths into the project
+folder so no system-wide install is needed.
 
 ### CPU / NVIDIA GPU
 
@@ -85,7 +87,10 @@ CUDA build of PyTorch; otherwise it falls back to CPU.
 
 The AMD path uses AMD's official ROCm PyTorch wheels built by
 [TheRock](https://github.com/ROCm/TheRock). The installer detects your GPU's
-architecture (gfx target) automatically and picks the matching wheel index.
+architecture (gfx target) automatically and selects the matching `device-gfxNNNN`
+extra from TheRock's multi-arch wheel index. Only the ROCm runtime wheels are
+installed — the `rocm-sdk-devel` development package is deliberately skipped,
+as it is only needed to compile HIP code and would add ~1.4 GB.
 
 **Only the RX 6600 (8 GB, gfx1032) has been actually tested by this project.**
 Other cards may work — the wheels exist for them — but nothing below is
@@ -172,8 +177,8 @@ The launcher sets these automatically; they are listed here for reference:
 - `TORCH_BLAS_PREFER_HIPBLASLT=1` + `DISABLE_ADDMM_CUDA_LT=1` — hipBLASLt is
   preferred for speed, but its addmm path is disabled because it crashes on
   some RDNA2 wheels.
-- `MIOPEN_FIND_MODE=2` — skip MIOpen solver searches (consumer cards have no
-  performance database; searches cost minutes and gain little).
+- `MIOPEN_USER_DB_PATH` + `MIOPEN_CUSTOM_CACHE_DIR` — keep the MIOpen kernel
+  database inside `model_weights\miopen` so it persists between runs.
 - `HSA_ENABLE_SDMA=0` — avoids DMA-engine copy stalls reported on Windows.
 - Encoders run under `torch.inference_mode()` — this alone cut SAM2's memory
   footprint from ~5 GB to ~285 MB per image and made encodes ~6x faster.
@@ -192,14 +197,13 @@ Most knobs have sensible defaults set by the launcher:
 | `SPECTRA_KEEP_SEG_ON_DETECT` | Keep the SAM model resident across detector runs (faster alternating, more VRAM). |
 | `SPECTRA_DETECTOR_FP16` | Load detectors in fp16 on GPU (halves their VRAM; CPU stays fp32). |
 | `SAM2_QUANTIZE`, `SAM3_QUANTIZE` | Working precision override (16 = fp16). |
-| `SAM3_ENCODE_DIM` | Default SAM3 encoding resolution. |
 | `SAM2_OFFLOAD_ENCODER` | Keep the SAM2 image encoder on CPU between images. |
 
 ---
 
 ## System Requirements
 
-- Windows 10 or later (AMD GPU path is Windows-only)
+- Windows 10 or later (all launchers are Windows-only)
 - 8 GB RAM minimum (16 GB recommended)
 - 10–20 GB free disk space for models and caches
 - First launch of each model needs internet; everything after that is offline
@@ -216,8 +220,9 @@ To remove the app and start fresh:
 
 This removes the virtual environment, package caches, frontend workspace,
 toolchain binaries, logs, bytecode caches, and temp files. Each cleanup script
-only removes its own backend's files; protected files (LICENSE, README,
-.gitignore, THIRD-PARTY-LICENSES.txt) are never touched.
+removes its own backend's files (plus shared installer temp and the frontend
+lockfile); protected files (LICENSE, README, .gitignore, THIRD-PARTY-LICENSES.txt)
+are never touched.
 
 ---
 
@@ -238,10 +243,13 @@ spectra-segment/
 ├── start_amd.bat         # AMD launcher (memory profile + GPU setup)
 ├── stop.bat / stop_amd.bat
 ├── cleanup.bat / cleanup_amd.bat
+├── launcher/             # setup_memory.ps1 - memory profile (called by both start scripts)
 ├── checks/               # health-check script + bat wrapper + run logs
 ├── backend/              # FastAPI backend - CUDA/CPU fork
+│   └── model_weights/    # downloaded models + runtime caches (CPU/NVIDIA)
 ├── backend_amd_gpu/      # FastAPI backend - ROCm fork
-│   └── model_weights/    # all downloaded models + caches live here
+│   ├── model_weights/    # downloaded models + runtime caches (AMD)
+│   └── detect_amd_gpu.py # AMD-only gfx target detection
 ├── frontend/             # React 19 + Vite UI (served on :3000)
 └── tools/                # portable uv/python/bun (created by installers)
 ```

@@ -18,7 +18,7 @@ backend_amd_gpu/model_weights/
 
 # Package caches
 backend/.uv/
-backend_amd_gpu/.uv/
+backend_amd_gpu/.uv_cache_amd/
 backend/.pip/
 backend_amd_gpu/.pip/
 
@@ -71,5 +71,9 @@ desktop.ini
 
 # OpenCode
 .opencode/
+
+# Freebuff local project state
+.freebuff/
+
 # Health check logs
 checks/*.log

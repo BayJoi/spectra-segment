@@ -468,8 +468,8 @@ class ExportZipRequest(BaseModel):
     @field_validator("root")
     @classmethod
     def validate_root(cls, v):
-        if not v or len(v) > 200:
-            raise ValueError("root must be 1-200 characters")
+        if len(v) > 200:
+            raise ValueError("root must be 0-200 characters")
         return v
 
     @field_validator("files")

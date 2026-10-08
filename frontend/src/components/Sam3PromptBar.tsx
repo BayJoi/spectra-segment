@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAtom } from "jotai";
 import { useSam3 } from "@/hooks/useSam3";
 import { sam3PromptInputAtom, sam3InstancesAtom, sam3KeepLoadedAtom, sam3EncodeDimAtom, type Sam3EncodeDim } from "@/store/sam3";
-import { fitToViewAtom, zoomInAtom, zoomOutAtom, showTransparentAtom, hideBboxesAtom } from "@/store/ui";
+import { fitToViewAtom, zoomInAtom, zoomOutAtom, showTransparentAtom, hideBboxesAtom, exportOpenAtom } from "@/store/ui";
 import { LayersPanel } from "@/components/LayersPanel";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -25,6 +25,7 @@ export function Sam3PromptBar() {
   const [fitToView] = useAtom(fitToViewAtom);
   const [zoomIn] = useAtom(zoomInAtom);
   const [zoomOut] = useAtom(zoomOutAtom);
+  const [, setExportOpen] = useAtom(exportOpenAtom);
   const layersToggleRef = useRef<HTMLDivElement>(null);
   const optionsRef = useRef<HTMLDivElement>(null);
   const [layersOpen, setLayersOpen] = useState(false);
@@ -202,6 +203,24 @@ export function Sam3PromptBar() {
             </button>
           </Tooltip>
         </div>
+
+        <Tooltip tip={sam3Instances.length > 0 ? "Export segment masks as a zip" : "Segment something first"}>
+          <button
+            type="button"
+            onClick={() => setExportOpen(true)}
+            disabled={sam3Instances.length === 0}
+            aria-label="Export segments"
+            className={cn(
+              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-medium font-sans border transition-all duration-200 select-none shrink-0",
+              sam3Instances.length === 0
+                ? "bg-neutral-900/50 border-neutral-800/50 text-neutral-600 cursor-not-allowed"
+                : "bg-neutral-900/50 border-neutral-800/50 text-neutral-400 hover:text-neutral-200 hover:border-neutral-700 hover:scale-105 active:scale-95 cursor-pointer"
+            )}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="shrink-0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7,10 12,15 17,10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export
+          </button>
+        </Tooltip>
 
         {showTransparent && sam3Instances.length > 0 && (
           <Tooltip tip={hideBboxes ? "Segment boxes hidden in transparent mode — click to show" : "Hide all segment boxes in transparent mode"} className="shrink-0">

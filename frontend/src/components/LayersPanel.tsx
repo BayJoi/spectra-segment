@@ -70,8 +70,9 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
   return (
     <div
       ref={panelRef}
-      className="animate-drop-in w-72 max-h-72 overflow-y-auto custom-scrollbar bg-[#0a0a0a]/95 border border-neutral-800/80 rounded-xl shadow-2xl shadow-black/60 p-2 backdrop-blur-xl grain-bg"
+      className="animate-drop-in w-72 max-h-72 flex flex-col bg-[#0a0a0a]/95 border border-neutral-800/80 rounded-xl shadow-2xl shadow-black/60 backdrop-blur-xl grain-bg overflow-hidden"
     >
+      <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-2">
       <div className="flex items-center justify-between px-1 mb-1.5">
         <span className="text-[11px] text-neutral-500 uppercase tracking-wider font-sans">Layers</span>
         <span className="text-[10px] text-neutral-600 font-mono">{layers.length}</span>
@@ -193,6 +194,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
           })}
         </div>
       )}
+      </div>
     </div>
   );
 }
