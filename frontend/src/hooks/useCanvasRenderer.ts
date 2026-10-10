@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import type { CanvasState, Detection } from "@/lib/types";
 import type { Sam3Instance } from "@/store/sam3";
 import type { PackedMask } from "@/lib/mask";
+import { subjectColor } from "@/store/session";
 
 function clampIndex(v: number, max: number): number {
   return v < 0 ? 0 : v >= max ? max - 1 : v;
@@ -12,6 +13,14 @@ function clampByte(v: number): number {
 }
 
 let ctxFilterSupported: boolean | null = null;
+
+let _dpr = 1;
+
+function currentDpr(): number {
+  const d = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  if (!_dpr || Math.abs(_dpr - d) > 0.001) _dpr = d;
+  return _dpr;
+}
 
 function supportsCtxFilter(): boolean {
   if (ctxFilterSupported === null) {
@@ -39,26 +48,31 @@ function supportsCtxFilter(): boolean {
 function boxBlurFloat(src: Float32Array, w: number, h: number, radius: number): Float32Array {
   const r = Math.max(1, Math.round(radius));
   const size = r * 2 + 1;
-  const half = w * h;
-  const dst = new Float32Array(half);
+  const tmp = new Float32Array(w * h * 4);
+  const out = new Float32Array(w * h * 4);
+
   for (let y = 0; y < h; y++) {
-    const row = y * w;
-    let sum = 0;
-    for (let k = -r; k <= r; k++) sum += src[row + clampIndex(k, w)];
-    dst[row] = sum / size;
-    for (let x = 1; x < w; x++) {
-      sum += src[row + clampIndex(x + r, w)] - src[row + clampIndex(x - r - 1, w)];
-      dst[row + x] = sum / size;
+    const row = y * w * 4;
+    for (let c = 0; c < 4; c++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += src[row + clampIndex(k, w) * 4 + c];
+      tmp[row + c] = sum / size;
+      for (let x = 1; x < w; x++) {
+        sum += src[row + clampIndex(x + r, w) * 4 + c] - src[row + clampIndex(x - r - 1, w) * 4 + c];
+        tmp[row + x * 4 + c] = sum / size;
+      }
     }
   }
-  const out = new Float32Array(half);
+
   for (let x = 0; x < w; x++) {
-    let sum = 0;
-    for (let k = -r; k <= r; k++) sum += dst[clampIndex(k, h) * w + x];
-    out[x] = sum / size;
-    for (let y = 1; y < h; y++) {
-      sum += dst[clampIndex(y + r, h) * w + x] - dst[clampIndex(y - r - 1, h) * w + x];
-      out[y * w + x] = sum / size;
+    for (let c = 0; c < 4; c++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += tmp[clampIndex(k, h) * w * 4 + x * 4 + c];
+      out[x * 4 + c] = sum / size;
+      for (let y = 1; y < h; y++) {
+        sum += tmp[clampIndex(y + r, h) * w * 4 + x * 4 + c] - tmp[clampIndex(y - r - 1, h) * w * 4 + x * 4 + c];
+        out[y * w * 4 + x * 4 + c] = sum / size;
+      }
     }
   }
   return out;
@@ -142,6 +156,8 @@ interface CanvasRendererRefs {
 
 interface RendererState {
   masksRef: React.MutableRefObject<PackedMask[]>;
+  objectMasksRef: React.MutableRefObject<Record<number, PackedMask>>;
+  activeObjectIdRef: React.MutableRefObject<number>;
   detectionsRef: React.MutableRefObject<Detection[]>;
   selectedDetectionRef: React.MutableRefObject<number | null>;
   showTransparentRef: React.MutableRefObject<boolean>;
@@ -161,7 +177,62 @@ export function useCanvasRenderer(
   const maskCacheKeyRef = useRef("");
   const transparentCompositeRef = useRef<HTMLCanvasElement | null>(null);
   const transparentCompositeKeyRef = useRef("");
+  const maskRevisionRef = useRef(0);
   const checkerPatternCacheRef = useRef<{ pattern: CanvasPattern; width: number; height: number } | null>(null);
+  const subjectMaskCacheRef = useRef<{ canvas: HTMLCanvasElement; key: string } | null>(null);
+
+  const rebuildSubjectMaskCache = useCallback(
+    (objectMasks: Record<number, PackedMask>, activeId: number, featherRadius: number) => {
+      const img = refs.imageRef.current;
+      const ids = Object.keys(objectMasks);
+      if (!img || ids.length === 0) {
+        subjectMaskCacheRef.current = null;
+        return null;
+      }
+      const iw = img.naturalWidth;
+      const ih = img.naturalHeight;
+      const ordered = ids
+        .map(Number)
+        .filter((id) => objectMasks[id])
+        .sort((a, b) => Number(a === activeId) - Number(b === activeId));
+
+      const off = document.createElement("canvas");
+      off.width = iw;
+      off.height = ih;
+      const octx = off.getContext("2d")!;
+
+      for (const id of ordered) {
+        const mask = objectMasks[id];
+        if (!mask || mask.w !== iw || mask.h !== ih) continue;
+        const layer = document.createElement("canvas");
+        layer.width = iw;
+        layer.height = ih;
+        const lctx = layer.getContext("2d")!;
+        const imgData = lctx.createImageData(iw, ih);
+        const u32 = new Uint32Array(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength >>> 2);
+        const src = mask.data;
+        for (let i = 0; i < src.length; i++) {
+          if (src[i]) u32[i] = 0xffffffff;
+        }
+        lctx.putImageData(imgData, 0, 0);
+        let maskSource: HTMLCanvasElement = layer;
+        if (featherRadius > 0) maskSource = blurMaskCanvas(layer, featherRadius);
+        octx.globalCompositeOperation = "source-over";
+        octx.drawImage(maskSource, 0, 0);
+        octx.globalCompositeOperation = "source-in";
+        octx.fillStyle = subjectColor(id);
+        octx.globalAlpha = 0.42;
+        octx.fillRect(0, 0, iw, ih);
+        octx.globalAlpha = 1;
+        octx.globalCompositeOperation = "source-over";
+      }
+
+      const key = `${ordered.join(",")}|${activeId}|f${featherRadius}`;
+      subjectMaskCacheRef.current = { canvas: off, key };
+      return off;
+    },
+    [refs.imageRef]
+  );
 
   const computeState = useCallback(
     (zoom: number, panX: number, panY: number): CanvasState => {
@@ -305,7 +376,8 @@ export function useCanvasRenderer(
       const canvas = refs.maskCanvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d")!;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(currentDpr(), 0, 0, currentDpr(), 0, 0);
+      ctx.clearRect(0, 0, canvasState.canvasWidth, canvasState.canvasHeight);
 
       const currentMasks = state.masksRef.current;
       const img = refs.imageRef.current;
@@ -329,13 +401,39 @@ export function useCanvasRenderer(
           ctx.drawImage(transparentCompositeRef.current, ox, oy, dw, dh);
         }
       } else {
+        const objectMasks = state.objectMasksRef.current;
+        const activeId = state.activeObjectIdRef.current;
+        const dw = Math.floor(img!.naturalWidth * canvasState.scale);
+        const dh = Math.floor(img!.naturalHeight * canvasState.scale);
+        const hasSubjectMasks = Object.keys(objectMasks).length > 0;
+        if (hasSubjectMasks) {
+          const ids = Object.keys(objectMasks)
+            .map(Number)
+            .sort((a, b) => a - b)
+            .join(",");
+          const key = `${ids}|${activeId}|f${featherRadius}|r${maskRevisionRef.current}`;
+          if (!subjectMaskCacheRef.current || subjectMaskCacheRef.current.key !== key) {
+            maybeRebuild(() => rebuildSubjectMaskCache(objectMasks, activeId, featherRadius));
+          }
+          if (subjectMaskCacheRef.current) {
+            ctx.drawImage(
+              subjectMaskCacheRef.current.canvas,
+              canvasState.offsetX, canvasState.offsetY, dw, dh
+            );
+            return;
+          }
+        }
         maybeRebuild(() => rebuildMaskCache(currentMasks, featherRadius));
         if (maskCacheRef.current) {
-          ctx.drawImage(maskCacheRef.current, canvasState.offsetX, canvasState.offsetY, Math.floor(img!.naturalWidth * canvasState.scale), Math.floor(img!.naturalHeight * canvasState.scale));
+          ctx.drawImage(maskCacheRef.current, canvasState.offsetX, canvasState.offsetY, dw, dh);
         }
       }
     },
-    [refs.maskCanvasRef, refs.imageRef, state.masksRef, state.showTransparentRef, state.featherRadiusRef, rebuildMaskCache, rebuildTransparentComposite, maybeRebuild]
+    [
+      refs.maskCanvasRef, refs.imageRef, state.masksRef, state.objectMasksRef,
+      state.activeObjectIdRef, state.showTransparentRef, state.featherRadiusRef,
+      rebuildMaskCache, rebuildTransparentComposite, rebuildSubjectMaskCache, maybeRebuild,
+    ]
   );
 
   const renderDetections = useCallback(
@@ -343,6 +441,7 @@ export function useCanvasRenderer(
       const canvas = refs.detectCanvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d")!;
+      ctx.setTransform(currentDpr(), 0, 0, currentDpr(), 0, 0);
 
       const currentDetections = state.detectionsRef.current;
       if (!currentDetections.length) return;
@@ -391,12 +490,13 @@ export function useCanvasRenderer(
 
   const renderSam3Boxes = useCallback(
     (canvasState: CanvasState) => {
+      const instances = state.sam3InstancesRef.current;
+      if (!instances.length) return;
+
       const canvas = refs.detectCanvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d")!;
-
-      const instances = state.sam3InstancesRef.current;
-      if (!instances.length) return;
+      ctx.setTransform(currentDpr(), 0, 0, currentDpr(), 0, 0);
 
       if (state.hideBboxesRef.current && state.showTransparentRef.current) return;
 
@@ -452,17 +552,22 @@ export function useCanvasRenderer(
     const w = Math.floor(img.naturalWidth * scale);
     const h = Math.floor(img.naturalHeight * scale);
 
+    const dpr = currentDpr();
+    const cw = canvasState.canvasWidth;
+    const ch = canvasState.canvasHeight;
+    const bw = Math.max(1, Math.floor(cw * dpr));
+    const bh = Math.max(1, Math.floor(ch * dpr));
+
     const imgCanvas = refs.imageCanvasRef.current;
     if (imgCanvas) {
-      if (imgCanvas.width !== canvasState.canvasWidth) imgCanvas.width = canvasState.canvasWidth;
-      if (imgCanvas.height !== canvasState.canvasHeight) imgCanvas.height = canvasState.canvasHeight;
+      if (imgCanvas.width !== bw) imgCanvas.width = bw;
+      if (imgCanvas.height !== bh) imgCanvas.height = bh;
       const ctx = imgCanvas.getContext("2d")!;
-      ctx.clearRect(0, 0, canvasState.canvasWidth, canvasState.canvasHeight);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cw, ch);
 
       if (state.showTransparentRef.current) {
         const sz = 16;
-        const cw = canvasState.canvasWidth;
-        const ch = canvasState.canvasHeight;
         if (!checkerPatternCacheRef.current || checkerPatternCacheRef.current.width !== cw || checkerPatternCacheRef.current.height !== ch) {
           const tile = document.createElement("canvas");
           tile.width = sz * 2;
@@ -485,21 +590,25 @@ export function useCanvasRenderer(
 
     for (const ref of [refs.drawCanvasRef, refs.maskCanvasRef, refs.detectCanvasRef]) {
       if (ref.current) {
-        if (ref.current.width !== canvasState.canvasWidth) ref.current.width = canvasState.canvasWidth;
-        if (ref.current.height !== canvasState.canvasHeight) ref.current.height = canvasState.canvasHeight;
+        if (ref.current.width !== bw) ref.current.width = bw;
+        if (ref.current.height !== bh) ref.current.height = bh;
         const ctx = ref.current.getContext("2d");
-        ctx?.clearRect(0, 0, ref.current.width, ref.current.height);
+        ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx?.clearRect(0, 0, cw, ch);
       }
     }
 
     renderMasks(canvasState);
     renderDetections(canvasState);
     renderSam3Boxes(canvasState);
+    return { dpr, width: bw, height: bh };
   }, [refs, computeState, renderMasks, renderDetections, renderSam3Boxes, state.showTransparentRef, zoomRef, panRef]);
 
   const invalidateCache = useCallback(() => {
     maskCacheKeyRef.current = "";
     transparentCompositeKeyRef.current = "";
+    subjectMaskCacheRef.current = null;
+    maskRevisionRef.current += 1;
     checkerPatternCacheRef.current = null;
   }, []);
 

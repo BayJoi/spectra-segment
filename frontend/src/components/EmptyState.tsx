@@ -83,7 +83,7 @@ export function EmptyState() {
       </div>
 
       <div className="hero-entrance hero-delay-2 inline-flex items-center gap-1 p-1 rounded-xl border border-neutral-800/60 bg-neutral-900/50">
-        <Tooltip tip="Brush / Detect mode (B/D)" side="bottom">
+        <Tooltip tip="Switch between Brush and Detect mode" side="bottom">
           <button
             onClick={() => handleToggleMode("brush")}
             className={cn(

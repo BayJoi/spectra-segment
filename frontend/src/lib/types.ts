@@ -8,6 +8,14 @@ import type { PackedMask } from "./mask";
 export interface PredictResponse {
   masks: PackedMask[];
   objectMasks?: Record<number, PackedMask>;
+  objectHistory?: Record<string, Partial<ObjectHistoryEntry>>;
+}
+
+export interface ObjectHistoryEntry {
+  undo: number;
+  redo: number;
+  strokes: number;
+  has_mask: boolean;
 }
 
 export interface Sam3PromptResponse {

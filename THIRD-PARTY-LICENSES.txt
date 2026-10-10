@@ -2,7 +2,12 @@ Spectra Segment - Third-Party Licenses
 =======================================
 
 This project uses the following third-party packages and assets.
-All licenses are compatible with the GNU General Public License v3.0.
+
+Most dependencies are permissive (MIT / BSD / Apache-2.0) and combine with the
+project's GPL-3.0-only license. Two are special and are called out at the end:
+the ultralytics package is AGPL-3.0, which makes the combined, distributed work
+AGPL-3.0 (not GPL-3.0); and Meta's SAM weights ship under the Meta SAM License.
+Read the "LICENSE NOTE" section before distributing this project.
 
 
 RUNTIME DEPENDENCIES (Python)
@@ -51,7 +56,7 @@ hf-xet
 
 starlette
   License: BSD-3-Clause
-  Copyright: Copyright (c) 2018 Sentenz
+  Copyright: Copyright (c) 2018, Encode OSS Ltd
 
 h11
   License: MIT
@@ -168,22 +173,63 @@ MIOpen
 MODEL LICENSES
 --------------
 
-SAM 3 (Segment Anything 3)
-  License: Apache-2.0
+SAM 3 (Segment Anything 3) weights
+  License: the Meta SAM License (not Apache-2.0, not AGPL). The Ultralytics *code*
+  that loads the weights is AGPL-3.0, but the checkpoints Meta publishes are
+  governed by the SAM License (last updated 2025-11-19).
   Copyright: Copyright (c) Meta Platforms, Inc.
-  Note: Model weights may have separate usage terms via SAM License.
-  See: https://ai.meta.com/sam/licenses/
+  Official license: https://huggingface.co/facebook/sam3/blob/main/LICENSE
+  Upstream model: https://huggingface.co/facebook/sam3
+  Note: the app fetches a single-file Ultralytics-format checkpoint from a
+  community mirror (huggingface.co/bodhicitta/sam3) because Meta does not publish
+  that exact file. The mirror is not an official Meta distribution, so its
+  contents and license cannot be independently verified -- see the LICENSE NOTE.
 
-YOLO (Ultralytics)
-  License: AGPL-3.0
+YOLO / YOLOE / SAM 2 model weights distributed by Ultralytics
+  License: AGPL-3.0 (per https://www.ultralytics.com/license, pretrained models
+  are AGPL-3.0 by default). Commercial or closed-source use requires an
+  Ultralytics Enterprise license.
   Copyright: Copyright (c) 2016-present, Ultralytics
+  Note: the YOLOE MobileCLIP text encoders (mobileclip2_b.ts, mobileclip_blt.ts)
+  are also redistributed through the ultralytics/assets v8.4.0 release. Refer to
+  the upstream MobileCLIP project for the encoder weights' own terms.
 
 
 LICENSE NOTE
 ------------
 
-This project (Spectra Segment) is licensed under the GNU General Public
-License v3.0. The AGPL-3.0 licensed dependencies (ultralytics) require
-that any distributed version of this software must also be licensed under
-AGPL-3.0. For local-only use, GPL-3.0 applies. If distributed over a
-network, AGPL-3.0 requirements may apply.
+Spectra Segment's own source is under the GNU General Public License v3.0
+(GPL-3.0-only).
+
+However, the project depends on the `ultralytics` package, which is AGPL-3.0.
+GPL-3.0 and AGPL-3.0 are *one-way* compatible: you may combine them, but the
+combined work -- and therefore any binary or source you distribute -- must be
+released under AGPL-3.0, and running it as a network service triggers AGPL-3.0
+section 13. It is therefore inaccurate to describe the whole project as
+GPL-3.0 once ultralytics is linked.
+
+Consequences:
+  * Distributing this software (with ultralytics) requires AGPL-3.0 compliance:
+    publish the complete corresponding source under AGPL-3.0.
+  * Commercial or closed-source distribution requires an Ultralytics Enterprise
+    license, which removes the AGPL obligation for the ultralytics parts.
+  * Personal, academic and fully open-source use is covered by AGPL-3.0 free of
+    charge.
+
+The project's own LICENSE file stays GPL-3.0 for the parts written here; the
+AGPL-3.0 terms attach to the ultralytics dependency and anything statically or
+dynamically combined with it.
+
+Weights provenance
+------------------
+
+Every checkpoint the app downloads is fetched from a pinned URL and checked
+against a sha256 digest before it is used. Provenance is not uniform, though:
+
+  * Most files come from the `ultralytics/assets` v8.4.0 GitHub release, which is
+    an official Ultralytics distribution.
+  * `sam3.pt` comes from a community mirror and its digest could not be confirmed
+    against any official source. Treat it as third-party.
+
+Because the SAM 3 checkpoint and the ultralytics package are combined at runtime,
+review both the Meta SAM License and the AGPL-3.0 obligation before distributing.

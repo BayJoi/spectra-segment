@@ -1,23 +1,3 @@
-"""GPU / device health smoke test for Spectra Segment backends.
-
-Verifies, per backend fork and per detected compute device:
-  - app import
-  - model availability (local only unless --download)
-  - model load
-  - encode runs under torch.inference_mode (regression guard)
-  - post-encode memory footprint stays within budget
-  - repeated encode does not grow the footprint (regression guard)
-  - predict produces masks + timing
-
-Results are printed to the console and written to a timestamped .log file
-inside this checks/ folder. Exit code: 0 = all passed, 1 = failures.
-
-Usage:
-  python check_gpu_health.py [backend|backend_amd_gpu] [--model NAME]
-                             [--runs N] [--download] [--force-cpu]
-
-Run both forks:            check_gpu.bat
-"""
 from __future__ import annotations
 
 import argparse
@@ -152,7 +132,6 @@ def main() -> int:
         results.append((name, status, detail))
         return ok
 
-    # ---- imports -------------------------------------------------------
     try:
         mod = __import__(f"{args.fork}.main", fromlist=["app"])
         record("app imports", hasattr(mod, "app"))
@@ -183,7 +162,6 @@ def main() -> int:
     footprint_limit = FOOTPRINT_LIMIT_MB_CPU if not is_gpu else max(
         512, min(FOOTPRINT_LIMIT_MB_GPU, int(vram_total_mb * 0.15)))
 
-    # ---- model selection ----------------------------------------------
     mi = __import__(f"{args.fork}.models.ultralytics_backend", fromlist=["ULTRALYTICS_MODELS"])
     catalog = list(mi.ULTRALYTICS_MODELS.keys())
     model_name = args.model
@@ -206,7 +184,6 @@ def main() -> int:
         print("\nRESULT: FAIL (no local model)")
         return 1
 
-    # ---- load ----------------------------------------------------------
     t0 = time.perf_counter()
     try:
         be = UltralyticsBackend(device=device)
@@ -219,7 +196,6 @@ def main() -> int:
         print("\nRESULT: FAIL")
         return 1
 
-    # ---- encode + guards ----------------------------------------------
     import numpy as np
     import torch
 
@@ -262,7 +238,6 @@ def main() -> int:
            f"{alloc_mb} -> {alloc2_mb} MB (+{grew})")
     print(f"[info] encode warm: {enc_warm:.2f}s")
 
-    # ---- predict -------------------------------------------------------
     runs = args.runs or (10 if is_gpu else 2)
     bbox = [[100, 100, 500, 500]]
     times = []
@@ -287,7 +262,6 @@ def main() -> int:
 
     be.unload_model()
 
-    # ---- summary -------------------------------------------------------
     elapsed = time.perf_counter() - started
     fails = [r for r in results if r[1] == "FAIL"]
     skips = [r for r in results if r[1] == "SKIP"]

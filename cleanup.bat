@@ -11,12 +11,13 @@ echo  ^|                      SPECTRA SEGMENT                       ^|
 echo  ^|                         Cleanup  (CPU)                     ^|
 echo  ^|  Portable, self-contained. Everything stays in this folder ^|
 echo  +------------------------------------------------------------+
-echo(
-echo    Protected: checks\ folder (health-check script + logs) is never removed.
+echo( 
+echo    Protected: docs\ folder and checks\ folder are never removed.
 
 call :section "[ 1 / 3 ]  Reviewing items to remove"
 echo   The following will be permanently removed:
 echo(
+echo    docs\ is documentation and is always kept.
 
 set "HAS_ITEMS=0"
 
@@ -28,8 +29,8 @@ if exist "%ROOT%tools\uv" (
     echo    [DIR]  tools\uv\  ^(legacy shared uv from older installs^)
     set "HAS_ITEMS=1"
 )
-if exist "%ROOT%tools\python\cpython-3.11*" (
-    echo    [DIR]  tools\python\cpython-3.11*\  ^(portable Python 3.11.9 - CPU^)
+if exist "%ROOT%tools\python\cpython-*" (
+    echo    [DIR]  tools\python\cpython-*\  ^(portable Python - CPU^)
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%tools\bun-cpu" (
@@ -153,7 +154,7 @@ echo(
 
 call :section "[ 2 / 3 ]  Stopping running processes"
 for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*backend.main:app*') { exit 0 } } catch {}; exit 1" >nul 2>&1
+    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*main:app*') { exit 0 } } catch {}; exit 1" >nul 2>&1
     if not errorlevel 1 (
         taskkill /F /PID %%p >nul 2>&1
     )
@@ -161,7 +162,10 @@ for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENIN
 call :is_own_web "%ROOT%frontend\node_modules" "%ROOT%backend\web\node_modules"
 if not errorlevel 1 (
     for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":3000 " ^| findstr "LISTENING"') do (
-        taskkill /F /PID %%p >nul 2>&1
+        powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*vite*' -or $c.CommandLine -like '*run dev*') { exit 0 } } catch {}; exit 1" >nul 2>&1
+        if not errorlevel 1 (
+            taskkill /F /PID %%p >nul 2>&1
+        )
     )
 )
 timeout /t 2 /nobreak >nul
@@ -199,8 +203,8 @@ if exist "%ROOT%tools\uv" (
     )
 )
 
-echo Removing tools\python\cpython-3.11*\ (portable Python 3.11 - CPU)...
-for /d %%d in ("%ROOT%tools\python\cpython-3.11*") do (
+echo Removing tools\python\cpython-*\ (portable Python - CPU)...
+for /d %%d in ("%ROOT%tools\python\cpython-*") do (
     rmdir /s /q "%%~d"
     if exist "%%~d" (
         echo   [WARN]  Failed to remove %%~nxd\ ^(files may be in use^)
@@ -388,6 +392,18 @@ for %%f in (.gitignore README.md THIRD-PARTY-LICENSES.txt LICENSE) do (
         set "PROTECTED_FAIL=1"
     )
 )
+if exist "%ROOT%docs\*.md" (
+    echo   [ OK ]  docs\ ^(documentation^)
+) else (
+    echo   [FAIL]  docs\ is MISSING or empty!
+    set "PROTECTED_FAIL=1"
+)
+if exist "%ROOT%checks\check_gpu_health.py" (
+    echo   [ OK ]  checks\check_gpu_health.py
+) else (
+    echo   [FAIL]  checks\check_gpu_health.py is MISSING!
+    set "PROTECTED_FAIL=1"
+)
 if exist "%ROOT%.git" (
     echo   [ OK ]  .git\
 ) else (
@@ -411,7 +427,6 @@ endlocal
 exit /b 0
 
 :remove_own_web_link
-rem Remove a frontend junction only if it points at this backend's web dir
 set "CUR="
 if exist "%~1" (
     fsutil reparsepoint query "%~1" >nul 2>&1
@@ -427,7 +442,6 @@ if exist "%~1" (
 exit /b 0
 
 :is_own_web
-rem Return errorlevel 0 only if %~1 is a junction pointing at %~2
 set "CUR="
 if exist "%~1" (
     fsutil reparsepoint query "%~1" >nul 2>&1

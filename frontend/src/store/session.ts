@@ -23,6 +23,43 @@ export const objectUndoCountsAtom = atom<Record<number, number>>({});
 export const objectRedoCountsAtom = atom<Record<number, number>>({});
 export const brushPredictInFlightAtom = atom(0);
 
+export interface ObjectHistory {
+  undo: number;
+  redo: number;
+  strokes: number;
+  has_mask: boolean;
+}
+
+export type ObjectHistoryEntry = Partial<ObjectHistory>;
+
+export const objectHistoryAtom = atom<Record<number, ObjectHistory>>({});
+export interface SubjectMeta {
+  id: number;
+  name: string;
+  color: string;
+}
+
+export const SUBJECT_COLORS = [
+  "#b85c2a",
+  "#6b8fb5",
+  "#6f9a6b",
+  "#9a7fb5",
+  "#b5809a",
+  "#b5a36b",
+  "#5f9a96",
+  "#a8705f",
+] as const;
+
+export const subjectMetaAtom = atom<Record<number, SubjectMeta>>({});
+
+export function subjectColor(id: number): string {
+  return SUBJECT_COLORS[id % SUBJECT_COLORS.length];
+}
+
+export function subjectName(id: number): string {
+  return `Subject ${id + 1}`;
+}
+
 export const sam3ReadyAtom = atom(false);
 
 export interface ModelInfo {

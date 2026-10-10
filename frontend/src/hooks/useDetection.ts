@@ -1,3 +1,4 @@
+import type { PackedMask } from "@/lib/mask";
 import { useCallback } from "react";
 import { useAtom } from "jotai";
 import {
@@ -16,6 +17,7 @@ import {
   yoloeMasksEnabledAtom,
 } from "@/store/detection";
 import { api } from "@/lib/api";
+import { emitUi, logErr } from "@/store/logs";
 import { perDetectionMasksAtom } from "@/store/session";
 import { pushToast } from "@/store/ui";
 
@@ -41,9 +43,6 @@ export function useDetection() {
       const target = selectedDetector || "grounding-dino-tiny";
       if (!selectedDetector) setSelectedDetector(target);
       setIsDetecting(true);
-      setDetections([]);
-      setPerDetectionMasks({});
-      setSelectedDetection(null);
       try {
         if (loadedDetector !== target) {
           setDetectorLoading(true);
@@ -54,15 +53,33 @@ export function useDetection() {
             setDetectorLoading(false);
           }
         }
+        const t = Date.now();
         const res = await api.detect(sessionId, {
           query: detectQuery,
           max_detections: 20,
           use_yoloe_masks: yoloeMasksEnabled,
         });
-        setDetections(res.detections);
-        return res.detections;
+        emitUi(
+          "detect",
+          "INFO",
+          `Found ${res.detections.length} for "${detectQuery}" with ${target} in ${Date.now() - t}ms`
+        );
+        const base = detections.length;
+        setDetections((prev) => [...prev, ...res.detections]);
+        // Detections append, so masks for indices that still exist are kept and
+        // the rest are dropped rather than left pointing at nothing.
+        setPerDetectionMasks((prev) => {
+          const next: Record<number, PackedMask> = {};
+          for (const [k, v] of Object.entries(prev)) {
+            const idx = Number(k);
+            if (idx < base) next[idx] = v;
+          }
+          return next;
+        });
+        setSelectedDetection(null);
+        return { detections: res.detections, baseOffset: base };
       } catch (err) {
-        console.error("Detection failed:", err);
+        logErr("detect", err);
         pushToast("Detection failed — check the console for details");
         setLoadedDetector(null);
         return null;
@@ -75,6 +92,7 @@ export function useDetection() {
       selectedDetector,
       yoloeMasksEnabled,
       loadedDetector,
+      detections.length,
       setSelectedDetector,
       setLoadedDetector,
       setDetectorLoading,

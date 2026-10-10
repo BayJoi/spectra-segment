@@ -1,3 +1,4 @@
+import { emitUi } from "@/store/logs";
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useAtom } from "jotai";
 import { exportOpenAtom, isExportingAtom, pushToast } from "@/store/ui";
@@ -233,7 +234,11 @@ export function ExportDialog() {
         if (!mask) continue;
         encoded.push({ path: f.path, mask_b64: encodeMaskPng(mask) });
       }
-      if (encoded.length === 0) return;
+      if (encoded.length === 0) {
+        emitUi("export", "WARNING", `Nothing to export — none of the ${filesToExport.length} selected item(s) had a mask yet`);
+        pushToast("Nothing to export — segment something first");
+        return;
+      }
       const res = await api.exportZip(sessionId, {
         root: isBrush ? "" : rootName,
         files: encoded,

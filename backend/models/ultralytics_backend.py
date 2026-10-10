@@ -21,7 +21,6 @@ _DEFAULT_THREADS = resolve_threads("SAM2_THREADS")
 
 
 def _move_to_device(obj: Any, device: Any) -> Any:
-    """Recursively move tensors in dicts/lists/tuples to ``device``."""
     if isinstance(obj, torch.Tensor):
         return obj.to(device)
     if isinstance(obj, dict):
@@ -60,7 +59,7 @@ class UltralyticsBackend(SegmentationBackend):
         self._model_path: str | None = None
         self._image_set: bool = False
         self._src_shape: tuple[int, int] | None = None
-        self._infer_lock = threading.Lock()
+        self._infer_lock = threading.RLock()
         self._image_pe: Any = None
         self._encoder_on_cpu: bool = False
 
@@ -144,9 +143,11 @@ class UltralyticsBackend(SegmentationBackend):
                 torch.load = _orig
 
     def unload_model(self) -> None:
-        self.reset_image()
-        self._predictor = None
-        self._model_path = None
+        with self._infer_lock:
+            self.reset_image()
+            self._predictor = None
+            self._model_path = None
+            self._encoder_on_cpu = False
         release_gpu_memory()
 
     def set_image(self, image: np.ndarray) -> None:
@@ -167,13 +168,6 @@ class UltralyticsBackend(SegmentationBackend):
                 raise
 
     def _fallback_cpu_encoder_reencode(self, image: np.ndarray) -> None:
-        """Hybrid fallback: run only the image encoder on CPU, keep decoder on GPU.
-
-        The SAM2 encode peak (Hiera features, several GB) is transient; the decoder
-        that runs per-click is small. On low-VRAM cards the encode can OOM on GPU
-        even with nothing else resident — so we do the one-time encode on CPU and
-        move the resulting features back to GPU, keeping clicks fast.
-        """
         try:
             self._cpu_encoder_reencode(image)
         except Exception as e:
@@ -258,7 +252,6 @@ class UltralyticsBackend(SegmentationBackend):
         self._image_set = True
 
     def _model_dtype(self) -> torch.dtype:
-        """Return the working dtype of the loaded model (fp16 when quantize=16)."""
         predictor = self._predictor
         if predictor is not None:
             dtype = getattr(predictor, "torch_dtype", None)
@@ -333,10 +326,24 @@ class UltralyticsBackend(SegmentationBackend):
         except Exception as e:
             LOGGER.warning("Could not offload SAM2 image encoder: %s", e)
 
+    def _features(self) -> Any:
+        with self._infer_lock:
+            if self._predictor is None:
+                raise RuntimeError("Model not loaded.")
+            if not self._image_set:
+                raise RuntimeError("No image set.")
+            features = self._predictor.features
+        if features is None:
+            raise RuntimeError("No cached features. Call set_image() first.")
+        return features
+
     def predict(self, points=None, labels=None, bboxes=None, mask_input=None, multimask_output=False):
         if not self._image_set:
             raise RuntimeError("No image set.")
-        features = self._predictor.features
+        with self._infer_lock:
+            if self._predictor is None:
+                raise RuntimeError("Model not loaded.")
+            features = self._predictor.features
         if features is None:
             raise RuntimeError("No cached features.")
 
@@ -353,10 +360,13 @@ class UltralyticsBackend(SegmentationBackend):
 
         img_embed = features["image_embed"]
         high_res = features["high_res_feats"]
-        image_pe = self._image_pe
-        if image_pe is None:
-            image_pe = self._predictor.model.sam_prompt_encoder.get_dense_pe()
-            self._image_pe = image_pe
+        with self._infer_lock:
+            if self._predictor is None:
+                raise RuntimeError("Model not loaded.")
+            image_pe = self._image_pe
+            if image_pe is None:
+                image_pe = self._predictor.model.sam_prompt_encoder.get_dense_pe()
+                self._image_pe = image_pe
 
         point_inputs = None
         if all_coords:
@@ -385,7 +395,12 @@ class UltralyticsBackend(SegmentationBackend):
         pm = pm.flatten(0, 1); ps = ps.flatten(0, 1)
 
         if pm is None or pm.shape[0] == 0:
-            return {"masks": np.array([], dtype=bool), "scores": np.array([]), "low_res_masks": None}
+            return {
+                "masks": np.zeros((0, self._src_shape[0], self._src_shape[1]), dtype=bool)
+                if self._src_shape else np.array([], dtype=bool),
+                "scores": np.array([]),
+                "low_res_masks": None,
+            }
 
         raw = pm.detach().cpu().numpy()
         if self._src_shape:
@@ -439,10 +454,13 @@ class UltralyticsBackend(SegmentationBackend):
 
         img_embed = features["image_embed"]
         high_res = features["high_res_feats"]
-        image_pe = self._image_pe
-        if image_pe is None:
-            image_pe = self._predictor.model.sam_prompt_encoder.get_dense_pe()
-            self._image_pe = image_pe
+        with self._infer_lock:
+            if self._predictor is None:
+                raise RuntimeError("Model not loaded.")
+            image_pe = self._image_pe
+            if image_pe is None:
+                image_pe = self._predictor.model.sam_prompt_encoder.get_dense_pe()
+                self._image_pe = image_pe
         point_inputs = (pts, lbs)
 
         with self._infer_lock, torch.inference_mode(), cpu_threads(_DEFAULT_THREADS if self._device == "cpu" else 1), cudnn_disabled():

@@ -9,14 +9,15 @@ import { TierIcon } from "@/components/ui/TierIcon";
 import { useDetection } from "@/hooks/useDetection";
 import { useSession } from "@/hooks/useSession";
 import { useLayers } from "@/hooks/useLayers";
-import { masksAtom, perDetectionMasksAtom, brushObjectsAtom, activeObjectIdAtom, objectMasksAtom } from "@/store/session";
-import { exportOpenAtom, fitToViewAtom, zoomInAtom, zoomOutAtom, modeLockAtom, showTransparentAtom, hideBboxesAtom } from "@/store/ui";
+import { masksAtom, perDetectionMasksAtom, brushObjectsAtom, activeObjectIdAtom, objectMasksAtom, subjectMetaAtom, objectHistoryAtom, subjectColor } from "@/store/session";
+import { exportOpenAtom, fitToViewAtom, zoomInAtom, zoomOutAtom, modeLockAtom, showTransparentAtom, hideBboxesAtom, pushToast } from "@/store/ui";
 import { api } from "@/lib/api";
+import { emitUi, logErr } from "@/store/logs";
 import type { PackedMask } from "@/lib/mask";
 import { cn } from "@/lib/utils";
 
 export function Toolbar() {
-  const { sessionId, undo, redo, canUndo, canRedo, clearObjectHistory } = useSession();
+  const { sessionId, undo, redo, canUndo, canRedo, clearObjectHistory, forgetSubject } = useSession();
   const {
     detectors,
     selectedDetector,
@@ -35,12 +36,15 @@ export function Toolbar() {
     brushSize,
     setBrushSize,
   } = useDetection();
-  const { layers, selectedLayers, clearAllLayers, addLayer, syncDetectionLayers } = useLayers();
+  const { layers, selectedLayers, clearAllLayers, addLayer, syncDetectionLayers, appendDetectionLayers } = useLayers();
   const [masks, setMasks] = useAtom(masksAtom);
   const [perDetectionMasks, setPerDetectionMasks] = useAtom(perDetectionMasksAtom);
   const [brushObjects, setBrushObjects] = useAtom(brushObjectsAtom);
   const [activeObjectId, setActiveObjectId] = useAtom(activeObjectIdAtom);
   const [, setObjectMasks] = useAtom(objectMasksAtom);
+  const [, setSubjectMeta] = useAtom(subjectMetaAtom);
+  const [subjectMeta] = useAtom(subjectMetaAtom);
+  const [objectHistory] = useAtom(objectHistoryAtom);
   const [, setExportOpen] = useAtom(exportOpenAtom);
   const [fitToView] = useAtom(fitToViewAtom);
   const [zoomIn] = useAtom(zoomInAtom);
@@ -73,20 +77,34 @@ export function Toolbar() {
 
   const handleDetect = useCallback(async () => {
     if (!sessionId) return;
-    const dets = await detect(sessionId);
-    if (dets && dets.length) syncDetectionLayers(dets);
-  }, [sessionId, detect, syncDetectionLayers]);
+    const offset = detections.length;
+    const res = await detect(sessionId);
+    if (res && res.detections.length) {
+      if (offset === 0) {
+        syncDetectionLayers(res.detections);
+      } else {
+        appendDetectionLayers(res.detections, offset);
+      }
+    }
+  }, [sessionId, detect, detections.length, syncDetectionLayers, appendDetectionLayers]);
 
   const handleSegmentAll = useCallback(async () => {
     if (!sessionId || !detections.length) return;
     setIsSegmenting(true);
     try {
       const bboxes = detections.map((d) => d.bbox);
+      const t = Date.now();
       const res = await api.segmentBatch(sessionId, bboxes);
+      const made = res?.masks?.filter((m) => m).length ?? 0;
+      emitUi(
+        "segment",
+        "INFO",
+        `Segmented ${made} of ${bboxes.length} detection(s) in ${Date.now() - t}ms`
+      );
       if (res?.masks) {
         const next: Record<number, PackedMask> = {};
-        res.masks.forEach((mask: PackedMask, idx: number) => {
-          next[idx] = mask;
+        res.masks.forEach((mask: PackedMask | null, idx: number) => {
+          if (mask) next[idx] = mask;
         });
         setPerDetectionMasks(next);
         detections.forEach((det: { label: string; score: number }, idx: number) => {
@@ -102,13 +120,17 @@ export function Toolbar() {
         });
       }
     } catch (err) {
-      console.error("Batch segmentation failed:", err);
+      logErr("segment", err);
+      pushToast("Batch segmentation failed");
     } finally {
       setIsSegmenting(false);
     }
   }, [sessionId, detections, layers, setPerDetectionMasks, addLayer]);
 
-  const activeSubjectIdx = Math.max(0, brushObjects.indexOf(activeObjectId));
+  const activeMeta = subjectMeta[activeObjectId];
+  const activeLabel = activeMeta?.name ?? `Subject ${activeObjectId + 1}`;
+  const activeColor = activeMeta?.color ?? subjectColor(activeObjectId);
+  const activeStrokes = objectHistory[activeObjectId]?.undo ?? 0;
 
   const switchSubject = useCallback(
     (dir: number) => {
@@ -121,20 +143,35 @@ export function Toolbar() {
   );
 
   const addSubject = useCallback(() => {
-    const newId = Math.max(...brushObjects, -1) + 1;
+    const newId = Math.max(-1, ...brushObjects) + 1;
     setBrushObjects((prev) => [...prev, newId]);
     setActiveObjectId(newId);
-  }, [brushObjects, setBrushObjects, setActiveObjectId]);
+    setSubjectMeta((prev) => ({
+      ...prev,
+      [newId]: { id: newId, name: `Subject ${newId + 1}`, color: subjectColor(newId) },
+    }));
+    emitUi("subject", "INFO", "New subject added");
+  }, [brushObjects, setBrushObjects, setActiveObjectId, setSubjectMeta]);
 
   const deleteSubject = useCallback(() => {
-    if (brushObjects.length <= 1) return;
+    if (brushObjects.length <= 1) {
+      emitUi("subject", "WARNING", "Cannot delete — at least one subject must remain");
+      return;
+    }
     const idx = Math.max(0, brushObjects.indexOf(activeObjectId));
     const oid = brushObjects[idx];
     const next = brushObjects.filter((x) => x !== oid);
     setBrushObjects(next);
     setActiveObjectId(next[Math.min(idx, next.length - 1)]);
+    setSubjectMeta((prev) => {
+      const nextMeta = { ...prev };
+      delete nextMeta[oid];
+      return nextMeta;
+    });
+    forgetSubject(oid);
     clearObjectHistory(oid);
-  }, [brushObjects, activeObjectId, setBrushObjects, setActiveObjectId, clearObjectHistory]);
+    emitUi("subject", "INFO", `Subject ${oid + 1} deleted`);
+  }, [brushObjects, activeObjectId, setBrushObjects, setActiveObjectId, setSubjectMeta, clearObjectHistory]);
 
   const clearAllBrushObjects = useCallback(() => {
     brushObjects.forEach((oid) => clearObjectHistory(oid));
@@ -333,9 +370,15 @@ export function Toolbar() {
                 <button
                   onClick={() => setSubjectsOpen(!subjectsOpen)}
                   aria-label="Open subjects menu"
+                  title={`${activeLabel} — ${activeStrokes} stroke${activeStrokes === 1 ? "" : "s"}`}
                   className="inline-flex items-center justify-center gap-0.5 text-[10px] text-neutral-400 hover:text-orange-300 font-mono tabular-nums whitespace-nowrap min-w-[36px] py-1 rounded-md hover:bg-orange-500/10 hover:scale-105 active:scale-95 transition-all duration-200 cursor-pointer"
                 >
-                  Subj {activeSubjectIdx + 1}
+                  <span
+                    className="w-2 h-2 rounded-sm flex-shrink-0 ring-1 ring-inset ring-white/10"
+                    style={{ backgroundColor: activeColor }}
+                    aria-hidden
+                  />
+                  {activeLabel.replace("Subject ", "S")}
                   <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0"><path d="m6 9 6 6 6-6"/></svg>
                 </button>
                 <button
@@ -440,12 +483,13 @@ export function Toolbar() {
         <div className="flex items-center gap-2 shrink-0">
           {showLayers && (
             <div ref={layersToggleRef} className="flex items-center gap-0.5 shrink-0">
-              <Tooltip tip="Detections panel — view and manage detected objects">
+              <Tooltip tip={`Detections — ${detections.length} found. Click one to segment it, or use "All".`}>
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={() => setLayersOpen(!layersOpen)}
-                  aria-label="Toggle layers panel"
+                  aria-label="Toggle detections panel"
+                  title={`${detections.length} detection${detections.length === 1 ? "" : "s"}`}
                   className={cn("shrink-0", selectedLayers.size > 0 && "bg-neutral-800/50 text-neutral-200")}
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="shrink-0 w-3.5 h-3.5"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>

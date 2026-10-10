@@ -5,7 +5,9 @@ import {
   brushObjectsAtom,
   activeObjectIdAtom,
   objectMasksAtom,
-  objectUndoCountsAtom,
+  subjectMetaAtom,
+  objectHistoryAtom,
+  subjectColor,
 } from "@/store/session";
 import { cn } from "@/lib/utils";
 
@@ -16,11 +18,12 @@ interface SubjectsPanelProps {
 }
 
 export function SubjectsPanel({ open, onClose, ignoredRef }: SubjectsPanelProps) {
-  const { clearObjectHistory } = useSession();
+  const { clearObjectHistory, forgetSubject } = useSession();
   const [brushObjects, setBrushObjects] = useAtom(brushObjectsAtom);
   const [activeObjectId, setActiveObjectId] = useAtom(activeObjectIdAtom);
   const [objectMasks] = useAtom(objectMasksAtom);
-  const [objectUndoCounts] = useAtom(objectUndoCountsAtom);
+  const [subjectMeta, setSubjectMeta] = useAtom(subjectMetaAtom);
+  const [objectHistory] = useAtom(objectHistoryAtom);
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -44,16 +47,37 @@ export function SubjectsPanel({ open, onClose, ignoredRef }: SubjectsPanelProps)
     return () => document.removeEventListener("keydown", handler);
   }, [open, onClose]);
 
-  const handleDelete = useCallback((oid: number) => {
-    if (brushObjects.length <= 1) return;
-    const idx = brushObjects.indexOf(oid);
-    const next = brushObjects.filter((x) => x !== oid);
-    setBrushObjects(next);
-    if (oid === activeObjectId) {
-      setActiveObjectId(next[Math.min(idx, next.length - 1)]);
-    }
-    void clearObjectHistory(oid);
-  }, [brushObjects, activeObjectId, setBrushObjects, setActiveObjectId, clearObjectHistory]);
+  useEffect(() => {
+    const missing = brushObjects.filter((oid) => !subjectMeta[oid]);
+    if (missing.length === 0) return;
+    setSubjectMeta((prev) => {
+      const next = { ...prev };
+      for (const oid of missing) {
+        next[oid] = { id: oid, name: `Subject ${oid + 1}`, color: subjectColor(oid) };
+      }
+      return next;
+    });
+  }, [brushObjects, subjectMeta, setSubjectMeta]);
+
+  const handleDelete = useCallback(
+    (oid: number) => {
+      if (brushObjects.length <= 1) return;
+      const idx = brushObjects.indexOf(oid);
+      const next = brushObjects.filter((x) => x !== oid);
+      setBrushObjects(next);
+      if (oid === activeObjectId) {
+        setActiveObjectId(next[Math.min(idx, next.length - 1)]);
+      }
+      setSubjectMeta((prev) => {
+        const nextMeta = { ...prev };
+        delete nextMeta[oid];
+        return nextMeta;
+      });
+      forgetSubject(oid);
+      void clearObjectHistory(oid);
+    },
+    [brushObjects, activeObjectId, setBrushObjects, setActiveObjectId, setSubjectMeta, clearObjectHistory]
+  );
 
   if (!open || brushObjects.length === 0) return null;
 
@@ -71,8 +95,10 @@ export function SubjectsPanel({ open, onClose, ignoredRef }: SubjectsPanelProps)
       <div className="flex flex-col gap-1">
         {brushObjects.map((oid) => {
           const isActive = oid === activeObjectId;
+          const meta = subjectMeta[oid];
+          const color = meta?.color ?? subjectColor(oid);
+          const strokes = objectHistory[oid]?.undo ?? 0;
           const hasMask = oid in objectMasks;
-          const strokes = objectUndoCounts[oid] ?? 0;
           return (
             <div
               key={oid}
@@ -84,33 +110,41 @@ export function SubjectsPanel({ open, onClose, ignoredRef }: SubjectsPanelProps)
                   ? "bg-orange-500/10 border border-orange-500/25 shadow-[0_0_8px_rgba(249,115,22,0.1)]"
                   : "border border-transparent hover:bg-neutral-800/50 hover:border-neutral-700/30"
               )}
-            onClick={() => setActiveObjectId(oid)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                setActiveObjectId(oid);
-              }
-            }}
-          >
-            <span className="text-[11px] text-neutral-300 font-sans truncate flex-1">Subject {oid + 1}</span>
-            <span className="text-[10px] text-neutral-600 font-mono">{strokes}</span>
-            <span className={cn(
-              "w-1.5 h-1.5 rounded-full flex-shrink-0",
-              hasMask ? "bg-orange-400" : "bg-neutral-600"
-            )} />
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDelete(oid);
+              onClick={() => setActiveObjectId(oid)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setActiveObjectId(oid);
+                }
               }}
-              disabled={brushObjects.length <= 1}
-              aria-label="Delete subject"
-              className="w-6 h-6 min-w-[24px] min-h-[24px] rounded flex items-center justify-center text-neutral-600 hover:text-red-400 hover:bg-red-500/10 opacity-100 transition-all duration-150 hover:scale-110 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-            </button>
-          </div>
-        );        })}
+              <span
+                className="w-2.5 h-2.5 rounded-sm flex-shrink-0 ring-1 ring-inset ring-white/10"
+                style={{ backgroundColor: color }}
+                aria-hidden
+              />
+              <span className="text-[11px] text-neutral-300 font-sans truncate flex-1">
+                {meta?.name ?? `Subject ${oid + 1}`}
+              </span>
+              <span className="text-[10px] text-neutral-600 font-mono tabular-nums">{strokes}</span>
+              <span className={cn(
+                "w-1.5 h-1.5 rounded-full flex-shrink-0",
+                hasMask ? "bg-orange-400" : "bg-neutral-600"
+              )} />
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDelete(oid);
+                }}
+                disabled={brushObjects.length <= 1}
+                aria-label={`Delete ${meta?.name ?? `Subject ${oid + 1}`}`}
+                className="w-6 h-6 min-w-[24px] min-h-[24px] rounded flex items-center justify-center text-neutral-600 hover:text-red-400 hover:bg-red-500/10 opacity-100 transition-all duration-150 hover:scale-110 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+              </button>
+            </div>
+          );
+        })}
       </div>
       </div>
     </div>

@@ -1,24 +1,3 @@
-<#
-    setup_memory.ps1 — Spectra Segment memory-profile setup.
-
-    Reads/writes spectra_launcher.cfg (vram_mode / cpu_threads / cpu_ram_mb)
-    and emits the derived environment variables to <ConfigPath>.env so the
-    launcher .bat can `set` them for the backend process.
-
-    Profiles control memory residency and the caching-allocator block
-    budget (SPECTRA_VRAM_FRACTION, used for max_split_size_mb and eviction).
-    The absolute safety ceiling (SPECTRA_VRAM_HARD_CAP, 90%) is applied via
-    torch.cuda.set_per_process_memory_fraction(), so the process can NEVER
-    cross the user's full VRAM while still letting workloads run on the GPU.
-
-    Usage (from the launchers):
-      powershell -NoProfile -ExecutionPolicy Bypass -File setup_memory.ps1 `
-          -ConfigPath "D:\...\spectra_launcher.cfg" -Backend AMD -DetectedVramMb 8192
-      # add -Reconfigure to force the interactive prompt
-
-    All informational output goes to Write-Host (console only); the .env file
-    is the only stdout-independent artifact the bat consumes.
-#>
 param(
     [string]$ConfigPath,
     [string]$Backend = "NVIDIA",
@@ -32,20 +11,13 @@ $ErrorActionPreference = "Stop"
 $ValidModes = @("high", "balanced", "medium", "low", "cpu")
 $EnvFile = "$ConfigPath.env"
 
-# VRAM budget per profile, as a fraction of total VRAM (medium = half, etc.).
-# This controls allocator block sizing and residency/eviction (a soft target),
-# NOT the hard ceiling - a workload may transiently exceed it to finish on GPU.
 $ModeFraction = @{
     "high"     = 0.90
     "balanced" = 0.60
     "medium"   = 0.50
     "low"      = 0.30
 }
-# Absolute safety ceiling applied via set_per_process_memory_fraction() so the
-# process can NEVER cross the user's full VRAM. Kept high enough that real
-# workloads (e.g. SAM2 at 1024) still run on the GPU instead of CPU.
 $HardCapFraction = 0.90
-# Fallback split (MB) used when VRAM could not be detected.
 $ModeFallbackMb = @{
     "high"     = 8192
     "balanced" = 4096
@@ -188,8 +160,8 @@ function Emit-ProfileEnv {
         $splitMb = Get-SplitMb -mode $mode -vramMb $vramMb
         $conf = "garbage_collection_threshold:0.8,max_split_size_mb:$splitMb"
         $lines.Add("SPECTRA_FORCE_CPU=0")
-        $lines.Add("SPECTRA_VRAM_FRACTION=$($ModeFraction[$mode])")
-        $lines.Add("SPECTRA_VRAM_HARD_CAP=$HardCapFraction")
+        $lines.Add("SPECTRA_VRAM_FRACTION=$(Format-Invariant $ModeFraction[$mode])")
+        $lines.Add("SPECTRA_VRAM_HARD_CAP=$(Format-Invariant $HardCapFraction)")
         $lines.Add("SAM2_OFFLOAD_ENCODER=$offload")
         $lines.Add("SAM3_IDLE_UNLOAD_TIMEOUT=$idle")
         $lines.Add("SPECTRA_NO_CO_RESIDENCY=$noCo")
@@ -204,7 +176,11 @@ function Emit-ProfileEnv {
     Set-Content -LiteralPath $EnvFile -Value $lines -Encoding ASCII
 }
 
-# --- main ---
+function Format-Invariant {
+    param([double]$Value)
+    return $Value.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 $cfg = Read-Config
 
 if (-not $Reconfigure -and $cfg.ContainsKey("vram_mode") -and ($cfg["vram_mode"] -in $ValidModes) -and (-not $ForceCpu -or $cfg["vram_mode"] -eq "cpu")) {

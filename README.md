@@ -135,12 +135,19 @@ work. Images beyond 32 MP are rejected as a safety measure.
 
 ### Model Downloads
 
-- All checkpoints come from pinned URLs (GitHub releases / HuggingFace).
-- Every file is sha256-verified against published digests after download;
-  first-seen hashes are recorded (TOFU) when no digest is published.
+- The single-file checkpoints (SAM 2 / SAM 3 / YOLOE) come from pinned URLs and
+  every one is sha256-verified against a published digest before it is used.
+- The HuggingFace detector repos (GroundingDINO, Florence, CogFlorence) are pulled
+  with `snapshot_download` and rely on the Hub's own integrity checks; they are not
+  covered by the local digest table.
 - HuggingFace-hosted models use chunked Xet downloads when available.
 - Progress appears live in the console panel: one bar for the main weights
   file plus a per-file counter for the smaller support files.
+- **Offline after the first download.** A model that is already on disk is
+  loaded with `local_files_only` inside a forced `HF_HUB_OFFLINE` /
+  `TRANSFORMERS_OFFLINE` guard, so the Hub is never contacted again. The network
+  is only touched when a model is actually missing. This is what keeps the app
+  usable with no internet once its models are cached.
 
 ---
 
@@ -161,6 +168,12 @@ work. Images beyond 32 MP are rejected as a safety measure.
 3. Click a box to segment it, or press "All" for everything at once.
 4. Manage results in the layers panel, then export.
 
+Florence-2 / CogFlorence run on current `transformers` (>= 4.50) again: their
+remote code predates the release that removed `GenerationMixin` from
+`PreTrainedModel`, so the loader re-attaches it (and a valid generation config)
+at load time. Florence has no per-box confidence score, so the confidence
+slider does not filter its results — GroundingDINO and YOLOE do report scores.
+
 ### SAM 3 Mode
 
 1. Switch to SAM 3 mode and pick the SAM 3 model (~3.3 GB download).
@@ -180,8 +193,9 @@ The launcher sets these automatically; they are listed here for reference:
 - `MIOPEN_USER_DB_PATH` + `MIOPEN_CUSTOM_CACHE_DIR` — keep the MIOpen kernel
   database inside `model_weights\miopen` so it persists between runs.
 - `HSA_ENABLE_SDMA=0` — avoids DMA-engine copy stalls reported on Windows.
-- Encoders run under `torch.inference_mode()` — this alone cut SAM2's memory
-  footprint from ~5 GB to ~285 MB per image and made encodes ~6x faster.
+- Encoders run under `torch.inference_mode()`, which stops autograd from building a
+  live graph over the prompt encoder and decoder. That cut SAM2's per-image encoder
+  memory dramatically and made encodes much faster.
 - After any PyTorch/ROCm wheel update, double-click
   `checks\check_gpu.bat` (or run it from a terminal) to verify nothing
   regressed. Each run writes a timestamped log next to the script.
@@ -206,7 +220,8 @@ Most knobs have sensible defaults set by the launcher:
 - Windows 10 or later (all launchers are Windows-only)
 - 8 GB RAM minimum (16 GB recommended)
 - 10–20 GB free disk space for models and caches
-- First launch of each model needs internet; everything after that is offline
+- The first download of each model needs internet; after that the app runs
+  fully offline
 
 ---
 
@@ -263,10 +278,17 @@ same API surface and differ only in hardware-specific loading and tuning.
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0.
+Spectra Segment's own source is under the GNU General Public License v3.0
+(GPL-3.0-only).
 
-See [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt) for all dependency
-licenses, including the AGPL-3.0 ultralytics dependency and the Apache-2.0
+It also depends on `ultralytics`, which is **AGPL-3.0**. GPL-3.0 and AGPL-3.0 are
+only one-way compatible, so the combined, distributed work must be released as
+AGPL-3.0 — it is not accurate to call the whole app GPL-3.0 while ultralytics is
+linked. Commercial or closed-source distribution requires an Ultralytics
+Enterprise license.
+
+Read [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt) for the full picture,
+including the Meta SAM License that governs the SAM 3 weights and the Apache-2.0
 huggingface_hub / hf-xet stack.
 
 ---

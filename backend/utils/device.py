@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
@@ -54,7 +54,13 @@ def release_gpu_memory() -> None:
     import gc
     import torch
     if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+        try:
+            torch.cuda.synchronize()
+        except Exception as exc:
+            LOGGER.debug("cuda.synchronize() failed during release: %s", exc)
+        for fn in ("empty_cache", "ipc_collect"):
+            try:
+                getattr(torch.cuda, fn)()
+            except Exception as exc:
+                LOGGER.debug("cuda.%s() failed during release: %s", fn, exc)
     gc.collect()

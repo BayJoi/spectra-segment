@@ -6,13 +6,18 @@ import { useLayers } from "@/hooks/useLayers";
 import { useCanvasRenderer } from "@/hooks/useCanvasRenderer";
 import { usePanZoom } from "@/hooks/usePanZoom";
 import { useBrushDrawing } from "@/hooks/useBrushDrawing";
-import { masksAtom, perDetectionMasksAtom, activeObjectIdAtom } from "@/store/session";
+import { masksAtom, objectMasksAtom, perDetectionMasksAtom, activeObjectIdAtom, subjectMetaAtom, subjectColor } from "@/store/session";
 import { layersAtom, selectedLayersAtom } from "@/store/layers";
 import { sam3InstancesAtom, selectedSam3InstanceAtom } from "@/store/sam3";
-import { showTransparentAtom, hideBboxesAtom, fitToViewAtom, zoomInAtom, zoomOutAtom } from "@/store/ui";
+import { showTransparentAtom, hideBboxesAtom, fitToViewAtom, zoomInAtom, zoomOutAtom, pushToast } from "@/store/ui";
 import { api, decodeDetectionMask } from "@/lib/api";
-import type { PackedMask } from "@/lib/mask";
+import { emitUi, logErr } from "@/store/logs";
 import { buildStrokePrompt } from "@/lib/strokePrompt";
+import {
+  removeDetectionMask,
+  removeDetectionIndexFromLayers,
+  shiftSelectedDetection,
+} from "@/lib/detectionEdit";
 
 type CursorMode = "crosshair" | "pointer" | "grab" | "grabbing" | "not-allowed";
 
@@ -37,7 +42,9 @@ export function Canvas({ interactive = true }: CanvasProps) {
   const [masks] = useAtom(masksAtom);
   const [activeObjectId] = useAtom(activeObjectIdAtom);
   const activeObjectIdRef = useRef(activeObjectId);
-  activeObjectIdRef.current = activeObjectId;
+  const [objectMasks] = useAtom(objectMasksAtom);
+  const [subjectMeta] = useAtom(subjectMetaAtom);
+  const activeSubjectColor = subjectMeta[activeObjectId]?.color ?? subjectColor(activeObjectId);
   const [perDetectionMasks, setPerDetectionMasks] = useAtom(perDetectionMasksAtom);
   const [layers, setLayers] = useAtom(layersAtom);
   const [, setSelectedLayers] = useAtom(selectedLayersAtom);
@@ -74,6 +81,9 @@ export function Canvas({ interactive = true }: CanvasProps) {
   );
   const masksRef = useRef(allMasks);
   masksRef.current = allMasks;
+  const objectMasksRef = useRef(objectMasks);
+  objectMasksRef.current = objectMasks;
+  activeObjectIdRef.current = activeObjectId;
   const detectionsRef = useRef(detections);
   detectionsRef.current = detections;
   const selectedDetectionRef = useRef(selectedDetection);
@@ -98,7 +108,18 @@ export function Canvas({ interactive = true }: CanvasProps) {
       []
   );
   const rendererState = useMemo(
-    () => ({ masksRef, detectionsRef, selectedDetectionRef, showTransparentRef, hideBboxesRef, featherRadiusRef, sam3InstancesRef, selectedSam3InstanceRef }),
+    () => ({
+      masksRef,
+      objectMasksRef,
+      activeObjectIdRef,
+      detectionsRef,
+      selectedDetectionRef,
+      showTransparentRef,
+      hideBboxesRef,
+      featherRadiusRef,
+      sam3InstancesRef,
+      selectedSam3InstanceRef,
+    }),
     []
   );
 
@@ -142,7 +163,8 @@ export function Canvas({ interactive = true }: CanvasProps) {
     zoomRef,
     panRef,
     computeState,
-    brushSize
+    brushSize,
+    activeSubjectColor
   );
 
   useEffect(() => {
@@ -187,28 +209,10 @@ export function Canvas({ interactive = true }: CanvasProps) {
 
   useEffect(() => {
     const removeDetectionAt = (idx: number) => {
-      setPerDetectionMasks((prev) => {
-        const next: Record<number, PackedMask> = {};
-        for (const [k, v] of Object.entries(prev)) {
-          const ki = Number(k);
-          if (ki < idx) next[ki] = v;
-          else if (ki > idx) next[ki - 1] = v;
-        }
-        return next;
-      });
+      setPerDetectionMasks((prev) => removeDetectionMask(prev, idx));
       setDetections((prev) => prev.filter((_, i) => i !== idx));
-      setSelectedDetection((prev) => {
-        if (prev === null) return null;
-        if (prev > idx) return prev - 1;
-        return null;
-      });
-      setLayers((prev) => prev
-        .filter((l) => l.detectionIndex !== idx)
-        .map((l) => l.detectionIndex !== undefined && l.detectionIndex > idx
-          ? { ...l, detectionIndex: l.detectionIndex - 1 }
-          : l
-        )
-      );
+      setSelectedDetection((prev) => shiftSelectedDetection(prev, idx));
+      setLayers((prev) => removeDetectionIndexFromLayers(prev, idx));
       setSelectedLayers(new Set());
     };
     const handler = (e: KeyboardEvent) => {
@@ -428,7 +432,11 @@ export function Canvas({ interactive = true }: CanvasProps) {
     const prompt = buildStrokePrompt(points, brushSize, activeStrokeModeRef.current, imgW, imgH);
     const sampled = prompt.points;
     const labels = prompt.labels;
-    if (sampled.length === 0) return;
+    if (sampled.length === 0) {
+      emitUi("brush", "WARNING", "Stroke ignored — too small to sample any points");
+      return;
+    }
+    emitUi("brush", "DEBUG", `Stroke submitted (${sampled.length} sample points, ${activeStrokeModeRef.current})`);
 
     const canvas = drawCanvasRef.current;
     if (canvas) {
@@ -487,21 +495,32 @@ export function Canvas({ interactive = true }: CanvasProps) {
           const det = detections[i];
 
           if (yoloeMasksEnabled && det.mask) {
+            const t = Date.now();
             try {
               const decoded = await decodeDetectionMask(det.mask);
               setPerDetectionMasks((prev) => ({ ...prev, [i]: decoded }));
               setDetections((prev) => prev.map((d, di) => (di === i && d.mask ? { ...d, mask: null } : d)));
+              emitUi("segment", "INFO", `Used the detector's own mask for #${i + 1} in ${Date.now() - t}ms`);
             } catch (err) {
-              console.error("Failed to decode detection mask, falling back to SAM:", err);
+              emitUi("segment", "WARNING", `Detector mask for #${i + 1} undecodable — falling back to SAM`);
               const res = await api.segmentBatch(sessionIdRef.current!, [[...det.bbox]]);
               if (res?.masks?.length) {
                 setPerDetectionMasks((prev) => ({ ...prev, [i]: res.masks[0] }));
               }
             }
           } else {
-            const res = await api.segmentBatch(sessionIdRef.current!, [[...det.bbox]]);
-            if (res?.masks?.length) {
-              setPerDetectionMasks((prev) => ({ ...prev, [i]: res.masks[0] }));
+            const t = Date.now();
+            try {
+              const res = await api.segmentBatch(sessionIdRef.current!, [[...det.bbox]]);
+              if (res?.masks?.length) {
+                setPerDetectionMasks((prev) => ({ ...prev, [i]: res.masks[0] }));
+                emitUi("segment", "INFO", `Segmented detection #${i + 1} in ${Date.now() - t}ms`);
+              } else {
+                emitUi("segment", "WARNING", `Segmentation returned no mask for detection #${i + 1}`);
+              }
+            } catch (err) {
+              logErr("segment", err);
+              pushToast("Segmentation failed — check the console");
             }
           }
 

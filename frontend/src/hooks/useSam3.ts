@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useAtom } from "jotai";
 import { sessionIdAtom, masksAtom } from "@/store/session";
 import {
@@ -10,7 +10,7 @@ import {
   type Sam3Prompt,
   type Sam3Instance,
 } from "@/store/sam3";
-import { layersAtom, layerIdCounterAtom, type Layer } from "@/store/layers";
+import { layersAtom, nextLayerId, type Layer } from "@/store/layers";
 import { api } from "@/lib/api";
 import type { PackedMask } from "@/lib/mask";
 
@@ -25,9 +25,6 @@ export function useSam3() {
   const [, setInstances] = useAtom(sam3InstancesAtom);
   const [selectedInstance, setSelectedInstance] = useAtom(selectedSam3InstanceAtom);
   const [layers, setLayers] = useAtom(layersAtom);
-  const [layerIdCounter, setLayerIdCounter] = useAtom(layerIdCounterAtom);
-  const layerIdCounterRef = useRef(layerIdCounter);
-  layerIdCounterRef.current = layerIdCounter;
   const [error, setError] = useState<string | null>(null);
 
   const extractError = (err: unknown): string => {
@@ -45,7 +42,6 @@ export function useSam3() {
           existing.set(instanceKey(l.promptIndex, l.instanceIndex), l);
         }
       });
-      let counter = layerIdCounterRef.current;
       const sam3Layers: Layer[] = insts.map((inst) => {
         const key = instanceKey(inst.promptIndex, inst.instanceIndex);
         const prevLayer = existing.get(key);
@@ -55,9 +51,8 @@ export function useSam3() {
             label: `#${inst.instanceIndex + 1} ${inst.text}`,
           };
         }
-        counter += 1;
         return {
-          id: `layer-${counter}`,
+          id: nextLayerId(layers),
           type: "sam3",
           label: `#${inst.instanceIndex + 1} ${inst.text}`,
           preview: null,
@@ -67,13 +62,9 @@ export function useSam3() {
           createdAt: Date.now(),
         };
       });
-      if (counter !== layerIdCounterRef.current) {
-        layerIdCounterRef.current = counter;
-        setLayerIdCounter(counter);
-      }
       setLayers([...base, ...sam3Layers]);
     },
-    [layers, setLayers, setLayerIdCounter]
+    [layers, setLayers]
   );
 
   const syncFromPrompts = useCallback(

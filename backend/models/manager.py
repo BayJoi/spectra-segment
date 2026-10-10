@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -14,21 +15,22 @@ import torch as _torch
 
 from .base import SegmentationBackend
 from .detector_base import DetectorBackend
-from .ultralytics_backend import UltralyticsBackend
+from .ultralytics_backend import ULTRALYTICS_MODELS, UltralyticsBackend
 from .grounding_detector import GROUNDING_DETECTORS, DETECTOR_METADATA, GroundingDetector, HF_MODEL_IDS, hf_weights_downloaded
 from .yoloe_detector import YOLOE_MODELS, YOLOE_METADATA, YOLEDetector
-from .sam3_backend import SAM3_MODEL, SAM3Backend, DEFAULT_ENCODE_DIM
+from .sam3_backend import SAM3_MODEL, SAM3Backend, DEFAULT_ENCODE_DIM, ENCODE_DIM_MAX
 from ..utils.compositing import mask_to_png_b64
 from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
 from ..utils.humantime import format_duration
 
 LOGGER = logging.getLogger(__name__)
 
-HF_HUB_CACHE_DIR = MODEL_WEIGHTS_DIR / "hf_cache" / "hub"
-
 IDLE_TIMEOUT = 600
 
 SAM3_IDLE_UNLOAD_TIMEOUT = int(os.environ.get("SAM3_IDLE_UNLOAD_TIMEOUT", "300"))
+
+SAM3_ENCODE_DIM_MIN = 384
+SAM3_ENCODE_DIM_MAX = ENCODE_DIM_MAX
 
 DETECTOR_IDLE_TIMEOUT = 300
 
@@ -60,6 +62,7 @@ class Session:
     sam3_last_masks: np.ndarray | None = None
     sam3_last_scores: np.ndarray | None = None
     sam3_last_bboxes: np.ndarray | None = None
+    has_image: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -114,46 +117,60 @@ class ModelManager:
         self._no_co_residency: bool = os.environ.get("SPECTRA_NO_CO_RESIDENCY", "") == "1"
         self._sam3_encode_dim: int = DEFAULT_ENCODE_DIM
         self._lock = threading.Lock()
+        self._model_load_locks: dict[str, threading.Lock] = {}
         self._status_callback: Callable[[str], None] | None = None
 
-    def _evict_loaded_models(self, keep_backend: SegmentationBackend | None = None) -> None:
-        """Evict co-resident detector/segmentation models from VRAM.
+    def _can_unload(self, obj: Any) -> bool:
+        if not obj.is_loaded:
+            return False
+        infer_lock = getattr(obj, "_infer_lock", None)
+        if infer_lock is None:
+            return True
+        try:
+            acquired = infer_lock.acquire(blocking=False)
+        except Exception:
+            return False
+        if acquired:
+            infer_lock.release()
+            return True
+        return False
 
-        Called before a load (headroom) or an encode (which needs far more
-        VRAM than the model file size). ``keep_backend`` stays loaded; the
-        detector and all other models are removed from the registries and
-        unloaded. CUDA caches are purged afterwards.
-        """
+    def _safe_unload(self, obj: Any) -> bool:
+        if not self._can_unload(obj):
+            LOGGER.debug("Residency: unload skipped (inference in flight)", extra={"phase":"residency"})
+            return False
+        try:
+            obj.unload_model()
+            return True
+        except Exception:
+            LOGGER.exception("Error unloading model for VRAM headroom")
+            return False
+
+    def _evict_loaded_models(self, keep_backend: SegmentationBackend | None = None) -> None:
         if not _torch.cuda.is_available() or self._device == "cpu":
             return
         evict: list[Any] = []
         with self._lock:
             if self._detector is not None and self._detector.is_loaded:
-                evict.append(self._detector)
-                self._detector = None
-                self._current_detector = None
-                self._last_detector_name = None
+                if self._can_unload(self._detector):
+                    evict.append(self._detector)
+                    self._detector = None
+                    self._current_detector = None
+                else:
+                    LOGGER.debug("Residency: detector left resident (inference in flight)", extra={"phase":"residency","detector":self._current_detector})
             for name in list(self._loaded_models.keys()):
                 obj = self._loaded_models[name]
-                if obj is keep_backend:
+                if obj is keep_backend or not obj.is_loaded:
+                    continue
+                if not self._can_unload(obj):
+                    LOGGER.debug("Residency: %s left resident (inference in flight)", name, extra={"phase":"residency","model":name})
                     continue
                 evict.append(obj)
                 del self._loaded_models[name]
                 if self._current_model == name:
                     self._current_model = None
         for obj in evict:
-            if not obj.is_loaded:
-                continue
-            infer_lock = getattr(obj, "_infer_lock", None)
-            if infer_lock is not None:
-                if not infer_lock.acquire(blocking=False):
-                    LOGGER.debug("Skipping eviction of model with inference in flight")
-                    continue
-                infer_lock.release()
-            try:
-                obj.unload_model()
-            except Exception:
-                LOGGER.exception("Error evicting model for VRAM headroom")
+            self._safe_unload(obj)
         if _torch.cuda.is_available():
             try:
                 _torch.cuda.empty_cache()
@@ -161,13 +178,7 @@ class ModelManager:
             except Exception:
                 pass
 
-    def _ensure_vram_headroom(self, required_mb: int) -> None:
-        """Evict other resident models if a load would exceed the VRAM budget.
-
-        The hard cap (set_per_process_memory_fraction, applied in main.py)
-        is the ultimate guarantee that VRAM is never crossed; this is a
-        proactive step so we evict co-resident models instead of tripping OOM.
-        """
+    def _ensure_vram_headroom(self, required_mb: int, keep_backend: SegmentationBackend | None = None) -> None:
         if not _torch.cuda.is_available() or self._device == "cpu":
             return
         try:
@@ -179,7 +190,7 @@ class ModelManager:
         total_mb = total / (1024 * 1024)
         try:
             fraction = min(float(os.environ.get("SPECTRA_VRAM_FRACTION", "1.0")), 0.95)
-        except Exception:
+        except (ValueError, TypeError):
             fraction = 1.0
         if fraction <= 0.0:
             return
@@ -189,19 +200,14 @@ class ModelManager:
             return
 
         LOGGER.info(
-            "Freeing VRAM — over budget by %.0f MB",
-            projected_mb - budget_mb,
+            "VRAM: freeing headroom â€” over budget by %.0f MB "
+            "(free %.0f / total %.0f MB, need %.0f MB)",
+            max(0.0, projected_mb - budget_mb), free_mb, total_mb, required_mb,
+            extra={"phase":"vram","reason":"over-budget"},
         )
-        self._evict_loaded_models()
+        self._evict_loaded_models(keep_backend=keep_backend)
 
     def _ensure_encode_headroom(self, keep_backend: SegmentationBackend | None = None) -> None:
-        """Free VRAM before a segmentation-model encode.
-
-        The encode peak (Hiera image features, several GB) is far larger
-        than the model file size, so co-resident detector/seg models must be
-        evicted first — otherwise the encode OOMs against the hard cap and falls
-        back to CPU. Only ``keep_backend`` (the backend about to encode) stays.
-        """
         self._evict_loaded_models(keep_backend=keep_backend)
 
     def get_or_load_model(self, model_name: str) -> SegmentationBackend:
@@ -215,21 +221,18 @@ class ModelManager:
                 self._last_seg_use = time.time()
                 return self._loaded_models[model_name]
 
-            if self._no_co_residency and self._detector is not None and self._detector.is_loaded:
-                LOGGER.debug("Unloading detector (no co-residency): %s", self._current_detector)
-                self._detector.unload_model()
-                self._detector = None
-                self._current_detector = None
-
-            if self._current_model and self._current_model in self._loaded_models:
-                LOGGER.debug("Unloading previous model: %s", self._current_model)
-                self._loaded_models[self._current_model].unload_model()
-                del self._loaded_models[self._current_model]
+        if model_name == SAM3_MODEL:
+            pass
+        elif model_name not in ULTRALYTICS_MODELS:
+            raise ValueError(
+                f"Unknown segmentation model '{model_name}'. "
+                f"Available: {sorted(set(ULTRALYTICS_MODELS) | {SAM3_MODEL})}"
+            )
 
         model_dir = MODEL_WEIGHTS_DIR
         model_file = model_dir / model_name
         if not model_file.exists():
-            LOGGER.info("%s not cached — downloading", model_name)
+            LOGGER.info("%s not cached â€” downloading", model_name)
             if self._status_callback:
                 self._status_callback("downloading")
             from backend.utils.net_check import is_connected
@@ -248,7 +251,7 @@ class ModelManager:
             try:
                 verified = verify_model(model_file, model_name)
             except Exception as exc:
-                LOGGER.warning("Model integrity check failed (%s) — continuing: %s", model_name, exc)
+                LOGGER.warning("Model integrity check failed (%s) â€” continuing: %s", model_name, exc)
             else:
                 if not verified:
                     raise RuntimeError(
@@ -257,40 +260,83 @@ class ModelManager:
                         f"  Delete the file and re-download it:\n"
                         f"  {model_file}"
                     )
-            LOGGER.info("Loading %s...", model_name)
 
-        if model_name == SAM3_MODEL:
-            backend: SegmentationBackend = SAM3Backend(device=self._device)
-            backend._encode_dim = self._sam3_encode_dim
-        else:
-            backend = UltralyticsBackend(device=self._device)
-        if self._status_callback:
-            self._status_callback("loading")
-        try:
-            req_mb = int(model_file.stat().st_size / (1024 * 1024)) * 2 + 512
-        except Exception:
-            req_mb = 4096
-        self._ensure_vram_headroom(req_mb)
-        _load_t0 = time.time()
-        backend.load_model(model_name)
+        with self._model_load_lock(model_name):
+            with self._lock:
+                if (
+                    self._current_model == model_name
+                    and model_name in self._loaded_models
+                    and self._loaded_models[model_name].is_loaded
+                ):
+                    self._last_seg_use = time.time()
+                    return self._loaded_models[model_name]
 
+            if self._no_co_residency and self._detector is not None and self._detector.is_loaded:
+                LOGGER.info("Residency: unloading detector %s (no co-residency)", self._current_detector, extra={"phase":"residency","detector":self._current_detector,"reason":"no-co-residency"})
+                self._safe_unload(self._detector)
+                self._detector = None
+                self._current_detector = None
+
+            if self._current_model and self._current_model in self._loaded_models:
+                LOGGER.info("Residency: unloading previous model %s", self._current_model, extra={"phase":"residency","model":self._current_model,"reason":"model-switch"})
+                self._safe_unload(self._loaded_models[self._current_model])
+                del self._loaded_models[self._current_model]
+                self._current_model = None
+
+            if model_name == SAM3_MODEL:
+                backend: SegmentationBackend = SAM3Backend(device=self._device)
+                backend._encode_dim = self._sam3_encode_dim
+            else:
+                backend = UltralyticsBackend(device=self._device)
+            if self._status_callback:
+                self._status_callback("loading")
+            try:
+                req_mb = int(model_file.stat().st_size / (1024 * 1024)) * 2 + 512
+            except Exception:
+                req_mb = 4096
+            self._ensure_vram_headroom(req_mb)
+            _load_t0 = time.time()
+            backend.load_model(model_name)
+
+            with self._lock:
+                self._loaded_models[model_name] = backend
+                self._current_model = model_name
+                self._last_seg_use = time.time()
+            if self._status_callback:
+                self._status_callback("loaded")
+            LOGGER.info("Model %s ready in %s", model_name, format_duration(time.time() - _load_t0), extra={"phase":"residency","model":model_name,"dur_ms":int((time.time()-_load_t0)*1000)})
+            return backend
+
+    @contextmanager
+    def _model_load_lock(self, model_name: str):
         with self._lock:
-            self._loaded_models[model_name] = backend
-            self._current_model = model_name
-            self._last_seg_use = time.time()
-        if self._status_callback:
-            self._status_callback("loaded")
-        LOGGER.info("%s ready in %s", model_name, format_duration(time.time() - _load_t0))
-        return backend
+            lock = self._model_load_locks.get(model_name)
+            if lock is None:
+                lock = threading.Lock()
+                self._model_load_locks[model_name] = lock
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
 
     def create_session(self, model_name: str) -> Session:
         self.evict_idle_sessions()
         with self._lock:
             if len(self._sessions) >= MAX_SESSIONS:
                 raise RuntimeError(f"Maximum sessions ({MAX_SESSIONS}) reached")
+            # Reserve the slot under the same lock so N concurrent creations
+            # cannot all pass the MAX_SESSIONS check. The value stays None until
+            # the backend exists, and every consumer skips reserved slots.
+            session_id = str(uuid.uuid4())
+            self._sessions[session_id] = None  # type: ignore[assignment]
+        try:
+            backend = self.get_or_load_model(model_name)
+        except Exception:
+            with self._lock:
+                self._sessions.pop(session_id, None)
+            raise
 
-        backend = self.get_or_load_model(model_name)
-        session_id = str(uuid.uuid4())
         session = Session(
             session_id=session_id,
             model_name=model_name,
@@ -298,7 +344,6 @@ class ModelManager:
         )
         with self._lock:
             self._sessions[session_id] = session
-        LOGGER.debug("Created session %s with model %s", session_id, model_name)
         return session
 
     def get_session(self, session_id: str) -> Session | None:
@@ -307,6 +352,10 @@ class ModelManager:
             if session:
                 session.last_active = time.time()
         return session
+
+    def session_exists(self, session_id: str) -> bool:
+        with self._lock:
+            return self._sessions.get(session_id) is not None
 
     def destroy_session(self, session_id: str) -> None:
         unload_model: SegmentationBackend | None = None
@@ -326,23 +375,18 @@ class ModelManager:
                 self._current_detector = None
         if session:
             if session.backend.has_image:
-                session.backend.reset_image()
+                if self._can_unload(session.backend):
+                    session.backend.reset_image()
+                else:
+                    LOGGER.debug("Session %s backend busy â€” skipping reset_image", session_id)
             session.image_rgb = None
             session.image_bgr = None
             session.objects.clear()
             LOGGER.debug("Destroyed session %s", session_id)
-            if unload_model is not None:
-                LOGGER.info("Unloading %s (idle)", unload_model_name)
-                try:
-                    unload_model.unload_model()
-                except Exception:
-                    LOGGER.exception("Error unloading model %s", unload_model_name)
-            if unload_detector is not None and unload_detector.is_loaded:
-                LOGGER.info("Unloading detector %s (idle)", unload_detector_name)
-                try:
-                    unload_detector.unload_model()
-                except Exception:
-                    LOGGER.exception("Error unloading detector %s", unload_detector_name)
+            if unload_model is not None and self._safe_unload(unload_model):
+                LOGGER.info("Residency: unloading %s (idle)", unload_model_name, extra={"phase":"residency","model":unload_model_name,"reason":"idle"})
+            if unload_detector is not None and self._safe_unload(unload_detector):
+                LOGGER.info("Residency: unloading detector %s (idle)", unload_detector_name, extra={"phase":"residency","detector":unload_detector_name,"reason":"idle"})
             if _torch.cuda.is_available():
                 try:
                     _torch.cuda.empty_cache()
@@ -375,8 +419,9 @@ class ModelManager:
         session.sam3_last_scores = None
         session.sam3_last_bboxes = None
 
-        LOGGER.debug("Encoding image %s (%dx%d) for session %s ...",
-                     image_id, image.shape[1], image.shape[0], session_id)
+        LOGGER.debug("Encoding %dx%d image for session %s ...",
+                     image.shape[1], image.shape[0], session_id,
+                     extra={"phase": "encode", "sid": session_id})
         with self._lock:
             self._last_seg_use = time.time()
         t0 = time.time()
@@ -385,12 +430,18 @@ class ModelManager:
                 self._ensure_encode_headroom(session.backend)
             session.backend.set_image(image)
             elapsed = time.time() - t0
-            LOGGER.debug("Image encoded in %.2fs", elapsed)
+            LOGGER.debug("Encoding complete in %.2fs", elapsed, extra={"phase":"encode","sid":session.session_id,"dur_ms":int(elapsed*1000)})
+            session.has_image = True
         except Exception:
-            LOGGER.exception("SAM encoding failed for session %s — continuing without features", session_id)
-            session.backend.reset_image()
+            LOGGER.exception(
+                "SAM encoding failed for session %s â€” continuing without features", session_id
+            )
+            session.has_image = False
+            if self._can_unload(session.backend):
+                session.backend.reset_image()
 
-        LOGGER.info("%s · %dx%d · encoded in %s", image_id, session.image_width, session.image_height, format_duration(time.time() - t0))
+        session.last_active = time.time()
+        LOGGER.info("Encoded %dx%d image in %s", session.image_width, session.image_height, format_duration(time.time() - t0), extra={"phase":"encode","sid":session.session_id,"dur_ms":int((time.time()-t0)*1000)})
 
     def _ensure_model_loaded(self, session: Session) -> None:
         with self._lock:
@@ -399,7 +450,7 @@ class ModelManager:
         if session.backend.is_loaded:
             if session.backend.has_image or session.image_rgb is None:
                 return
-            LOGGER.debug("Re-encoding image for session %s", session.session_id)
+            LOGGER.debug("Encoding image for session %s", session.session_id, extra={"phase":"encode","sid":session.session_id})
             self._ensure_encode_headroom(session.backend)
             session.backend.set_image(session.image_bgr)
             return
@@ -482,12 +533,12 @@ class ModelManager:
                     del obj.stroke_history[:excess]
                     del obj.mask_snapshots[:excess]
 
-        LOGGER.debug("Running prediction for object %d in session %s ...", object_id, session_id)
+        LOGGER.debug("Predicting for subject %d in session %s ...", object_id, session_id, extra={"phase":"decode","sid":session_id,"model":session.model_name})
         t0 = time.time()
         result = self._compute_mask(session, obj)
         elapsed = time.time() - t0
         mask_count = len(result.get("masks", [])) if hasattr(result.get("masks", []), "__len__") else 0
-        LOGGER.debug("Prediction complete in %.2fs — %d mask(s) returned", elapsed, mask_count)
+        LOGGER.info("Subject %d mask ready in %s (%d mask(s))", object_id, format_duration(elapsed), mask_count, extra={"phase":"decode","sid":session_id,"dur_ms":int(elapsed*1000),"model":session.model_name})
 
         if appended:
             with session.lock:
@@ -505,20 +556,38 @@ class ModelManager:
                     obj.last_mask = None
                     obj.last_low_res_mask = None
 
+        session.last_active = time.time()
         result["all_masks"], result["all_scores"], result["object_masks"] = self._collect_all_masks(session)
+        result["object_history"] = self._object_history(session)
         return result
+
+    def _object_history(self, session: Session) -> dict[str, dict[str, int]]:
+        with session.lock:
+            return {
+                str(oid): {
+                    "undo": len(obj.stroke_history),
+                    "redo": len(obj.redo_stack),
+                    "strokes": len(obj.stroke_history),
+                    "has_mask": obj.last_mask is not None and len(obj.last_mask) > 0,
+                }
+                for oid, obj in session.objects.items()
+            }
 
     def _collect_all_masks(self, session: Session) -> tuple[list[np.ndarray], list[float], dict[str, np.ndarray]]:
         masks: list[np.ndarray] = []
         scores: list[float] = []
         object_masks: dict[str, np.ndarray] = {}
-        for oid in sorted(session.objects):
-            obj = session.objects[oid]
-            if obj.last_mask is not None and len(obj.last_mask) > 0:
+        with session.lock:
+            oids = sorted(session.objects.keys())
+        for oid in oids:
+            with session.lock:
+                obj = session.objects.get(oid)
+                if obj is None or obj.last_mask is None or len(obj.last_mask) == 0:
+                    continue
                 m = np.asarray(obj.last_mask)[0]
-                masks.append(m)
-                scores.append(1.0)
-                object_masks[str(oid)] = m
+            masks.append(m)
+            scores.append(1.0)
+            object_masks[str(oid)] = m
         return masks, scores, object_masks
 
     def segment_batch(
@@ -544,7 +613,8 @@ class ModelManager:
         t0 = time.time()
         masks = session.backend.predict_batch(bboxes)
         elapsed = time.time() - t0
-        LOGGER.debug("Batch segment complete in %.2fs — %d masks", elapsed, len(masks))
+        LOGGER.info("Batch segment complete in %s â€” %d mask(s)", format_duration(elapsed), len(masks), extra={"phase":"segment","sid":session_id,"dur_ms":int(elapsed*1000),"model":session.model_name})
+        session.last_active = time.time()
         return masks
 
     def undo(self, session_id: str, object_id: int) -> dict[str, Any] | None:
@@ -559,25 +629,21 @@ class ModelManager:
 
         with session.lock:
             popped = obj.stroke_history.pop()
-            saved_snapshot = obj.mask_snapshots.pop() if obj.mask_snapshots else None
-            prev = obj.mask_snapshots[-1] if obj.mask_snapshots else None
-            obj.last_mask = None
-            obj.last_low_res_mask = prev.low_res if prev is not None else None
+            if obj.mask_snapshots:
+                saved_snapshot = obj.mask_snapshots.pop()
+            else:
+                saved_snapshot = None
             obj.redo_stack.append((popped, saved_snapshot))
             if len(obj.redo_stack) > MAX_STROKE_HISTORY:
                 excess = len(obj.redo_stack) - MAX_STROKE_HISTORY
                 del obj.redo_stack[:excess]
-        if len(obj.stroke_history) == 0:
-            obj.last_mask = None
-            all_masks, all_scores, object_masks = self._collect_all_masks(session)
-            return {
-                "masks": np.array([]), "scores": np.array([]), "low_res_masks": None,
-                "all_masks": all_masks, "all_scores": all_scores, "object_masks": object_masks,
-            }
+
+        session.last_active = time.time()
         if not session.backend.is_loaded:
             self._ensure_model_loaded(session)
-        result = self._replay_history(session, obj)
+        result = self._replay_history(session, obj, full_replay=True)
         result["all_masks"], result["all_scores"], result["object_masks"] = self._collect_all_masks(session)
+        result["object_history"] = self._object_history(session)
         return result
 
     def redo(self, session_id: str, object_id: int) -> dict[str, Any] | None:
@@ -593,12 +659,14 @@ class ModelManager:
         with session.lock:
             entry, saved_snapshot = obj.redo_stack.pop()
             obj.stroke_history.append(entry)
-            if saved_snapshot is not None:
-                obj.mask_snapshots.append(saved_snapshot)
+            obj.mask_snapshots.append(saved_snapshot if saved_snapshot is not None else MaskSnapshot(low_res=None))
+
+        session.last_active = time.time()
         if not session.backend.is_loaded:
             self._ensure_model_loaded(session)
-        result = self._replay_history(session, obj)
+        result = self._replay_history(session, obj, full_replay=True)
         result["all_masks"], result["all_scores"], result["object_masks"] = self._collect_all_masks(session)
+        result["object_history"] = self._object_history(session)
         return result
 
     def clear_object(self, session_id: str, object_id: int) -> dict[str, Any] | None:
@@ -606,10 +674,17 @@ class ModelManager:
             session = self._sessions.get(session_id)
             if session is None:
                 return None
-            session.objects.pop(object_id, None)
+            with session.lock:
+                session.objects.pop(object_id, None)
         LOGGER.debug("Cleared object %d in session %s", object_id, session_id)
+        session.last_active = time.time()
         all_masks, all_scores, object_masks = self._collect_all_masks(session)
-        return {"all_masks": all_masks, "all_scores": all_scores, "object_masks": object_masks}
+        return {
+            "all_masks": all_masks,
+            "all_scores": all_scores,
+            "object_masks": object_masks,
+            "object_history": self._object_history(session),
+        }
 
     def sam3_predict(
         self,
@@ -634,7 +709,7 @@ class ModelManager:
         result = session.backend.predict_text(text, confidence=confidence)
         elapsed = time.time() - t0
         mask_count = len(result.get("masks", [])) if hasattr(result.get("masks", []), "__len__") else 0
-        LOGGER.debug("SAM3 prompt complete in %.2fs — %d mask(s) returned", elapsed, mask_count)
+        LOGGER.info("SAM3 prompt complete in %s â€” %d mask(s)", format_duration(elapsed), mask_count, extra={"phase":"sam3","sid":session_id,"dur_ms":int(elapsed*1000),"model":SAM3_MODEL})
 
         with session.lock:
             session.sam3_prompt_history.append((entry, self._sam3_snapshot(result)))
@@ -787,16 +862,14 @@ class ModelManager:
         keep_loaded: bool | None = None,
         encode_dim: int | None = None,
     ) -> dict[str, Any]:
-        """Update SAM3 runtime options: idle-unload behavior and encode resolution.
-
-        When `encode_dim` changes, cached features are invalidated and any active
-        SAM3 session re-encodes its image at the new resolution. Both options
-        persist across model reloads.
-        """
         with self._lock:
             if keep_loaded is not None:
                 self._keep_sam3_loaded = bool(keep_loaded)
             if encode_dim is not None:
+                if not (SAM3_ENCODE_DIM_MIN <= int(encode_dim) <= SAM3_ENCODE_DIM_MAX):
+                    raise ValueError(
+                        f"encode_dim must be within {SAM3_ENCODE_DIM_MIN}-{SAM3_ENCODE_DIM_MAX}"
+                    )
                 self._sam3_encode_dim = int(encode_dim)
             keep_loaded_out = self._keep_sam3_loaded
             backend = self._loaded_models.get(SAM3_MODEL)
@@ -838,38 +911,77 @@ class ModelManager:
             self._ensure_encode_headroom(session.backend)
             session.backend.set_image(session.image_bgr)
 
-    def _replay_history(self, session: Session, obj: ObjectState) -> dict[str, Any]:
+    def _replay_history(
+        self,
+        session: Session,
+        obj: ObjectState,
+        full_replay: bool = False,
+    ) -> dict[str, Any]:
         self._ensure_full_image_encoded(session)
-        if len(obj.stroke_history) == 0:
+        with session.lock:
+            history = list(obj.stroke_history)
+
+        if full_replay:
+            obj.last_mask = None
+            obj.last_low_res_mask = None
+            if not history:
+                return {"masks": np.array([]), "scores": np.array([]), "low_res_masks": None}
+
+            result: dict[str, Any] = {"masks": np.array([]), "scores": np.array([]), "low_res_masks": None}
+            for idx, entry in enumerate(history):
+                is_first = idx == 0
+                result = self._apply_stroke(
+                    session,
+                    obj,
+                    entry,
+                    first_stroke=is_first,
+                    mask_input=None if is_first else obj.last_low_res_mask,
+                )
+                obj.last_mask = result["masks"]
+                obj.last_low_res_mask = result.get("low_res_masks")
+            LOGGER.debug(
+                "Full replay: %d stroke(s) (%d positive, %d negative in last)",
+                len(history),
+                history[-1].labels.count(1) if history[-1].labels else 0,
+                history[-1].labels.count(0) if history[-1].labels else 0,
+            )
+            return result
+
+        if len(history) == 0:
             obj.last_mask = None
             obj.last_low_res_mask = None
             return {"masks": np.array([]), "scores": np.array([]), "low_res_masks": None}
 
-        last = obj.stroke_history[-1]
-        all_points = last.points
-        all_labels = last.labels
-        all_bboxes = last.bboxes
-
-        pos_count = all_labels.count(1)
-        neg_count = all_labels.count(0)
-        LOGGER.debug(
-            "Replay history: last stroke only, %d points (%d positive, %d negative)",
-            len(all_points), pos_count, neg_count,
-        )
-
+        entry = history[-1]
         is_first_prompt = obj.last_low_res_mask is None
         mask_input = (
-            obj.last_low_res_mask if (not is_first_prompt and not all_bboxes) else None
+            obj.last_low_res_mask if (not is_first_prompt and not entry.bboxes) else None
         )
-        use_multimask = is_first_prompt and not all_bboxes and len(all_points) <= 1
+        result = self._apply_stroke(
+            session, obj, entry, first_stroke=is_first_prompt, mask_input=mask_input
+        )
+        obj.last_mask = result["masks"]
+        obj.last_low_res_mask = result.get("low_res_masks")
+        return result
 
-        if (
-            is_first_prompt
-            and not all_bboxes
-            and pos_count > 0
-            and neg_count > 0
-        ):
-            pos_points = [p for p, lb in zip(all_points, all_labels) if lb == 1]
+    def _apply_stroke(
+        self,
+        session: Session,
+        obj: ObjectState,
+        entry: StrokeEntry,
+        first_stroke: bool,
+        mask_input: np.ndarray | None,
+    ) -> dict[str, Any]:
+        points = entry.points
+        labels = entry.labels
+        bboxes = entry.bboxes
+        pos_count = labels.count(1) if labels else 0
+        neg_count = labels.count(0) if labels else 0
+
+        use_multimask = first_stroke and not bboxes and len(points) <= 1
+
+        if first_stroke and not bboxes and pos_count > 0 and neg_count > 0:
+            pos_points = [p for p, lb in zip(points, labels) if lb == 1]
             pos_labels = [1] * len(pos_points)
             coarse = session.backend.predict(
                 points=pos_points,
@@ -884,33 +996,28 @@ class ModelManager:
                     "First-stroke refinement: pass1 mask (positives only) -> pass2 refine with %d negatives",
                     neg_count,
                 )
-                result = session.backend.predict(
-                    points=all_points if all_points else None,
-                    labels=all_labels if all_labels else None,
-                    bboxes=all_bboxes,
+                return session.backend.predict(
+                    points=points if points else None,
+                    labels=labels if labels else None,
+                    bboxes=bboxes,
                     mask_input=coarse_low,
                     multimask_output=False,
                 )
-            else:
-                result = session.backend.predict(
-                    points=all_points if all_points else None,
-                    labels=all_labels if all_labels else None,
-                    bboxes=all_bboxes,
-                    mask_input=mask_input,
-                    multimask_output=use_multimask,
-                )
-        else:
-            result = session.backend.predict(
-                points=all_points if all_points else None,
-                labels=all_labels if all_labels else None,
-                bboxes=all_bboxes,
+            return session.backend.predict(
+                points=points if points else None,
+                labels=labels if labels else None,
+                bboxes=bboxes,
                 mask_input=mask_input,
                 multimask_output=use_multimask,
             )
 
-        obj.last_mask = result["masks"]
-        obj.last_low_res_mask = result.get("low_res_masks")
-        return result
+        return session.backend.predict(
+            points=points if points else None,
+            labels=labels if labels else None,
+            bboxes=bboxes,
+            mask_input=mask_input,
+            multimask_output=use_multimask,
+        )
 
     def evict_idle_sessions(self) -> int:
         now = time.time()
@@ -918,7 +1025,7 @@ class ModelManager:
         with self._lock:
             idle_ids = [
                 sid for sid, s in self._sessions.items()
-                if (now - s.last_active) > IDLE_TIMEOUT
+                if s is not None and (now - s.last_active) > IDLE_TIMEOUT
             ]
         for sid in idle_ids:
             self.destroy_session(sid)
@@ -936,7 +1043,7 @@ class ModelManager:
                     self._detector = None
                     self._current_detector = None
             if cur_detector is not None:
-                LOGGER.debug("Unloading idle detector (idle for %.0fs)", detector_idle)
+                LOGGER.debug("Residency: unloading idle detector %s (idle for %.0fs)", self._current_detector, detector_idle, extra={"phase":"residency","detector":self._current_detector,"reason":"idle"})
                 try:
                     cur_detector.unload_model()
                 except Exception:
@@ -946,35 +1053,29 @@ class ModelManager:
 
         seg_idle = now - self._last_seg_use
         unload_timeout = IDLE_TIMEOUT if self._keep_sam3_loaded else SAM3_IDLE_UNLOAD_TIMEOUT
-        if (
-            self._current_model == SAM3_MODEL
-            and seg_idle > unload_timeout
-            and not self._sessions
-        ):
-            unload_model: SegmentationBackend | None = None
-            unload_model_name: str | None = None
+        unload_model: SegmentationBackend | None = None
+        unload_model_name: str | None = None
+        if seg_idle > unload_timeout:
             with self._lock:
-                seg_idle = time.time() - self._last_seg_use
-                if (
-                    self._current_model == SAM3_MODEL
-                    and seg_idle > unload_timeout
-                    and not self._sessions
-                ):
-                    candidate = self._loaded_models.get(self._current_model)
-                    if candidate is not None:
-                        infer_lock = getattr(candidate, "_infer_lock", None)
-                        if infer_lock is None or not infer_lock.locked():
-                            unload_model_name = self._current_model
-                            unload_model = self._loaded_models.pop(unload_model_name, None)
-                            self._current_model = None
-            if unload_model is not None:
-                LOGGER.info("Unloading SAM3 (idle)")
-                try:
-                    unload_model.unload_model()
-                except Exception:
-                    LOGGER.exception("Error unloading idle SAM3 model %s", unload_model_name)
-                if self._status_callback:
-                    self._status_callback("unloading")
+                current_model = self._current_model
+                has_sessions = bool(self._sessions)
+                seg_idle_now = time.time() - self._last_seg_use
+            if (
+                current_model == SAM3_MODEL
+                and seg_idle_now > unload_timeout
+                and not has_sessions
+            ):
+                with self._lock:
+                    candidate = self._loaded_models.get(current_model)
+                    if candidate is not None and self._can_unload(candidate):
+                        unload_model_name = current_model
+                        unload_model = self._loaded_models.pop(unload_model_name)
+                        self._current_model = None
+        if unload_model is not None:
+            LOGGER.info("Residency: unloading SAM3 (idle)", extra={"phase":"residency","model":SAM3_MODEL,"reason":"idle"})
+            self._safe_unload(unload_model)
+            if self._status_callback:
+                self._status_callback("unloading")
 
         return evicted
 
@@ -983,23 +1084,18 @@ class ModelManager:
             return len(self._sessions)
 
     def list_detectors(self) -> list[dict[str, Any]]:
-        hf_cache = HF_HUB_CACHE_DIR
         model_dir = MODEL_WEIGHTS_DIR
         detectors = []
         with self._lock:
             cur = self._current_detector
         for name, display in GROUNDING_DETECTORS.items():
             meta = DETECTOR_METADATA.get(name, {})
-            hf_id = HF_MODEL_IDS.get(name, name)
-            hf_name = hf_id.replace("/", "--")
-            model_cache = hf_cache / f"models--{hf_name}"
-            downloaded = self._detector_downloaded(name)
             detectors.append({
                 "name": name,
                 "display_name": display,
                 "type": "grounding",
                 "loaded": name == cur,
-                "downloaded": downloaded,
+                "downloaded": self._detector_downloaded(name),
                 "tier": meta.get("tier", "medium"),
                 "perf": meta.get("perf", ""),
             })
@@ -1030,37 +1126,50 @@ class ModelManager:
                 self._last_detector_use = time.time()
                 return
             cur_detector = self._detector
-            self._detector = None
             seg_to_unload = None
             if self._no_co_residency and self._current_model and self._current_model in self._loaded_models:
-                LOGGER.debug("Unloading segmentation model (no co-residency): %s", self._current_model)
+                LOGGER.info("Residency: unloading segmentation model %s (no co-residency)", self._current_model, extra={"phase":"residency","model":self._current_model,"reason":"no-co-residency"})
                 seg_to_unload = self._loaded_models.pop(self._current_model)
                 self._current_model = None
+            keep_seg = (
+                self._current_model
+                and self._current_model in self._loaded_models
+                and os.environ.get("SPECTRA_KEEP_SEG_ON_DETECT", "") == "1"
+            )
 
         if seg_to_unload is not None:
-            seg_to_unload.unload_model()
+            self._safe_unload(seg_to_unload)
 
         if cur_detector and cur_detector.is_loaded:
-            cur_detector.unload_model()
+            if not self._safe_unload(cur_detector):
+                LOGGER.debug("Residency: previous detector left resident (inference in flight)", extra={"phase":"residency","detector":self._current_detector})
+
+        if detector_name not in GROUNDING_DETECTORS and detector_name not in YOLOE_MODELS:
+            with self._lock:
+                self._detector = cur_detector
+                if cur_detector is not None and cur_detector.is_loaded:
+                    self._current_detector = None
+            raise ValueError(f"Unknown detector: {detector_name}")
 
         if detector_name in GROUNDING_DETECTORS:
             new_detector: DetectorBackend = GroundingDetector(device=self._device)
-        elif detector_name in YOLOE_MODELS:
-            new_detector = YOLEDetector(device=self._device)
         else:
-            with self._lock:
-                self._detector = cur_detector
-            raise ValueError(f"Unknown detector: {detector_name}")
+            new_detector = YOLEDetector(device=self._device)
 
         t0 = time.time()
         tier = DETECTOR_METADATA.get(detector_name, {}).get("tier", "medium")
-        self._ensure_vram_headroom({"tiny": 1024, "small": 1024, "medium": 1536, "large": 2560}.get(tier, 2048))
+        required_mb = {"tiny": 1024, "small": 1024, "medium": 1536, "large": 2560}.get(tier, 2048)
+        if keep_seg:
+            LOGGER.info("Residency: preserving segmentation model %s (KEEP_SEG_ON_DETECT)", self._current_model, extra={"phase":"residency","model":self._current_model,"reason":"keep-seg-on-detect"})
+            self._ensure_vram_headroom(required_mb, keep_backend=self._loaded_models.get(self._current_model))
+        else:
+            self._ensure_vram_headroom(required_mb)
         downloaded = self._detector_downloaded(detector_name)
         if self._status_callback:
             self._status_callback("detector-downloading" if not downloaded else "detector-loading")
         new_detector.load_model(detector_name)
         load_elapsed = time.time() - t0
-        LOGGER.info("%s loaded in %s", detector_name, format_duration(load_elapsed))
+        LOGGER.info("Detector %s loaded in %s", detector_name, format_duration(load_elapsed), extra={"phase":"residency","detector":detector_name,"dur_ms":int(load_elapsed*1000)})
         if self._status_callback:
             self._status_callback("detector-loaded")
 
@@ -1094,22 +1203,25 @@ class ModelManager:
         if os.environ.get("SPECTRA_KEEP_SEG_ON_DETECT") != "1":
             with self._lock:
                 if self._current_model and self._current_model in self._loaded_models:
-                    seg_to_unload = self._loaded_models.pop(self._current_model)
-                    self._current_model = None
+                    candidate = self._loaded_models.get(self._current_model)
+                    if candidate is not None and self._can_unload(candidate):
+                        seg_to_unload = self._loaded_models.pop(self._current_model)
+                        self._current_model = None
         if seg_to_unload is not None:
             LOGGER.debug(
                 "Unloading segmentation model %s for detection",
                 getattr(seg_to_unload, "_model_path", "?"),
             )
-            try:
-                seg_to_unload.unload_model()
-            except Exception:
-                LOGGER.exception("Error unloading segmentation model for detection")
+            self._safe_unload(seg_to_unload)
             release_gpu_memory()
 
-        image_bgr = session.image_bgr
+        with session.lock:
+            image_bgr = session.image_bgr
+            image_rgb = session.image_rgb
+        if image_bgr is None and image_rgb is not None:
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
         if image_bgr is None:
-            image_bgr = cv2.cvtColor(session.image_rgb, cv2.COLOR_RGB2BGR)
+            raise ValueError("No image loaded in session")
 
         t0 = time.time()
         detections = detector.detect(
@@ -1120,7 +1232,7 @@ class ModelManager:
         )
         detect_elapsed = time.time() - t0
         if hasattr(detector, '_device'):
-            LOGGER.debug("Detector device: %s", detector._device)
+            LOGGER.debug("Detector %s running on %s", self._current_detector, detector._device, extra={"phase":"detect","detector":self._current_detector})
 
         det_list = []
         for d in detections:
@@ -1129,13 +1241,14 @@ class ModelManager:
                 entry["mask"] = mask_to_png_b64(d.mask)
             det_list.append(entry)
 
+        session.last_active = time.time()
         with self._lock:
             self._last_detector_use = time.time()
 
         release_gpu_memory()
 
         LOGGER.info(
-            "Detected '%s' — %d found, %d kept (%s)",
+            "Detected '%s' â€” %d found, %d kept (%s)",
             query, len(detections), len(det_list), format_duration(detect_elapsed),
         )
 

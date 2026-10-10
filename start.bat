@@ -82,13 +82,13 @@ set "WAIT_SECONDS=0"
 :wait_backend
 if !WAIT_SECONDS! geq 30 (
     echo   [FAIL]  Backend failed to start within 30 seconds.
-    if exist "%ROOT%backend\backend_launch.log" (
-        echo   --- %ROOT%backend\backend_launch.log ^(tail^) ---
-        powershell -NoProfile -Command "Get-Content -LiteralPath '%ROOT%backend\backend_launch.log' -Tail 15"
+    if exist "%ROOT%\backend\backend_launch.log" (
+        echo   --- %ROOT%\backend\backend_launch.log ^(tail^) ---
+        powershell -NoProfile -Command "Get-Content -LiteralPath '%ROOT%\backend\backend_launch.log' -Tail 15"
     )
-    if exist "%ROOT%backend\logs\backend.log" (
-        echo   --- %ROOT%backend\logs\backend.log ^(tail^) ---
-        powershell -NoProfile -Command "Get-Content -LiteralPath '%ROOT%backend\logs\backend.log' -Tail 15"
+    if exist "%ROOT%\backend\logs\backend.log" (
+        echo   --- %ROOT%\backend\logs\backend.log ^(tail^) ---
+        powershell -NoProfile -Command "Get-Content -LiteralPath '%ROOT%\backend\logs\backend.log' -Tail 15"
     )
     pause
     exit /b 1
@@ -99,8 +99,8 @@ if defined CURL_OK (
     curl -s -o nul --max-time 2 http://127.0.0.1:8000/health >nul 2>&1
     if not errorlevel 1 goto backend_ready
 ) else (
-    powershell -NoProfile -Command "try { (New-Object System.Net.WebClient).DownloadString('http://127.0.0.1:8000/health') | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
-    if errorlevel 1 goto wait_backend
+    powershell -NoProfile -Command "try { $null = (New-Object System.Net.WebClient).DownloadString('http://127.0.0.1:8000/health'); 'ok' } catch { 'no' }" 2>nul | findstr /c:"ok" >nul
+    if not errorlevel 1 goto backend_ready
 )
 goto wait_backend
 

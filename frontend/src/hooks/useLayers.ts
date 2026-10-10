@@ -3,58 +3,53 @@ import { useAtom } from "jotai";
 import {
   layersAtom,
   selectedLayersAtom,
-  layerIdCounterAtom,
+  nextLayerId,
   type Layer,
 } from "@/store/layers";
-import { masksAtom, objectMasksAtom, perDetectionMasksAtom, objectUndoCountsAtom, objectRedoCountsAtom, sessionIdAtom } from "@/store/session";
+import { masksAtom, objectMasksAtom, perDetectionMasksAtom, sessionIdAtom } from "@/store/session";
 import { detectionsAtom, selectedDetectionAtom } from "@/store/detection";
-import type { PackedMask } from "@/lib/mask";
+import {
+  removeDetectionMask,
+  removeDetectionIndexFromLayers,
+  shiftSelectedDetection,
+} from "@/lib/detectionEdit";
 import { api } from "@/lib/api";
+import { emitUi, logErr } from "@/store/logs";
+import { useSession } from "./useSession";
 
 export function useLayers() {
   const [layers, setLayers] = useAtom(layersAtom);
   const [selectedLayers, setSelectedLayers] = useAtom(selectedLayersAtom);
-  const [layerIdCounter, setLayerIdCounter] = useAtom(layerIdCounterAtom);
   const [, setMasks] = useAtom(masksAtom);
   const [, setObjectMasks] = useAtom(objectMasksAtom);
   const [, setPerDetectionMasks] = useAtom(perDetectionMasksAtom);
   const [, setDetections] = useAtom(detectionsAtom);
   const [, setSelectedDetection] = useAtom(selectedDetectionAtom);
   const [sessionId] = useAtom(sessionIdAtom);
-  const [, setObjectUndoCounts] = useAtom(objectUndoCountsAtom);
-  const [, setObjectRedoCounts] = useAtom(objectRedoCountsAtom);
+
+  const { applyHistory } = useSession();
 
   const clearServerBrushObjects = useCallback(
     (oids: number[]) => {
       if (!sessionId || oids.length === 0) return;
+      emitUi("layer", "INFO", `Cleared ${oids.length} subject(s) on the server`);
       oids.forEach((oid) => {
-        api.clearObject(sessionId, oid).catch(() => {});
-      });
-      setObjectUndoCounts((prev) => {
-        const next = { ...prev };
-        oids.forEach((oid) => delete next[oid]);
-        return next;
-      });
-      setObjectRedoCounts((prev) => {
-        const next = { ...prev };
-        oids.forEach((oid) => delete next[oid]);
-        return next;
+        api
+          .clearObject(sessionId, oid)
+          .then((res) => applyHistory(res.objectHistory))
+          .catch((err) => logErr("subject", err));
       });
     },
-    [sessionId, setObjectUndoCounts, setObjectRedoCounts]
+    [sessionId, applyHistory]
   );
 
   const addLayer = useCallback(
     (layer: Omit<Layer, "id" | "createdAt">) => {
-      const id = `layer-${layerIdCounter + 1}`;
-      setLayerIdCounter((c) => c + 1);
-      setLayers((prev) => [
-        ...prev,
-        { ...layer, id, createdAt: Date.now() },
-      ]);
+      const id = nextLayerId(layers);
+      setLayers((prev) => [...prev, { ...layer, id, createdAt: Date.now() }]);
       return id;
     },
-    [layerIdCounter, setLayerIdCounter, setLayers]
+    [layers, setLayers]
   );
 
   const removeLayer = useCallback(
@@ -67,28 +62,10 @@ export function useLayers() {
       });
       if (removedLayer?.detectionIndex !== undefined) {
         const idx = removedLayer.detectionIndex;
-        setLayers((prev) => prev
-          .filter((l) => l.id !== id)
-          .map((l) => l.detectionIndex !== undefined && l.detectionIndex > idx
-            ? { ...l, detectionIndex: l.detectionIndex - 1 }
-            : l
-          )
-        );
-        setPerDetectionMasks((prev) => {
-          const next: Record<number, PackedMask> = {};
-          for (const [k, v] of Object.entries(prev)) {
-            const ki = Number(k);
-            if (ki < idx) next[ki] = v;
-            else if (ki > idx) next[ki - 1] = v;
-          }
-          return next;
-        });
+        setLayers((prev) => removeDetectionIndexFromLayers(prev, idx));
+        setPerDetectionMasks((prev) => removeDetectionMask(prev, idx));
         setDetections((prev) => prev.filter((_, i) => i !== idx));
-        setSelectedDetection((prev) => {
-          if (prev === idx) return null;
-          if (prev !== null && prev > idx) return prev - 1;
-          return prev;
-        });
+        setSelectedDetection((prev) => shiftSelectedDetection(prev, idx));
       } else {
         setLayers((prev) => prev.filter((l) => l.id !== id));
         const remainingBrush = layers.some((l) => l.type === "brush" && l.id !== id);
@@ -137,9 +114,8 @@ export function useLayers() {
   const syncDetectionLayers = useCallback(
     (dets: { label: string }[]) => {
       const base = layers.filter((l) => l.type !== "detection");
-      let counter = layerIdCounter;
       const detLayers: Layer[] = dets.map((d, i) => ({
-        id: `layer-${++counter}`,
+        id: nextLayerId(layers),
         type: "detection",
         label: `#${i + 1} ${d.label}`,
         preview: null,
@@ -147,10 +123,31 @@ export function useLayers() {
         detectionIndex: i,
         createdAt: Date.now(),
       }));
-      setLayerIdCounter(counter);
       setLayers([...base, ...detLayers]);
     },
-    [layers, layerIdCounter, setLayers, setLayerIdCounter]
+    [layers, setLayers]
+  );
+
+  const appendDetectionLayers = useCallback(
+    (dets: { label: string }[], offset: number) => {
+      const base = layers.filter((l) => l.type !== "detection");
+      const existing = layers.filter((l) => l.type === "detection");
+      const nextOffset = existing.length === 0 ? 0 : Math.max(offset, 0);
+      const detLayers: Layer[] = [];
+      for (let i = 0; i < dets.length; i++) {
+        detLayers.push({
+          id: nextLayerId(layers),
+          type: "detection",
+          label: `#${nextOffset + i + 1} ${dets[i].label}`,
+          preview: null,
+          objectId: 0,
+          detectionIndex: nextOffset + i,
+          createdAt: Date.now(),
+        });
+      }
+      setLayers([...base, ...existing, ...detLayers]);
+    },
+    [layers, setLayers]
   );
 
   return {
@@ -161,5 +158,6 @@ export function useLayers() {
     clearAllLayers,
     selectLayer,
     syncDetectionLayers,
+    appendDetectionLayers,
   };
 }

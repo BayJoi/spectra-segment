@@ -16,7 +16,6 @@ set "VENV_DIR=%ROOT%backend\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 set "MODELS_DIR=%ROOT%backend\model_weights"
 set "PY_VERSION=3.13.14"
-rem uv version is resolved to the latest stable GitHub release at download time
 
 echo(
 echo  +------------------------------------------------------------+

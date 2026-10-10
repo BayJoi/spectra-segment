@@ -10,9 +10,21 @@ import type { PackedMask } from "./mask";
 
 export const BASE = "http://localhost:8000";
 
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 interface RawPredictResponse {
   masks: string[];
   object_masks?: Record<string, string>;
+  object_history?: Record<string, { undo?: number; redo?: number; strokes?: number; has_mask?: boolean }>;
+  scores?: number[];
 }
 
 interface RawSam3PromptResponse {
@@ -40,7 +52,13 @@ async function toPredictResponse(r: RawPredictResponse): Promise<PredictResponse
   return {
     masks: await decodeMasks(r.masks),
     objectMasks: await decodeObjectMasks(r.object_masks),
+    objectHistory: r.object_history,
   };
+}
+
+export function resetToken(): void {
+  _token = null;
+  _tokenPromise = null;
 }
 
 let _token: string | null = null;
@@ -64,7 +82,7 @@ function getToken(): Promise<string> {
   return _tokenPromise;
 }
 
-async function apiFetch<T>(path: string, init?: RequestInit, asBlob?: boolean): Promise<T> {
+async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const doFetch = async (token: string) => {
     const headers = new Headers(init?.headers);
     headers.set("X-Local-Token", token);
@@ -73,16 +91,15 @@ async function apiFetch<T>(path: string, init?: RequestInit, asBlob?: boolean): 
 
   let res = await doFetch(await getToken());
   if (res.status === 401) {
-    _token = null;
-    _tokenPromise = null;
+    resetToken();
     res = await doFetch(await getToken());
   }
 
   if (!res.ok) {
     const body = (await res.text()).replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 500).trim();
-    throw new Error(`API ${res.status}: ${body || "(no response body)"}`);
+    throw new ApiError(res.status, `API ${res.status}: ${body || "(no response body)"}`);
   }
-  return (asBlob ? res.blob() : res.json()) as Promise<T>;
+  return res.json() as Promise<T>;
 }
 
 export const api = {
@@ -105,14 +122,27 @@ export const api = {
         navigator.sendBeacon(`${base}/release`, "release");
       } catch {}
     }
+    // The backend regenerates its token on every start, so a cached token can
+    // go stale. Refresh and retry rather than leaving a 401 behind.
     const token = _token;
-    if (token) {
-      fetch(`${base}`, {
-        method: "DELETE",
-        keepalive: true,
-        headers: { "X-Local-Token": token },
-      }).catch(() => {});
-    }
+    if (!token) return;
+    fetch(base, {
+      method: "DELETE",
+      keepalive: true,
+      headers: { "X-Local-Token": token },
+    })
+      .then((res) => {
+        if (res.status !== 401) return;
+        resetToken();
+        return getToken().then((fresh) =>
+          fetch(base, {
+            method: "DELETE",
+            keepalive: true,
+            headers: { "X-Local-Token": fresh },
+          })
+        );
+      })
+      .catch(() => {});
   },
 
   sessionHealth: async (sessionId: string): Promise<boolean> => {
@@ -137,13 +167,13 @@ export const api = {
 
     let res = await upload(await getToken());
     if (res.status === 401) {
-      _token = null;
+      resetToken();
       res = await upload(await getToken());
     }
 
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Upload failed: ${res.status} ${text}`);
+      const text = await res.text().then((t) => t.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 500).trim());
+      throw new ApiError(res.status, `Upload failed: ${res.status} ${text || "(no response body)"}`);
     }
     return res.json();
   },

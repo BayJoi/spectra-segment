@@ -9,22 +9,23 @@ import torch
 
 LOGGER = logging.getLogger(__name__)
 
-cudnn_toggle_lock = threading.Lock()
+MAX_THREADS = int(os.environ.get("SPECTRA_MAX_THREADS", "32"))
+
+_cudnn_toggle_lock = threading.Lock()
 
 
 def resolve_threads(env_var: str) -> int:
     raw = os.environ.get(env_var)
     if raw:
         try:
-            return max(1, int(raw))
+            return max(1, min(int(raw), MAX_THREADS))
         except ValueError:
-            LOGGER.warning("Ignoring invalid %s=%r", env_var, raw)
-    return max(1, min(os.cpu_count() or 4, 6))
+            LOGGER.warning("Invalid %s=%r — using default", env_var, raw)
+    return max(1, min(os.cpu_count() or 4, MAX_THREADS))
 
 
 @contextmanager
 def cpu_threads(threads: int | None):
-    """Temporarily set torch intra-op thread count, restoring the previous value."""
     if threads is None:
         yield
         return
@@ -38,12 +39,11 @@ def cpu_threads(threads: int | None):
 
 @contextmanager
 def cudnn_disabled():
-    """Process-wide exclusive cudnn disable, safe to nest across backends."""
     backend = getattr(torch.backends, "cudnn", None)
     if backend is None or not torch.cuda.is_available():
         yield
         return
-    with cudnn_toggle_lock:
+    with _cudnn_toggle_lock:
         prev = backend.enabled
         backend.enabled = False
         try:

@@ -1,6 +1,5 @@
 import { useCallback, useRef } from "react";
-import { useAtom } from "jotai";
-import {
+import { useAtom } from "jotai";import {
   sessionIdAtom,
   modelNameAtom,
   imageUrlAtom,
@@ -14,7 +13,13 @@ import {
   activeObjectIdAtom,
   objectUndoCountsAtom,
   objectRedoCountsAtom,
+  objectHistoryAtom,
+  subjectMetaAtom,
   brushPredictInFlightAtom,
+  type ObjectHistory,
+  subjectColor,
+  subjectName,
+  type ObjectHistoryEntry,
 } from "@/store/session";
 import { layersAtom, selectedLayersAtom } from "@/store/layers";
 import { detectionsAtom, selectedDetectionAtom } from "@/store/detection";
@@ -27,8 +32,24 @@ import {
   sam3InstancesAtom,
   selectedSam3InstanceAtom,
 } from "@/store/sam3";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { emitUi, logErr } from "@/store/logs";
 import { isSupportedImage, fitImageFile } from "@/lib/utils";
+
+const uploadGuardRef = { busy: false };
+const endGuardRef = { busy: false };
+const blobUrlRef: { current: string | null } = { current: null };
+const predictQueueMap = new Map<string, Promise<unknown>>();
+const deletedSubjects = new Set<number>();
+
+function queueFor(sessionId: string): Promise<unknown> {
+  let q = predictQueueMap.get(sessionId);
+  if (!q) {
+    q = Promise.resolve();
+    predictQueueMap.set(sessionId, q);
+  }
+  return q;
+}
 
 export function useSession() {
   const [sessionId, setSessionId] = useAtom(sessionIdAtom);
@@ -62,23 +83,82 @@ export function useSession() {
   const [, setBrushObjects] = useAtom(brushObjectsAtom);
   const [objectUndoCounts, setObjectUndoCounts] = useAtom(objectUndoCountsAtom);
   const [objectRedoCounts, setObjectRedoCounts] = useAtom(objectRedoCountsAtom);
+  const [, setObjectHistory] = useAtom(objectHistoryAtom);
+  const [, setSubjectMeta] = useAtom(subjectMetaAtom);
   const [predictInFlight, setPredictInFlight] = useAtom(brushPredictInFlightAtom);
-  const predictQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  const uploadGuard = uploadGuardRef;
+  const endGuard = endGuardRef;
+  const blobUrlGuard = blobUrlRef;
   const activeObjectIdRef = useRef(activeObjectId);
   activeObjectIdRef.current = activeObjectId;
   const objectUndoCountsRef = useRef(objectUndoCounts);
   objectUndoCountsRef.current = objectUndoCounts;
   const objectRedoCountsRef = useRef(objectRedoCounts);
   objectRedoCountsRef.current = objectRedoCounts;
-  const endingRef = useRef(false);
+
+  const syncSubjects = useCallback(
+    (history?: Record<string, Partial<ObjectHistoryEntry>>) => {
+      setSubjectMeta((prev) => {
+        const next = { ...prev };
+        for (const k of Object.keys(history ?? {})) {
+          const oid = Number(k);
+          if (!Number.isFinite(oid) || next[oid]) continue;
+          // A subject the user deleted must not be re-created by a late or
+          // out-of-order server response.
+          if (deletedSubjects.has(oid)) continue;
+          next[oid] = { id: oid, name: subjectName(oid), color: subjectColor(oid) };
+        }
+        return next;
+      });
+    },
+    [setSubjectMeta]
+  );
+
+  const forgetSubject = useCallback((oid: number) => {
+    deletedSubjects.add(oid);
+  }, []);
+
+  const applyHistory = useCallback(
+    (history?: Record<string, Partial<ObjectHistoryEntry>>) => {
+      if (!history) return;
+      const nextUndo: Record<number, number> = {};
+      const nextRedo: Record<number, number> = {};
+      const nextHist: Record<number, ObjectHistory> = {};
+      for (const [k, v] of Object.entries(history)) {
+        const oid = Number(k);
+        if (!Number.isFinite(oid)) continue;
+        const undo = v.undo ?? 0;
+        const redo = v.redo ?? 0;
+        nextHist[oid] = {
+          undo,
+          redo,
+          strokes: v.strokes ?? undo,
+          has_mask: !!v.has_mask,
+        };
+        nextUndo[oid] = undo;
+        nextRedo[oid] = redo;
+      }
+      setObjectHistory(nextHist);
+      setObjectUndoCounts(nextUndo);
+      setObjectRedoCounts(nextRedo);
+      syncSubjects(history);
+    },
+    [setObjectHistory, setObjectUndoCounts, setObjectRedoCounts, syncSubjects]
+  );
 
   const resetUndoRedoState = useCallback(() => {
     setObjectUndoCounts({});
     setObjectRedoCounts({});
+    setObjectHistory({});
     setObjectMasks({});
     setBrushObjects([0]);
     setActiveObjectId(0);
-  }, [setObjectUndoCounts, setObjectRedoCounts, setObjectMasks, setBrushObjects, setActiveObjectId]);
+    setSubjectMeta({ 0: { id: 0, name: subjectName(0), color: subjectColor(0) } });
+  }, [
+    setObjectUndoCounts, setObjectRedoCounts, setObjectHistory, setObjectMasks,
+    setBrushObjects, setActiveObjectId, setSubjectMeta,
+  ]);
 
   const sam3ModeRef = useRef(sam3Mode);
   sam3ModeRef.current = sam3Mode;
@@ -86,7 +166,6 @@ export function useSession() {
   modelNameRef.current = modelName;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
-  const uploadingRef = useRef(false);
 
   const createSession = useCallback(
     async (model: string, fileToReUpload?: File | null) => {
@@ -102,23 +181,28 @@ export function useSession() {
             setImageWidth(uploadRes.width);
             setImageHeight(uploadRes.height);
           } catch (err) {
-            console.error("Re-upload failed:", err);
+            logErr("session", err);
+            emitUi("upload", "ERROR", "Image re-upload failed");
           } finally {
             setImageEncoding(false);
           }
         }
       } catch (err) {
-        console.error("Failed to create session:", err);
+        logErr("session", err);
+        emitUi("session", "ERROR", "Could not create session");
       }
     },
     [setSessionId, setModelName, setImageWidth, setImageHeight, setImageEncoding]
   );
 
-  const previousBlobUrlRef = useRef<string | null>(null);
+  const previousBlobUrlRef = blobUrlGuard;
 
   const uploadImage = useCallback(
     async (file: File) => {
-      if (uploadingRef.current) return;
+      if (uploadGuard.busy) {
+        emitUi("upload", "WARNING", "Upload ignored — an upload is already running");
+        return;
+      }
       if (!isSupportedImage(file)) {
         const dot = file.name.lastIndexOf(".");
         setUnsupportedFile({
@@ -127,17 +211,21 @@ export function useSession() {
         });
         return;
       }
-      uploadingRef.current = true;
+      uploadGuard.busy = true;
       let launched = false;
       try {
         let sid = sessionId;
         if (!sid) {
           const activeModel = modelNameRef.current;
-          if (!activeModel) return;
+          if (!activeModel) {
+            emitUi("upload", "WARNING", "Upload dropped — no model selected yet");
+            return;
+          }
           try {
             const res = await api.createSession(activeModel);
             if (modelNameRef.current !== activeModel) {
               api.destroySession(res.session_id).catch(() => {});
+              emitUi("upload", "WARNING", "Upload dropped — model changed mid-flight");
               return;
             }
             sessionIdRef.current = res.session_id;
@@ -145,7 +233,8 @@ export function useSession() {
             setModelName(res.model_name);
             sid = res.session_id;
           } catch (err) {
-            console.error("Failed to create session:", err);
+            logErr("session", err);
+            emitUi("session", "ERROR", "Could not create session for upload");
             return;
           }
         }
@@ -178,18 +267,22 @@ export function useSession() {
           .then((res) => {
             setImageWidth(res.width);
             setImageHeight(res.height);
+            if (resized) {
+              emitUi("upload", "INFO", `Image resized to ${res.width}x${res.height} before upload`);
+            }
             if (!sam3ModeRef.current) setModeDialogOpen(true);
           })
           .catch((err) => {
-            console.error("Upload failed:", err);
+            logErr("upload", err);
+            pushToast("Upload failed — check the console");
           })
           .finally(() => {
             setImageEncoding(false);
             setEncodingMessage(null);
-            uploadingRef.current = false;
+            uploadGuard.busy = false;
           });
       } finally {
-        if (!launched) uploadingRef.current = false;
+        if (!launched) uploadGuard.busy = false;
       }
     },
     [sessionId, sam3Mode, setSessionId, setModelName, setImageUrl, setImageFile, setMasks, setLayers, setImageWidth, setImageHeight, setImageEncoding, setEncodingMessage, setModeLock, setModeDialogOpen, setDetections, setSelectedDetection, setSelectedLayers, setShowTransparent, setHideBboxes, setSam3Prompts, setSam3RedoStack, resetUndoRedoState, setUnsupportedFile]
@@ -205,7 +298,10 @@ export function useSession() {
       setSam3Instances([]);
       setSelectedSam3Instance(null);
       if (sessionId) {
-        await api.destroySession(sessionId).catch(() => {});
+        await api
+          .destroySession(sessionId)
+          .then(() => emitUi("session", "INFO", `Session ended for ${modelName}`))
+          .catch((err) => logErr("session", err));
       }
       setMasks([]);
       setPerDetectionMasks({});
@@ -214,17 +310,24 @@ export function useSession() {
       setSelectedDetection(null);
       setSelectedLayers(new Set<string>());
       setHideBboxes(false);
+      emitUi("mode", "INFO", `Switching model to ${model}`);
       await createSession(model, imageFile);
     },
     [sessionId, modelName, imageFile, createSession, setMasks, setPerDetectionMasks, setLayers, setDetections, setSelectedDetection, setSelectedLayers, setHideBboxes, resetUndoRedoState, setSam3Prompts, setSam3RedoStack, setSam3Prompting, setSam3Instances, setSelectedSam3Instance]
   );
 
   const endSession = useCallback(async () => {
-    if (endingRef.current) return;
-    endingRef.current = true;
+    if (endGuard.busy) return;
+    endGuard.busy = true;
     try {
       if (sessionId) {
-        await api.destroySession(sessionId).catch(() => {});
+        await api
+          .destroySession(sessionId)
+          .then(() => emitUi("session", "INFO", "Session ended"))
+          .catch((err) => {
+            logErr("session", err);
+            pushToast("Failed to end session");
+          });
       }
       if (previousBlobUrlRef.current) {
         URL.revokeObjectURL(previousBlobUrlRef.current);
@@ -254,7 +357,7 @@ export function useSession() {
       setSelectedSam3Instance(null);
       resetUndoRedoState();
     } finally {
-      endingRef.current = false;
+      endGuard.busy = false;
     }
   }, [
     sessionId, setSessionId, setModelName, setImageUrl, setImageFile,
@@ -268,6 +371,7 @@ export function useSession() {
   const recoverSession = useCallback(async () => {
     if (!sessionId) return;
     if (await api.sessionHealth(sessionId)) return;
+    emitUi("session", "WARNING", "Session expired on the server — recovering");
     await createSession(modelName, imageFile);
   }, [sessionId, modelName, imageFile, createSession]);
 
@@ -275,6 +379,7 @@ export function useSession() {
     (params: { object_id?: number; points?: number[][]; labels?: number[]; bboxes?: number[] }) => {
       if (!sessionIdRef.current) return Promise.resolve(null);
       const oid = params.object_id ?? activeObjectIdRef.current;
+      const sid = sessionIdRef.current;
       setPredictInFlight((c) => c + 1);
       const run = async () => {
         try {
@@ -283,58 +388,83 @@ export function useSession() {
           const res = await api.predict(sid, { ...params, object_id: oid });
           setMasks(res.masks);
           setObjectMasks(res.objectMasks ?? {});
-          if (params.points?.length || params.bboxes?.length) {
-            setObjectUndoCounts((prev) => ({ ...prev, [oid]: (prev[oid] ?? 0) + 1 }));
-            setObjectRedoCounts((prev) => ({ ...prev, [oid]: 0 }));
-          }
+          applyHistory(res.objectHistory);
           return res;
         } catch (err) {
-          console.error("Prediction failed:", err);
-          pushToast("Prediction failed — recovering session");
-          await recoverSession();
+          logErr("brush", err);
+          if (err instanceof ApiError && (err.status === 404 || err.status === 400)) {
+            pushToast("Session expired — recovering");
+            await recoverSession();
+          } else {
+            pushToast("Prediction failed");
+          }
           return null;
         } finally {
           setPredictInFlight((c) => c - 1);
         }
       };
-      const next = predictQueueRef.current.then(run, run);
-      predictQueueRef.current = next.catch(() => {});
+      const next = queueFor(sid).then(run);
+      predictQueueMap.set(sid, next.catch(() => {}));
       return next;
     },
-    [setMasks, setObjectMasks, recoverSession, setPredictInFlight, setObjectUndoCounts, setObjectRedoCounts]
+    [setMasks, setObjectMasks, recoverSession, setPredictInFlight, applyHistory]
   );
 
   const undo = useCallback(async () => {
     if (!sessionId) return;
-    if (predictInFlight !== 0) return;
+    if (predictInFlight !== 0) {
+      emitUi("brush", "WARNING", "Undo ignored — a prediction is still running");
+      return;
+    }
     const oid = activeObjectIdRef.current;
     if ((objectUndoCountsRef.current[oid] ?? 0) <= 0) return;
     try {
       const res = await api.undo(sessionId, oid);
+      emitUi("brush", "INFO", `Undid a stroke on Subject ${oid + 1}`);
       setMasks(res.masks);
       setObjectMasks(res.objectMasks ?? {});
-      setObjectUndoCounts((prev) => ({ ...prev, [oid]: Math.max(0, (prev[oid] ?? 0) - 1) }));
-      setObjectRedoCounts((prev) => ({ ...prev, [oid]: (prev[oid] ?? 0) + 1 }));
-    } catch {
-      await recoverSession();
+      applyHistory(res.objectHistory);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        applyHistory({ [oid]: { undo: 0, redo: 0, strokes: 0, has_mask: false } });
+        pushToast("Nothing left to undo for this subject");
+        return;
+      }
+      if (err instanceof ApiError && err.status === 404) {
+        await recoverSession();
+        return;
+      }
+      pushToast("Undo failed");
     }
-  }, [sessionId, predictInFlight, setMasks, setObjectMasks, recoverSession, setObjectUndoCounts, setObjectRedoCounts]);
+  }, [sessionId, predictInFlight, setMasks, setObjectMasks, recoverSession, applyHistory]);
 
   const redo = useCallback(async () => {
     if (!sessionId) return;
-    if (predictInFlight !== 0) return;
+    if (predictInFlight !== 0) {
+      emitUi("brush", "WARNING", "Redo ignored — a prediction is still running");
+      return;
+    }
     const oid = activeObjectIdRef.current;
     if ((objectRedoCountsRef.current[oid] ?? 0) <= 0) return;
     try {
       const res = await api.redo(sessionId, oid);
+      emitUi("brush", "INFO", `Redid a stroke on Subject ${oid + 1}`);
       setMasks(res.masks);
       setObjectMasks(res.objectMasks ?? {});
-      setObjectRedoCounts((prev) => ({ ...prev, [oid]: Math.max(0, (prev[oid] ?? 0) - 1) }));
-      setObjectUndoCounts((prev) => ({ ...prev, [oid]: (prev[oid] ?? 0) + 1 }));
-    } catch {
-      await recoverSession();
+      applyHistory(res.objectHistory);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        applyHistory({ [oid]: { undo: 0, redo: 0, strokes: 0, has_mask: false } });
+        pushToast("Nothing left to redo for this subject");
+        return;
+      }
+      if (err instanceof ApiError && err.status === 404) {
+        await recoverSession();
+        return;
+      }
+      pushToast("Redo failed");
     }
-  }, [sessionId, predictInFlight, setMasks, setObjectMasks, recoverSession, setObjectRedoCounts, setObjectUndoCounts]);
+  }, [sessionId, predictInFlight, setMasks, setObjectMasks, recoverSession, applyHistory]);
 
   const clearObjectHistory = useCallback(async (objectId: number = 0) => {
     if (sessionId) {
@@ -342,19 +472,15 @@ export function useSession() {
         const res = await api.clearObject(sessionId, objectId);
         setMasks(res.masks);
         setObjectMasks(res.objectMasks ?? {});
-      } catch {}
+        applyHistory(res.objectHistory);
+        return;
+      } catch (err) {
+        logErr("subject", err);
+        pushToast("Could not clear that subject on the server");
+      }
     }
-    setObjectUndoCounts((prev) => {
-      const next = { ...prev };
-      delete next[objectId];
-      return next;
-    });
-    setObjectRedoCounts((prev) => {
-      const next = { ...prev };
-      delete next[objectId];
-      return next;
-    });
-  }, [sessionId, setMasks, setObjectMasks, setObjectUndoCounts, setObjectRedoCounts]);
+    applyHistory({ [objectId]: { undo: 0, redo: 0, strokes: 0, has_mask: false } });
+  }, [sessionId, setMasks, setObjectMasks, applyHistory]);
 
   return {
     sessionId,
@@ -369,5 +495,7 @@ export function useSession() {
     canUndo: (objectUndoCounts[activeObjectId] ?? 0) > 0,
     canRedo: (objectRedoCounts[activeObjectId] ?? 0) > 0,
     clearObjectHistory,
+    applyHistory,
+    forgetSubject,
   };
 }

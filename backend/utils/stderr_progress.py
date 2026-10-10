@@ -7,6 +7,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class StderrInterceptor:
+
     _MAX_BUF = 4096
     _MIN_PCT_STEP = 5
 
@@ -16,10 +17,57 @@ class StderrInterceptor:
         self._last_pct = -5
         self._last_desc: str | None = None
 
-    def write(self, data: str) -> None:
+    def write(self, data) -> int:
+        if not isinstance(data, str):
+            try:
+                data = data.decode("utf-8", "replace")
+            except Exception:
+                return 0
         self._buf += data
         self._drain()
         if len(self._buf) > self._MAX_BUF:
+            self._buf = ""
+        return len(data)
+
+    def writelines(self, lines) -> None:
+        for line in lines:
+            self.write(line)
+
+    def read(self, *a, **kw):
+        return ""
+
+    def readline(self, *a, **kw):
+        return ""
+
+    def readable(self) -> bool:
+        return False
+
+    def isatty(self) -> bool:
+        return False
+
+    @property
+    def encoding(self) -> str:
+        return "utf-8"
+
+    @property
+    def errors(self) -> str:
+        return "replace"
+
+    def fileno(self) -> int:
+        raise OSError("StderrInterceptor has no file descriptor")
+
+    def seek(self, *a, **kw):
+        return 0
+
+    def tell(self) -> int:
+        return 0
+
+    def seekable(self) -> bool:
+        return False
+
+    def flush(self) -> None:
+        if self._buf.strip():
+            self._handle(self._buf)
             self._buf = ""
 
     def _drain(self) -> None:
@@ -57,8 +105,3 @@ class StderrInterceptor:
             LOGGER.info("%s: %s %d%% complete", self._model or "HF", desc, pct)
         else:
             LOGGER.info("%s: %d%% complete", self._model or "HF", pct)
-
-    def flush(self) -> None:
-        if self._buf.strip():
-            self._handle(self._buf)
-            self._buf = ""

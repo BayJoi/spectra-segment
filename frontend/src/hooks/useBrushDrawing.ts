@@ -19,7 +19,8 @@ export function useBrushDrawing(
   zoomRef: React.MutableRefObject<number>,
   panRef: React.MutableRefObject<{ x: number; y: number }>,
   computeState: ComputeStateFn,
-  brushSize: number
+  brushSize: number,
+  activeSubjectColor: string = "#f97316"
 ) {
   const isDrawingRef = useRef(false);
   const strokePointsRef = useRef<StrokePoint[]>([]);
@@ -38,7 +39,7 @@ export function useBrushDrawing(
       const state = computeState(zoomRef.current, panRef.current.x, panRef.current.y);
       const m = activeStrokeModeRef.current;
       ctx.beginPath();
-      ctx.strokeStyle = m === "positive" ? "#00ff88" : "#ff4444";
+      ctx.strokeStyle = m === "positive" ? activeSubjectColor : "#ff4444";
       ctx.lineWidth = Math.max(1, brushSize * state.scale);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";

@@ -48,11 +48,12 @@ export function ModeDialog() {
                 </div>
                 <h3 className="text-sm font-semibold text-neutral-200 font-sans mb-1 group-hover:text-orange-200 transition-colors">Brush</h3>
                 <p className="text-[11px] text-neutral-500 font-sans leading-relaxed">
-                  Paint strokes to mark regions. Green to keep, red to remove. Best for precise, hand-drawn selections.
+                  Paint strokes to mark regions. Left-drag adds, right-drag subtracts.
+                  Each subject keeps its own colour. Best for precise, hand-drawn selections.
                 </p>
                 <div className="mt-3 flex items-center gap-1.5 text-[10px] text-neutral-600 font-mono">
-                  <kbd className="px-1.5 py-0.5 bg-neutral-800/80 border border-neutral-700/50 rounded text-neutral-400">B</kbd>
-                  <span>brush</span>
+                  <kbd className="px-1.5 py-0.5 bg-neutral-800/80 border border-neutral-700/50 rounded text-neutral-400">click</kbd>
+                  <span>to start</span>
                 </div>
               </button>
 
@@ -68,11 +69,12 @@ export function ModeDialog() {
                 </div>
                 <h3 className="text-sm font-semibold text-neutral-200 font-sans mb-1 group-hover:text-green-200 transition-colors">Detect</h3>
                 <p className="text-[11px] text-neutral-500 font-sans leading-relaxed">
-                  Type what to find and AI detects it automatically. Works best with common objects.
+                  Type what to find and the detector boxes it automatically.
+                  Results accumulate, so you can find several things in one image.
                 </p>
                 <div className="mt-3 flex items-center gap-1.5 text-[10px] text-neutral-600 font-mono">
-                  <kbd className="px-1.5 py-0.5 bg-neutral-800/80 border border-neutral-700/50 rounded text-neutral-400">D</kbd>
-                  <span>detect</span>
+                  <kbd className="px-1.5 py-0.5 bg-neutral-800/80 border border-neutral-700/50 rounded text-neutral-400">click</kbd>
+                  <span>to start</span>
                 </div>
               </button>
             </div>

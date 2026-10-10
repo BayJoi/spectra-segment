@@ -72,6 +72,7 @@ sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.models.manager import ModelManager
 from backend.utils.compositing import mask_to_png_b64
 from backend.utils.device import detect_device
+from backend.utils.humantime import format_duration
 from backend.utils.security import (
     HostValidationMiddleware,
     MAX_UPLOAD_BYTES,
@@ -87,20 +88,42 @@ from PIL import Image, ImageOps
 _log_dir = Path(__file__).resolve().parent / "logs"
 os.makedirs(_log_dir, exist_ok=True)
 
-HF_HUB_CACHE_DIR = MODEL_WEIGHTS_DIR / "hf_cache" / "hub"
-_file_handler = RotatingFileHandler(_log_dir / "backend.log", maxBytes=10*1024*1024, backupCount=3, encoding="utf-8")
+from backend.utils import logctx
+
+_file_handler = RotatingFileHandler(
+    _log_dir / "backend.log",
+    maxBytes=int(os.environ.get("SPECTRA_LOG_MAX_MB", "10")) * 1024 * 1024,
+    backupCount=int(os.environ.get("SPECTRA_LOG_BACKUPS", "3")),
+    encoding="utf-8",
+)
 _file_handler.setLevel(logging.DEBUG)
-_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] rid=%(rid)s sid=%(sid)s %(name)s: %(message)s"
+))
 logging.root.setLevel(logging.DEBUG)
 logging.root.addHandler(_file_handler)
 
 LOGGER = logging.getLogger(__name__)
 
-_log_buffer: deque[dict[str, str]] = deque(maxlen=300)
+_log_buffer: deque[dict[str, Any]] = deque(maxlen=300)
+
+
+class _CtxFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.rid = logctx.rid()
+        record.sid = logctx.sid()
+        return True
+
+
+_ctx_filter = _CtxFilter()
+_file_handler.addFilter(_ctx_filter)
 
 _log_subscribers: list[asyncio.Queue[dict[str, str] | None]] = []
 _sub_lock = threading.Lock()
 MAX_SSE_SUBSCRIBERS = 100
+MAX_SSE_PER_IP = 5
+MAX_SSE_LIFETIME_SECONDS = 1800
+_sse_clients: dict[str, int] = {}
 
 
 _ANSI_ESC_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -122,24 +145,33 @@ def _clean_message(msg: str) -> str:
 
 
 class _BufferHandler(logging.Handler):
-    _in_emit = False
+    _local = threading.local()
 
     def emit(self, record: logging.LogRecord) -> None:
-        if _BufferHandler._in_emit:
+        if getattr(_BufferHandler._local, "in_emit", False):
             return
-        _BufferHandler._in_emit = True
+        _BufferHandler._local.in_emit = True
         try:
             msg = _clean_message(record.getMessage())
             if not msg:
                 return
-            entry = {
+            entry: dict[str, Any] = {
                 "level": record.levelname,
                 "message": msg,
                 "ts": time.strftime("%H:%M:%S"),
+                "rid": getattr(record, "rid", "-"),
+                "sid": getattr(record, "sid", "-"),
             }
+            for key in ("model", "detector", "phase", "dur_ms"):
+                val = getattr(record, key, None)
+                if val is not None:
+                    entry[key] = val
             dl = getattr(record, "dl", None)
             if isinstance(dl, dict):
-                entry.update(dl)
+                for k, v in dl.items():
+                    if k in ("level", "message", "ts"):
+                        continue
+                    entry[k] = v
                 entry["level"] = "DOWNLOAD"
             else:
                 for rx in _DOWNLOAD_RES:
@@ -162,13 +194,34 @@ class _BufferHandler(logging.Handler):
         except Exception:
             LOGGER.error("_BufferHandler.emit() failed", exc_info=True)
         finally:
-            _BufferHandler._in_emit = False
+            _BufferHandler._local.in_emit = False
 
 
 _buf_handler = _BufferHandler()
 _ui_level_name = os.environ.get("SPECTRA_UI_LOG_LEVEL", "INFO").upper()
 _buf_handler.setLevel(getattr(logging, _ui_level_name, logging.INFO))
+_buf_handler.addFilter(_ctx_filter)
 logging.root.addHandler(_buf_handler)
+
+
+def _quiet_third_party() -> None:
+    levels = {
+        "ultralytics": "WARNING",
+        "transformers": "WARNING",
+        "huggingface_hub": "ERROR",
+        "huggingface_hub.utils": "ERROR",
+        "urllib3": "WARNING",
+        "fsspec": "WARNING",
+        "matplotlib": "WARNING",
+        "sentence_transformers": "WARNING",
+        "PIL": "WARNING",
+        "asyncio": "WARNING",
+    }
+    for name, lvl in levels.items():
+        logging.getLogger(name).setLevel(getattr(logging, lvl, logging.WARNING))
+
+
+_quiet_third_party()
 
 manager: ModelManager | None = None
 local_token: str = ""
@@ -293,6 +346,10 @@ async def lifespan(app: FastAPI):
             cap = min(float(vram_cap), 0.95)
             if cap > 0.0:
                 _torch.cuda.set_per_process_memory_fraction(cap)
+                LOGGER.info(
+                    "VRAM: hard cap set to %.0f%% of device memory", cap * 100,
+                    extra={"phase": "vram", "reason": "hard-cap"},
+                )
         except Exception as e:
             LOGGER.warning("Could not set VRAM hard cap: %s", e)
 
@@ -395,7 +452,24 @@ async def _maybe_flush_cache() -> None:
 
 @app.exception_handler(_torch.OutOfMemoryError)
 async def _handle_vram_oom(request: Request, exc: _torch.OutOfMemoryError):
-    LOGGER.error("VRAM out of memory (cap active): %s", exc)
+    free_mb = total_mb = None
+    if _torch.cuda.is_available():
+        try:
+            free, total = _torch.cuda.mem_get_info()
+            free_mb = free / (1024 * 1024)
+            total_mb = total / (1024 * 1024)
+        except Exception:
+            pass
+    LOGGER.error(
+        "VRAM out of memory (cap active)%s: %s",
+        (
+            f" — free {free_mb:.0f} MB / total {total_mb:.0f} MB"
+            if free_mb is not None and total_mb is not None
+            else ""
+        ),
+        exc,
+        extra={"phase": "vram", "reason": "oom"},
+    )
     return JSONResponse(status_code=507, content={"detail": VRAM_OOM_DETAIL})
 
 
@@ -427,8 +501,43 @@ class StrokeRequest(BaseModel):
     @field_validator("points")
     @classmethod
     def validate_points(cls, v):
-        if v is not None and len(v) > 10000:
-            raise ValueError("Too many points (max 10000)")
+        if v is not None:
+            if len(v) > 10000:
+                raise ValueError("Too many points (max 10000)")
+            for p in v:
+                if len(p) != 2:
+                    raise ValueError("Each point must be [x, y]")
+                if not all(-10_000 <= c <= 10_000 for c in p):
+                    raise ValueError("Point coordinates are out of range")
+        return v
+
+    @field_validator("labels")
+    @classmethod
+    def validate_labels(cls, v):
+        if v is not None:
+            if len(v) > 10000:
+                raise ValueError("Too many labels (max 10000)")
+            if not all(lb in (0, 1) for lb in v):
+                raise ValueError("labels must be 0 (negative) or 1 (positive)")
+        return v
+
+    @field_validator("bboxes")
+    @classmethod
+    def validate_bboxes(cls, v):
+        if v is not None:
+            if len(v) != 4:
+                raise ValueError("bboxes must be [x1, y1, x2, y2]")
+            if not all(-10_000 <= c <= 10_000 for c in v):
+                raise ValueError("bbox coordinates are out of range")
+            if v[2] < v[0] or v[3] < v[1]:
+                raise ValueError("bbox must be [x1, y1, x2, y2] with x2>=x1 and y2>=y1")
+        return v
+
+    @field_validator("object_id")
+    @classmethod
+    def validate_object_id(cls, v):
+        if v < 0 or v > 1_000_000:
+            raise ValueError("object_id out of range")
         return v
 
 
@@ -436,6 +545,7 @@ class PredictResponse(BaseModel):
     masks: list[str]
     scores: list[float]
     object_masks: dict[str, str] = {}
+    object_history: dict[str, dict[str, int]] = {}
 
 
 class ExportZipFileItem(BaseModel):
@@ -471,6 +581,40 @@ class ExportZipRequest(BaseModel):
         if len(v) > 200:
             raise ValueError("root must be 0-200 characters")
         return v
+
+    @field_validator("files")
+    @classmethod
+    def validate_files(cls, v):
+        if len(v) > 1000:
+            raise ValueError("files must contain at most 1000 masks")
+        return v
+
+    @field_validator("format")
+    @classmethod
+    def validate_format(cls, v):
+        return _validate_export_format(v)
+
+    @field_validator("feather_radius")
+    @classmethod
+    def validate_feather(cls, v):
+        if not 0 <= v <= 50:
+            raise ValueError("Feather radius must be 0-50")
+        return v
+
+    @field_validator("background_color")
+    @classmethod
+    def validate_bg_color(cls, v):
+        if v is not None:
+            if len(v) != 3 or not all(0 <= c <= 255 for c in v):
+                raise ValueError("background_color must be [R, G, B] with values 0-255")
+        return v
+
+
+class ExportImageRequest(BaseModel):
+    files: list[ExportZipFileItem] = []
+    format: str = "png"
+    background_color: list[int] | None = None
+    feather_radius: int = 3
 
     @field_validator("files")
     @classmethod
@@ -604,21 +748,29 @@ async def health():
 
 @app.get("/api/logs")
 async def get_logs(limit: int = 300):
-    entries = list(_log_buffer)[-limit:]
+    limit = max(0, min(int(limit), len(_log_buffer)))
+    entries = list(_log_buffer)[-limit:] if limit else []
     return {"entries": entries, "total": len(_log_buffer)}
 
 
 @app.get("/api/logs/stream")
 async def stream_logs(request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    if _sse_clients.get(client_ip, 0) >= MAX_SSE_PER_IP:
+        raise HTTPException(429, "Too many SSE connections from this client")
     q: asyncio.Queue[dict[str, str] | None] = asyncio.Queue(maxsize=128)
     with _sub_lock:
         if len(_log_subscribers) >= MAX_SSE_SUBSCRIBERS:
             raise HTTPException(503, "Too many SSE subscribers")
         _log_subscribers.append(q)
+        _sse_clients[client_ip] = _sse_clients.get(client_ip, 0) + 1
+    deadline = time.monotonic() + MAX_SSE_LIFETIME_SECONDS
 
     async def event_generator():
         try:
             while True:
+                if time.monotonic() > deadline:
+                    break
                 try:
                     entry = await asyncio.wait_for(q.get(), timeout=30)
                     if entry is None:
@@ -630,6 +782,9 @@ async def stream_logs(request: Request):
             with _sub_lock:
                 if q in _log_subscribers:
                     _log_subscribers.remove(q)
+                _sse_clients[client_ip] = max(0, _sse_clients.get(client_ip, 1) - 1)
+                if not _sse_clients.get(client_ip):
+                    _sse_clients.pop(client_ip, None)
 
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     origin = request.headers.get("origin")
@@ -771,7 +926,15 @@ async def get_token():
 
 @app.post("/api/sessions", response_model=CreateSessionResponse)
 async def create_session(req: CreateSessionRequest):
-    session = await asyncio.to_thread(get_manager().create_session, req.model_name)
+    try:
+        session = await asyncio.to_thread(get_manager().create_session, req.model_name)
+    except RuntimeError as e:
+        raise HTTPException(429, str(e))
+    LOGGER.info(
+        "Session %s created with %s", session.session_id, session.model_name,
+        extra={"phase": "session", "model": session.model_name,
+               "sid": session.session_id},
+    )
     return CreateSessionResponse(
         session_id=session.session_id,
         model_name=session.model_name,
@@ -780,7 +943,7 @@ async def create_session(req: CreateSessionRequest):
 
 @app.get("/api/sessions/{session_id}")
 async def get_session(session_id: str):
-    info = get_manager().get_session_info(session_id)
+    info = await asyncio.to_thread(get_manager().get_session_info, session_id)
     if info is None:
         raise HTTPException(404, "Session not found")
     return info
@@ -788,18 +951,27 @@ async def get_session(session_id: str):
 
 @app.delete("/api/sessions/{session_id}")
 async def destroy_session(session_id: str):
-    get_manager().destroy_session(session_id)
+    await asyncio.to_thread(get_manager().destroy_session, session_id)
+    LOGGER.info(
+        "Session %s destroyed", session_id,
+        extra={"phase": "session", "sid": session_id},
+    )
     return {"status": "destroyed"}
 
 
 @app.post("/api/sessions/{session_id}/release")
 async def release_session(session_id: str):
     get_manager().destroy_session(session_id)
+    LOGGER.info(
+        "Session %s released", session_id,
+        extra={"phase": "session", "sid": session_id},
+    )
     return {"status": "destroyed"}
 
 
 @app.post("/api/sessions/{session_id}/image")
 async def upload_image(session_id: str, file: UploadFile = File(...)):
+    logctx.set_session(session_id)
     session = get_manager().get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -820,15 +992,31 @@ async def upload_image(session_id: str, file: UploadFile = File(...)):
         )
 
     if not _validate_image_magic(raw):
+        LOGGER.warning(
+            "Upload rejected: not a valid image (magic bytes check failed)",
+            extra={"phase": "upload", "sid": session_id},
+        )
         raise HTTPException(400, "File is not a valid image (magic bytes check failed)")
 
+    t_decode = time.time()
     image = _decode_image(raw)
     if image is None:
+        LOGGER.warning(
+            "Upload rejected: image could not be decoded or exceeds the ceiling",
+            extra={"phase": "upload", "sid": session_id},
+        )
         raise HTTPException(400, "Failed to decode image")
 
-
-
     image_id = _sanitize_filename(file.filename or "upload")
+    LOGGER.info(
+        "Upload accepted: %s (%dx%d), decoding took %s",
+        extension.upper() or "image", image.shape[1], image.shape[0],
+        format_duration(time.time() - t_decode),
+        extra={
+            "phase": "upload", "sid": session_id,
+            "dur_ms": int((time.time() - t_decode) * 1000),
+        },
+    )
     await asyncio.to_thread(get_manager().load_image, session_id, image, image_id)
 
     return {
@@ -889,7 +1077,21 @@ def _masks_to_predict_response(result: dict) -> PredictResponse:
         masks=_masks_to_png_list(masks),
         scores=list(scores),
         object_masks=_masks_to_png_dict(result.get("object_masks")),
+        object_history=result.get("object_history") or {},
     )
+
+
+def _masks_positional_png_list(masks: Any) -> list[str | None]:
+    if masks is None:
+        return []
+    out: list[str | None] = []
+    for m in masks:
+        arr = np.asarray(m)
+        if arr.size == 0:
+            out.append(None)
+            continue
+        out.append(mask_to_png_b64(arr))
+    return out
 
 
 def _masks_to_png_dict(masks: Any) -> dict[str, str]:
@@ -940,14 +1142,17 @@ async def segment_batch(session_id: str, req: SegmentBatchRequest):
         LOGGER.exception("Batch segmentation failed for session %s", session_id)
         raise HTTPException(500, "Batch segmentation failed")
     await _maybe_flush_cache()
-    return {"masks": _masks_to_png_list(masks)}
+    return {"masks": _masks_positional_png_list(masks)}
 
 
 @app.post("/api/sessions/{session_id}/undo", response_model=PredictResponse)
 async def undo_stroke(session_id: str, object_id: int = 0):
     result = await asyncio.to_thread(get_manager().undo, session_id, object_id)
     if result is None:
-        raise HTTPException(404, "Nothing to undo")
+        exists = await asyncio.to_thread(get_manager().session_exists, session_id)
+        if not exists:
+            raise HTTPException(404, "Session not found")
+        raise HTTPException(409, "Nothing to undo for this subject")
     return _masks_to_predict_response(result)
 
 
@@ -955,7 +1160,10 @@ async def undo_stroke(session_id: str, object_id: int = 0):
 async def redo_stroke(session_id: str, object_id: int = 0):
     result = await asyncio.to_thread(get_manager().redo, session_id, object_id)
     if result is None:
-        raise HTTPException(404, "Nothing to redo")
+        exists = await asyncio.to_thread(get_manager().session_exists, session_id)
+        if not exists:
+            raise HTTPException(404, "Session not found")
+        raise HTTPException(409, "Nothing to redo for this subject")
     return _masks_to_predict_response(result)
 
 
@@ -1057,7 +1265,7 @@ async def sam3_settings(req: Sam3SettingsRequest):
 
 @app.get("/api/detectors")
 async def list_detectors():
-    return get_manager().list_detectors()
+    return await asyncio.to_thread(get_manager().list_detectors)
 
 
 @app.post("/api/detectors/load")
@@ -1184,18 +1392,6 @@ async def export_zip(session_id: str, req: ExportZipRequest):
         "format": "zip",
         "count": count,
     }
-
-
-class ExportImageRequest(BaseModel):
-    files: list[ExportZipFileItem] = []
-    format: str = "png"
-    background_color: list[int] | None = None
-    feather_radius: int = 3
-
-    @field_validator("format")
-    @classmethod
-    def validate_format(cls, v):
-        return _validate_export_format(v)
 
 
 @app.post("/api/sessions/{session_id}/export-image")

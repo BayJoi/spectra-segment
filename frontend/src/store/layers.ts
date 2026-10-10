@@ -14,4 +14,15 @@ export interface Layer {
 
 export const layersAtom = atom<Layer[]>([]);
 export const selectedLayersAtom = atom<Set<string>>(new Set<string>());
-export const layerIdCounterAtom = atom(0);
+
+let _layerSeq = 0;
+
+export function nextLayerId(existing: Layer[] = []): string {
+  let maxId = 0;
+  for (const l of existing) {
+    const n = Number(l.id.replace(/^layer-/, ""));
+    if (Number.isFinite(n) && n > maxId) maxId = n;
+  }
+  if (maxId >= _layerSeq) _layerSeq = maxId + 1;
+  return `layer-${_layerSeq++}`;
+}

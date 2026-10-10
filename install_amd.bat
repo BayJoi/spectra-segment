@@ -24,10 +24,14 @@ echo  +------------------------------------------------------------+
 echo(
 
 call :section "[ 1 / 8 ]  Preflight"
+set "WEB_DIR=%AMD_DIR%\web"
 if exist "%VENV_DIR%\Scripts\python.exe" (
     echo   [INFO]  AMD venv already exists at %VENV_DIR%
-    echo           To reinstall, first run: cleanup_amd.bat
-    goto :done
+    if exist "%WEB_DIR%\node_modules\vite\package.json" (
+        echo           Frontend workspace ready - nothing to do.
+        goto :done
+    )
+    echo   [WARN]  Frontend workspace is incomplete - continuing setup.
 )
 
 echo   [INFO]  ROCm runtime check...
@@ -122,10 +126,6 @@ echo   [ OK ]  AMD GPU arch: !AMD_GFX!
 set "TORCH_INDEX_URL=https://rocm.nightlies.amd.com/whl-multi-arch/"
 
 call :section "[ 5 / 8 ]  ROCm PyTorch"
-rem The ROCm runtime and host libraries arrive automatically as dependencies of
-rem the torch[device-...] extra (rocm-sdk-core / rocm-sdk-libraries). The
-rem rocm-sdk-devel development package is intentionally NOT installed: it is
-rem only needed to compile HIP code and its _devel.tar is ~1.4 GB.
 
 set "TORCH_PKG=torch[device-!AMD_GFX!]"
 set "TORCHVISION_PKG=torchvision[device-!AMD_GFX!]"

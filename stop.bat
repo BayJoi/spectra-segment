@@ -17,12 +17,18 @@ call :section "[ 1 / 2 ]  Stopping backend"
 
 if exist "%PIDFILE%" (
     set /p PID=<"%PIDFILE%"
-    taskkill /F /PID !PID! >nul 2>&1
     del "%PIDFILE%" >nul 2>&1
-    echo   [ OK ]  backend killed ^(PID !PID!^)
+    if defined PID (
+        powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %PID%); if ($c.CommandLine -like '*main:app*') { exit 0 } } catch {}; exit 1" >nul 2>&1
+        if not errorlevel 1 (
+            taskkill /F /PID !PID! >nul 2>&1 && echo   [ OK ]  backend killed ^(PID !PID!^)
+        ) else (
+            echo   [INFO]  Stale PID file ignored - process no longer matches.
+        )
+    )
 )
 
-powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and $p.CommandLine -like '*backend.main:app*') { Stop-Process -Id $_ -Force; Write-Host '  [ OK ]  backend killed' } }; exit 0"
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and $p.CommandLine -like '*main:app*') { Stop-Process -Id $_ -Force; Write-Host '  [ OK ]  backend killed' } }; exit 0"
 
 call :section "[ 2 / 2 ]  Stopping frontend"
 
@@ -38,7 +44,6 @@ endlocal
 exit /b 0
 
 :is_own_web
-rem Return errorlevel 0 only if %~1 is a junction pointing at %~2
 set "CUR="
 if exist "%~1" (
     fsutil reparsepoint query "%~1" >nul 2>&1

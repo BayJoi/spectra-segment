@@ -32,7 +32,6 @@ endlocal
 exit /b 0
 
 :is_own_web
-rem Return errorlevel 0 only if %~1 is a junction pointing at %~2
 set "CUR="
 if exist "%~1" (
     fsutil reparsepoint query "%~1" >nul 2>&1

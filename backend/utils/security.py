@@ -11,6 +11,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from ..utils import logctx
 from .humantime import format_duration
 
 LOGGER = logging.getLogger(__name__)
@@ -75,7 +76,19 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
 
         token = request.headers.get("x-local-token", "")
         current_token = self._token_getter()
-        if not token or not hmac.compare_digest(token, current_token):
+        if not token:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Unauthorized"},
+            )
+        try:
+            valid = hmac.compare_digest(
+                token.encode("latin-1", "ignore"),
+                current_token.encode("utf-8", "ignore"),
+            )
+        except Exception:
+            valid = False
+        if not valid:
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Unauthorized"},
@@ -172,8 +185,30 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         "/api/models/stream",
     }
 
+    _ALWAYS_INFO = (
+        "/predict",
+        "/segment-batch",
+        "/detect",
+        "/sam3-prompt",
+        "/sam3-undo",
+        "/sam3-redo",
+        "/sam3-remove-instance",
+        "/undo",
+        "/redo",
+        "/clear-object",
+        "/export-zip",
+        "/export-image",
+        "/image",
+    )
+
+    _SESSION_PATH_RE = re.compile(r"^/api/sessions/([^/]+)")
+
     async def dispatch(self, request: Request, call_next):
         path = request.url.path.replace("\r", "\\r").replace("\n", "\\n")
+        rid = logctx.new_request()
+        m = self._SESSION_PATH_RE.match(path)
+        if m and m.group(1) not in ("", "release"):
+            logctx.set_session(m.group(1))
         start = time.monotonic()
         try:
             response = await call_next(request)
@@ -182,25 +217,35 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "%s %s unhandled error",
                 request.method,
                 path,
+                extra={"rid": rid, "sid": logctx.sid(), "phase": "request"},
             )
             raise
+        finally:
+            logctx.clear_request()
 
         duration_ms = (time.monotonic() - start) * 1000
         status = response.status_code
+        sid = logctx.sid()
         msg = "%s %s %d · %s" % (
             request.method,
             path,
             status,
             format_duration(duration_ms / 1000),
         )
-        if request.url.path in self._DEBUG_PATHS:
-            LOGGER.debug(msg)
+        extra = {
+            "rid": rid,
+            "sid": sid,
+            "phase": "request",
+            "dur_ms": int(duration_ms),
+        }
+        if path in self._DEBUG_PATHS:
+            LOGGER.debug(msg, extra=extra)
         elif status >= 500:
-            LOGGER.error(msg)
+            LOGGER.error(msg, extra=extra)
         elif status >= 400:
-            LOGGER.warning(msg)
-        elif duration_ms > 1000:
-            LOGGER.info(msg)
+            LOGGER.warning(msg, extra=extra)
+        elif path.endswith(self._ALWAYS_INFO) or duration_ms > 1000:
+            LOGGER.info(msg, extra=extra)
         else:
-            LOGGER.debug(msg)
+            LOGGER.debug(msg, extra=extra)
         return response

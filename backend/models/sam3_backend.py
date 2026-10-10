@@ -14,7 +14,7 @@ import torch
 from .base import SegmentationBackend
 from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
 from ..utils.stderr_progress import StderrInterceptor as _StderrInterceptor
-from ..utils.torch_threads import cpu_threads, resolve_threads
+from ..utils.torch_threads import cpu_threads, cudnn_disabled, resolve_threads
 
 LOGGER = logging.getLogger(__name__)
 _MODEL_LOAD_LOCK = threading.Lock()
@@ -39,11 +39,6 @@ _SAM3_OVERRIDES: dict[str, Any] = {
 
 
 class SAM3Backend(SegmentationBackend):
-    """SAM 3 semantic (text-prompt) segmentation backend wrapping ultralytics' SAM3SemanticPredictor.
-
-    Text prompts segment every instance matching the concept. Image features are cached by
-    set_image() and reused across prompts via predictor.inference_features().
-    """
 
     def __init__(self, device: str = "cpu") -> None:
         self._device = device
@@ -166,13 +161,6 @@ class SAM3Backend(SegmentationBackend):
             release_gpu_memory()
 
     def _prepare_input(self, image: np.ndarray) -> tuple[np.ndarray, tuple[int, int]]:
-        """Guard against extreme aspect ratios / oversized inputs.
-
-        SAM3's vendor letterbox stretches every image to a square (scale_fill=True),
-        which distorts very non-square originals. When the aspect ratio is extreme or
-        the input is huge, we pre-pad/downscale to a safe square so the model sees
-        undistorted content. Returns the processed image and the processed (H, W).
-        """
         oh, ow = image.shape[:2]
         self._orig_shape = (oh, ow)
         self._pad_top = 0
@@ -210,13 +198,6 @@ class SAM3Backend(SegmentationBackend):
         return padded, (side, side)
 
     def set_encoding_resolution(self, encode_dim: int) -> None:
-        """Change the image-encoder resolution for subsequent encodes.
-
-        `predictor.imgsz` drives both the letterbox and, via setup_source ->
-        model.set_imgsz, the trunk rel-pos/rope embeddings, so each encode runs
-        at this size. Invalidates cached features so the next set_image
-        re-encodes. Lower = faster/less accurate, higher = slower/more accurate.
-        """
         if not 384 <= encode_dim <= ENCODE_DIM_MAX:
             raise ValueError(f"encode_dim must be within 384-{ENCODE_DIM_MAX}, got {encode_dim}")
         if encode_dim == self._encode_dim and self._image_set:
@@ -289,10 +270,13 @@ class SAM3Backend(SegmentationBackend):
         if not self._image_set:
             raise RuntimeError("No image set.")
         with self._infer_lock:
+            if self._predictor is None:
+                raise RuntimeError("Model not loaded.")
             features = getattr(self._predictor, "features", None)
             if features is None:
                 raise RuntimeError("No cached features.")
-            with cpu_threads(_DEFAULT_THREADS if self._device == "cpu" else 1):
+            with cpu_threads(_DEFAULT_THREADS if self._device == "cpu" else 1), \
+                    cudnn_disabled(), torch.inference_mode():
                 pred_masks, pred_boxes = self._predictor.inference_features(
                     features,
                     self._proc_shape or self._src_shape,
@@ -313,10 +297,13 @@ class SAM3Backend(SegmentationBackend):
         if points is not None and len(points) > 0:
             raise NotImplementedError("SAM3 semantic mode does not support point prompts")
         with self._infer_lock:
+            if self._predictor is None:
+                raise RuntimeError("Model not loaded.")
             features = getattr(self._predictor, "features", None)
             if features is None:
                 raise RuntimeError("No cached features.")
-            with cpu_threads(_DEFAULT_THREADS if self._device == "cpu" else 1):
+            with cpu_threads(_DEFAULT_THREADS if self._device == "cpu" else 1), \
+                    cudnn_disabled(), torch.inference_mode():
                 pred_masks, pred_boxes = self._predictor.inference_features(
                     features,
                     self._proc_shape or self._src_shape,
@@ -326,7 +313,6 @@ class SAM3Backend(SegmentationBackend):
         return self._format_result(pred_masks, pred_boxes)
 
     def _restore_outputs(self, pred_masks, pred_boxes):
-        """Convert processed (padded/downscaled) outputs back to original image space."""
         orig_shape = self._orig_shape or self._src_shape
         proc_shape = self._proc_shape or self._src_shape
         if orig_shape == proc_shape and self._pad_top == 0 and self._pad_left == 0:
@@ -372,8 +358,12 @@ class SAM3Backend(SegmentationBackend):
             }
         pred_masks, pred_boxes = self._restore_outputs(pred_masks, pred_boxes)
         masks = pred_masks.detach().cpu().numpy()
-        boxes = pred_boxes.detach().cpu().numpy()
-        scores = boxes[:, 4].astype(np.float64) if boxes.shape[1] > 4 else np.zeros(boxes.shape[0])
+        if pred_boxes is None:
+            scores = np.zeros(masks.shape[0], dtype=np.float64)
+            boxes = np.zeros((masks.shape[0], 4), dtype=np.float64)
+        else:
+            boxes = pred_boxes.detach().cpu().numpy()
+            scores = boxes[:, 4].astype(np.float64) if boxes.shape[1] > 4 else np.zeros(boxes.shape[0])
         if confidence is not None and boxes.shape[0] > 0:
             keep = scores >= confidence
             masks = masks[keep]

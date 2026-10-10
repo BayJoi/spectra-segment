@@ -5,11 +5,12 @@ import { Tooltip } from "@/components/ui/Tooltip";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { TierIcon } from "@/components/ui/TierIcon";
 import { imageWidthAtom, imageHeightAtom, hasImageAtom, masksAtom, modelNameAtom, perDetectionMasksAtom, sam3ReadyAtom, modelsAtom, type ModelInfo } from "@/store/session";
-import { showTransparentAtom, settingsOpenAtom, uploadHoveredAtom, endSessionOpenAtom, imageEncodingAtom } from "@/store/ui";
+import { showTransparentAtom, settingsOpenAtom, uploadHoveredAtom, endSessionOpenAtom, imageEncodingAtom, pushToast } from "@/store/ui";
 import { loadedDetectorAtom, detectorsAtom } from "@/store/detection";
 import { useSession } from "@/hooks/useSession";
 import { api, BASE } from "@/lib/api";
 import { connectSse } from "@/lib/sse";
+import { logErr } from "@/store/logs";
 import { cn } from "@/lib/utils";
 
 export function Header({ sam3 = false }: { sam3?: boolean }) {
@@ -69,9 +70,14 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
       setLoadedDetector(loadedDet ? loadedDet.name : null);
     };
 
-    api.getModels().then((res) => applyModelList(res.models)).catch(() => {});
+    api
+      .getModels()
+      .then((res) => applyModelList(res.models))
+      .catch((err) => logErr("detect", err));
 
     const handle = connectSse(`${BASE}/api/models/stream`, (data) => {
+      // Residency transitions are already logged by the backend, so this stream
+      // only drives the header UI - mirroring it here would duplicate every line.
       try {
         const parsed = JSON.parse(data);
         if (parsed.models) applyModelList(parsed.models);
@@ -108,7 +114,9 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
           setDownloading(false);
           setLoadingLabel("");
         }
-      } catch {}
+      } catch (err) {
+        logErr("detect", err);
+      }
     });
 
     return () => {
@@ -128,7 +136,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
       api.getModels().then((res) => {
         setModels(res.models);
         syncDetectors(res.models);
-      }).catch(() => {});
+      }).catch((err) => logErr("mode", err));
     }
   }, [modelLoading, downloading, syncDetectors]);
 
@@ -149,7 +157,9 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
     if (!isDownloaded) setDownloading(true);
     try {
       await switchModel(model);
-    } catch {
+    } catch (err) {
+      logErr("session", err);
+      pushToast("Model switch failed");
     } finally {
       setModelLoading(false);
       setDownloading(false);

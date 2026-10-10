@@ -74,8 +74,10 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
     >
       <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-2">
       <div className="flex items-center justify-between px-1 mb-1.5">
-        <span className="text-[11px] text-neutral-500 uppercase tracking-wider font-sans">Layers</span>
-        <span className="text-[10px] text-neutral-600 font-mono">{layers.length}</span>
+        <span className="text-[11px] text-neutral-500 uppercase tracking-wider font-sans">Detections</span>
+        <span className="text-[10px] text-neutral-600 font-mono">
+          {detections.length} found · {Object.keys(perDetectionMasks).length} masked
+        </span>
       </div>
 
       {Object.entries(detectionGroups).map(([groupLabel, groupLayers]) => (
@@ -85,7 +87,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
             <span className="text-[9px] text-neutral-600 font-mono">{groupLayers.length}</span>
             <div className="flex-1 h-px bg-neutral-800/60" />
           </div>
-          {groupLayers.map((layer, idx) => {
+          {groupLayers.map((layer) => {
             const isSelected = selectedLayers.has(layer.id);
             const hasMask = layer.detectionIndex !== undefined && layer.detectionIndex in perDetectionMasks;
             return (
@@ -123,7 +125,9 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
                   className="text-[11px] text-neutral-300 font-sans truncate flex-1"
                   title={layer.detectionIndex !== undefined && detections[layer.detectionIndex] ? `${Math.round(detections[layer.detectionIndex].score * 100)}% confidence` : undefined}
                 >
-                  {layer.detectionIndex !== undefined && detections[layer.detectionIndex] ? `${layer.label} ${idx + 1}` : layer.label}
+                  {layer.detectionIndex !== undefined && detections[layer.detectionIndex]
+                    ? `#${layer.detectionIndex + 1} ${detections[layer.detectionIndex].label} · ${Math.round(detections[layer.detectionIndex].score * 100)}%`
+                    : layer.label}
                 </span>
                 <span className={cn(
                   "w-1.5 h-1.5 rounded-full flex-shrink-0",

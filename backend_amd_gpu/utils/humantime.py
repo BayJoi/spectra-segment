@@ -1,5 +1,4 @@
 def format_duration(seconds: float) -> str:
-    """Human-friendly duration: 240ms / 2.4s / 38s / 1m 05s."""
     if seconds < 1:
         return f"{seconds * 1000:.0f}ms"
     if seconds < 10:
