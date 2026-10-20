@@ -13,55 +13,36 @@ export function isSupportedImage(file: File): boolean {
   return SUPPORTED_IMAGE_EXTENSIONS.has(ext) || SUPPORTED_IMAGE_MIME.has(file.type.toLowerCase());
 }
 
-export const SERVER_WORKING_PIXELS = 4096 * 4096;
-export const SERVER_MAX_SIDE = 8192;
+const SERVER_WORKING_PIXELS = 4096 * 4096;
+const SERVER_MAX_SIDE = 8192;
 
-export async function fileNeedsServerResize(file: File): Promise<boolean> {
+async function decodeImage(file: File): Promise<{ img: HTMLImageElement; url: string } | null> {
   const url = URL.createObjectURL(file);
+  const img = new Image();
   try {
-    const img = new Image();
-    const loaded = new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error("decode failed"));
-      img.src = url;
-    });
-    await loaded;
-    return img.naturalWidth * img.naturalHeight > SERVER_WORKING_PIXELS;
-  } catch {
-    return false;
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
-export async function fitImageFile(file: File): Promise<{ file: File; resized: boolean }> {
-  const needsFit =
-    (await fileNeedsServerResize(file)) ||
-    (await new Promise<boolean>((resolve) => {
-      const url = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => {
-        resolve(Math.max(img.naturalWidth, img.naturalHeight) > SERVER_MAX_SIDE);
-        URL.revokeObjectURL(url);
-      };
-      img.onerror = () => {
-        resolve(false);
-        URL.revokeObjectURL(url);
-      };
-      img.src = url;
-    }));
-  if (!needsFit) return { file, resized: false };
-
-  const url = URL.createObjectURL(file);
-  try {
-    const img = new Image();
     await new Promise<void>((resolve, reject) => {
       img.onload = () => resolve();
       img.onerror = () => reject(new Error("decode failed"));
       img.src = url;
     });
+    return { img, url };
+  } catch {
+    URL.revokeObjectURL(url);
+    return null;
+  }
+}
+
+export async function fitImageFile(file: File): Promise<{ file: File; resized: boolean }> {
+  const decoded = await decodeImage(file);
+  if (!decoded) return { file, resized: false };
+  const { img, url } = decoded;
+
+  try {
     const w = img.naturalWidth;
     const h = img.naturalHeight;
+    const needsFit =
+      w * h > SERVER_WORKING_PIXELS || Math.max(w, h) > SERVER_MAX_SIDE;
+    if (!needsFit) return { file, resized: false };
     const scale = Math.min(
       1,
       Math.sqrt(SERVER_WORKING_PIXELS / Math.max(1, w * h)),

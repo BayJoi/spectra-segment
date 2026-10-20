@@ -1,10 +1,6 @@
 import type { PackedMask } from "@/lib/mask";
 import type { Layer } from "@/store/layers";
 
-/**
- * Drop detection `idx` from a per-detection mask map and renumber the
- * remaining entries so map keys stay aligned with the detection array.
- */
 export function removeDetectionMask(
   prev: Record<number, PackedMask>,
   idx: number
@@ -18,10 +14,6 @@ export function removeDetectionMask(
   return next;
 }
 
-/**
- * Remove the detection layer at `idx` and shift later detection indices down
- * by one so they keep matching the detection array.
- */
 export function removeDetectionIndexFromLayers(layers: Layer[], idx: number): Layer[] {
   const next: Layer[] = [];
   for (const l of layers) {
@@ -35,10 +27,6 @@ export function removeDetectionIndexFromLayers(layers: Layer[], idx: number): La
   return next;
 }
 
-/**
- * New selection index after detection `idx` is removed: a later selection
- * shifts down, the removed one clears, and an earlier one is untouched.
- */
 export function shiftSelectedDetection(
   selected: number | null,
   idx: number

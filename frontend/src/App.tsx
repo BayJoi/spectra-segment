@@ -122,13 +122,6 @@ export function App() {
           if (sam3Mode) sam3Redo();
           else redo();
         }
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        if (modeDialogOpen) setModeDialogOpen(false);
-        else if (endSessionOpen) setEndSessionOpen(false);
-        else if (settingsOpen) setSettingsOpen(false);
-        else if (exportOpen) setExportOpen(false);
-        else setSelectedDetection(null);
       } else if ((e.key === "Delete" || e.key === "Backspace") && !e.repeat) {
         e.preventDefault();
         if (sam3Mode) {

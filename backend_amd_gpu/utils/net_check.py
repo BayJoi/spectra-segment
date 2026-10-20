@@ -21,5 +21,5 @@ def is_connected(timeout: float = 1.5) -> bool:
             return True
         except Exception:
             continue
-    LOGGER.debug("connectivity check failed — all %d hosts unreachable", len(_PINNED_HOSTS))
+    LOGGER.debug("connectivity check failed - all %d hosts unreachable", len(_PINNED_HOSTS))
     return False

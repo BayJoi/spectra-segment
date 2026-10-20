@@ -73,9 +73,9 @@ export function EmptyState() {
           {!modelName && !sam3Mode
             ? "Choose a mode, then drop or upload an image"
             : sam3Mode && !sam3Ready
-              ? "Loading SAM 3 model — upload will be available shortly"
+              ? "Loading SAM 3 model - upload will be available shortly"
               : sam3Mode
-                ? "Type a text prompt to segment every matching object — e.g. \"person\", \"car\", \"red bottle\""
+                ? "Type a text prompt to segment every matching object - e.g. \"person\", \"car\", \"red bottle\""
               : isDragOver
                 ? "Release to upload"
                 : "Drop an image here or click Upload"}
@@ -112,12 +112,12 @@ export function EmptyState() {
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M4 7h16" /><path d="M4 12h10" /><path d="M4 17h13" />
             </svg>
-            Text · SAM 3
+            Text - SAM 3
           </button>
         </Tooltip>
       </div>
 
-      <Tooltip tip={!modelName && !sam3Mode ? "Choose a mode first" : sam3Mode && !sam3Ready ? "Loading SAM 3 model…" : "Upload image"} side="bottom">
+      <Tooltip tip={!modelName && !sam3Mode ? "Choose a mode first" : sam3Mode && !sam3Ready ? "Loading SAM 3 model..." : "Upload image"} side="bottom">
         <span
           onMouseEnter={() => !modelName && !sam3Mode && setUploadHovered(true)}
           onMouseLeave={() => setUploadHovered(false)}

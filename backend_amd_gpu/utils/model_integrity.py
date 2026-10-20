@@ -75,7 +75,7 @@ def _load_hash_db() -> dict[str, str]:
     try:
         return json.loads(HASH_DB.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        LOGGER.debug("Corrupt hash database at %s — starting fresh", HASH_DB)
+        LOGGER.debug("Corrupt hash database at %s - starting fresh", HASH_DB)
         return {}
 
 
@@ -122,7 +122,7 @@ def verify_model(model_path: Path, model_name: str) -> bool:
         db[model_name] = actual_hash
         _save_hash_db(db)
         LOGGER.debug(
-            "Model %s: no published digest available — TOFU hash recorded (%s...). "
+            "Model %s: no published digest available - TOFU hash recorded (%s...). "
             "This detects future cache tampering but does not independently "
             "verify the download source.",
             model_name, actual_hash[:16],
@@ -142,6 +142,29 @@ def verify_model(model_path: Path, model_name: str) -> bool:
 
     LOGGER.debug("Model %s: TOFU hash verified (%s...)", model_name, actual_hash[:16])
     return True
+
+
+def ensure_model_file(model_path: str, model_dir: Path | None = None) -> str:
+    target_dir = model_dir if model_dir is not None else MODELS_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dest = target_dir / model_path
+    if dest.exists():
+        return str(dest)
+
+    from .net_check import is_connected
+
+    if not is_connected():
+        raise RuntimeError(
+            f"No internet connection and '{model_path}' not found locally.\n"
+            f"  Connect to the internet to download, or place the file in:\n"
+            f"  {target_dir}"
+        )
+
+    LOGGER.debug("Not cached: %s", model_path)
+    url = PINNED_MODEL_URLS.get(model_path)
+    if url:
+        download_model_file(model_path, dest, url=url)
+    return str(dest)
 
 
 def download_model_file(
@@ -203,7 +226,7 @@ def download_model_file(
                                 m, s = divmod(int(remaining), 60)
                                 eta = f"{m}m {s:02d}s" if m else f"{s}s"
                                 LOGGER.info(
-                                    "%s: %d%% — %.1f GB / %.1f GB, ETA %s",
+                                    "%s: %d%% - %.1f GB / %.1f GB, ETA %s",
                                     model_name, pct, downloaded / (1024**3), total_mb / 1024, eta,
                                     extra=_dl_extra(pct, eta),
                                 )

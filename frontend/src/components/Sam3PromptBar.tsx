@@ -7,6 +7,7 @@ import { LayersPanel } from "@/components/LayersPanel";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { BoxesToggle } from "@/components/ui/BoxesToggle";
 
 const ENCODE_OPTIONS: { value: Sam3EncodeDim; label: string }[] = [
   { value: 512, label: "Fast" },
@@ -118,7 +119,7 @@ export function Sam3PromptBar() {
       )}
 
       <div className="pointer-events-auto flex items-center gap-2 px-3 py-2 bg-[#0a0a0a]/95 border border-neutral-800/80 rounded-2xl shadow-2xl shadow-black/80 backdrop-blur-xl grain-bg w-max max-w-[calc(100vw-2rem)]">
-        <Tooltip tip="SAM3 mode — segment objects by text prompt" className="shrink-0">
+        <Tooltip tip="SAM3 mode - segment objects by text prompt" className="shrink-0">
           <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-neutral-900/50 border border-neutral-800/40">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-orange-400"><path d="M12 2a10 10 0 1 0 10 10h-4a6 6 0 1 1-6-6V2z"/><path d="m9 12 2 2 4-4"/></svg>
             <span className="text-[11px] font-medium font-sans text-orange-400">SAM3</span>
@@ -136,7 +137,7 @@ export function Sam3PromptBar() {
               if (error) setError(null);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Describe what to segment…"
+            placeholder="Describe what to segment..."
             className="w-56 sm:w-72 px-2.5 py-1.5 bg-neutral-900/80 border border-neutral-800/60 rounded-lg text-xs text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-orange-500/50 focus:shadow-[0_0_12px_rgba(184,92,42,0.1)] transition-all duration-200 font-sans"
           />
         </Tooltip>
@@ -150,7 +151,7 @@ export function Sam3PromptBar() {
               <svg className="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                 <path d="M21 12a9 9 0 1 1-6.219-8.56" />
               </svg>
-              Segmenting…
+              Segmenting...
             </>
           ) : (
             "Segment"
@@ -191,7 +192,7 @@ export function Sam3PromptBar() {
         </div>
 
         <div ref={layersToggleRef} className="flex items-center gap-0.5 shrink-0">
-          <Tooltip tip="SAM3 segments panel — view and remove individual segments">
+          <Tooltip tip="SAM3 segments panel - view and remove individual segments">
             <button
               type="button"
               onClick={() => setLayersOpen(!layersOpen)}
@@ -223,20 +224,15 @@ export function Sam3PromptBar() {
         </Tooltip>
 
         {showTransparent && sam3Instances.length > 0 && (
-          <Tooltip tip={hideBboxes ? "Segment boxes hidden in transparent mode — click to show" : "Hide all segment boxes in transparent mode"} className="shrink-0">
-            <button
-              type="button"
-              onClick={() => setHideBboxes(!hideBboxes)}
-              className={cn(
-                "h-7 px-2 rounded-lg text-[10px] font-medium font-mono border transition-all duration-200 cursor-pointer whitespace-nowrap hover:scale-105 active:scale-95",
-                hideBboxes
-                  ? "bg-orange-500/15 border-orange-500/40 text-orange-300 hover:bg-orange-500/25"
-                  : "bg-neutral-900/80 border-neutral-800/60 text-neutral-500 hover:text-neutral-300 hover:border-neutral-700"
-              )}
-            >
-              {hideBboxes ? "Boxes off" : "Boxes"}
-            </button>
-          </Tooltip>
+          <BoxesToggle
+            hidden={hideBboxes}
+            onToggle={() => setHideBboxes(!hideBboxes)}
+            tip={
+              hideBboxes
+                ? "Segment boxes hidden in transparent mode - click to show"
+                : "Hide all segment boxes in transparent mode"
+            }
+          />
         )}
 
         <div className="relative shrink-0" ref={optionsRef}>
@@ -324,7 +320,7 @@ export function Sam3PromptBar() {
                     <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                   </svg>
                   <span className="text-[9px] font-mono">
-                    Re-encoding image… this can take up to a minute
+                    Re-encoding image... this can take up to a minute
                   </span>
                 </div>
               )}

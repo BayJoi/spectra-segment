@@ -235,8 +235,8 @@ export function ExportDialog() {
         encoded.push({ path: f.path, mask_b64: encodeMaskPng(mask) });
       }
       if (encoded.length === 0) {
-        emitUi("export", "WARNING", `Nothing to export — none of the ${filesToExport.length} selected item(s) had a mask yet`);
-        pushToast("Nothing to export — segment something first");
+        emitUi("export", "WARNING", `Nothing to export - none of the ${filesToExport.length} selected item(s) had a mask yet`);
+        pushToast("Nothing to export - segment something first");
         return;
       }
       const res = await api.exportZip(sessionId, {
@@ -259,7 +259,7 @@ export function ExportDialog() {
       exportedTimerRef.current = setTimeout(() => setExported(false), 2000);
     } catch (err) {
       console.error("Export failed:", err);
-      pushToast("Export failed — check the console for details");
+      pushToast("Export failed - check the console for details");
     } finally {
       setIsExporting(false);
     }
@@ -423,7 +423,7 @@ export function ExportDialog() {
                 <button
                   onClick={() => { setBgMode("transparent"); if (format === "jpg") setFormat("png"); }}
                   disabled={format === "jpg"}
-                  title={format === "jpg" ? "JPEG needs a solid background — switch to PNG first" : undefined}
+                  title={format === "jpg" ? "JPEG needs a solid background - switch to PNG first" : undefined}
                   className={cn(
                     "px-3 py-1.5 rounded-xl border text-xs font-medium font-sans transition-all duration-200 cursor-pointer select-none hover:scale-[1.02] active:scale-[0.98]",
                     bgMode === "transparent"

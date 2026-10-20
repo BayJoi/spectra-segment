@@ -132,7 +132,7 @@ _BOX_DRAWING_RE = re.compile(r"\u2501|\u2500|\u2577")
 
 _DOWNLOAD_RES = (
     re.compile(r"^(?P<name>[^:]{1,80}):\s+\S+\s+(?P<pct>\d{1,3})%\s+complete"),
-    re.compile(r"^(?P<name>[^:]{1,80}):\s+(?P<pct>\d{1,3})%\s+—"),
+    re.compile(r"^(?P<name>[^:]{1,80}):\s+(?P<pct>\d{1,3})%\s+-"),
     re.compile(r"^(?P<name>[^:]{1,80}):\s+(?P<pct>\d{1,3})%\|"),
 )
 
@@ -373,7 +373,7 @@ async def lifespan(app: FastAPI):
         try:
             props = _torch.cuda.get_device_properties(0)
             LOGGER.info(
-                "%s · %.0f GB · compute %d.%d",
+                "%s - %.0f GB - compute %d.%d",
                 _torch.cuda.get_device_name(0),
                 props.total_memory / (1024**3),
                 props.major,
@@ -463,7 +463,7 @@ async def _handle_vram_oom(request: Request, exc: _torch.OutOfMemoryError):
     LOGGER.error(
         "VRAM out of memory (cap active)%s: %s",
         (
-            f" — free {free_mb:.0f} MB / total {total_mb:.0f} MB"
+            f" - free {free_mb:.0f} MB / total {total_mb:.0f} MB"
             if free_mb is not None and total_mb is not None
             else ""
         ),
@@ -542,7 +542,6 @@ class StrokeRequest(BaseModel):
 
 
 class PredictResponse(BaseModel):
-    masks: list[str]
     scores: list[float]
     object_masks: dict[str, str] = {}
     object_history: dict[str, dict[str, int]] = {}
@@ -1065,18 +1064,9 @@ def _decode_mask_resized(mask_b64: str, h: int, w: int) -> np.ndarray:
 
 
 def _masks_to_predict_response(result: dict) -> PredictResponse:
-    masks = result.get("all_masks")
-    if masks is None:
-        masks = result.get("masks", [])
-    scores = result.get("all_scores")
-    if scores is None:
-        scores = result.get("scores", [])
-    if hasattr(scores, "tolist"):
-        scores = scores.tolist()
     return PredictResponse(
-        masks=_masks_to_png_list(masks),
-        scores=list(scores),
-        object_masks=_masks_to_png_dict(result.get("object_masks")),
+        scores=list(result.get("all_scores") or []),
+        object_masks=dict(result.get("object_masks") or {}),
         object_history=result.get("object_history") or {},
     )
 
@@ -1094,18 +1084,6 @@ def _masks_positional_png_list(masks: Any) -> list[str | None]:
     return out
 
 
-def _masks_to_png_dict(masks: Any) -> dict[str, str]:
-    if not masks:
-        return {}
-    out: dict[str, str] = {}
-    for key, m in masks.items():
-        arr = np.asarray(m)
-        if arr.size == 0:
-            continue
-        out[str(key)] = mask_to_png_b64(arr)
-    return out
-
-
 @app.post("/api/sessions/{session_id}/predict", response_model=PredictResponse)
 async def run_prediction(session_id: str, req: StrokeRequest):
     try:
@@ -1118,6 +1096,8 @@ async def run_prediction(session_id: str, req: StrokeRequest):
             bboxes=req.bboxes,
         )
     except ValueError as e:
+        if not await asyncio.to_thread(get_manager().session_exists, session_id):
+            raise HTTPException(404, "Session not found")
         LOGGER.exception("Prediction failed for session %s", session_id)
         raise HTTPException(400, f"Invalid prediction request: {e}")
 
@@ -1146,8 +1126,8 @@ async def segment_batch(session_id: str, req: SegmentBatchRequest):
 
 
 @app.post("/api/sessions/{session_id}/undo", response_model=PredictResponse)
-async def undo_stroke(session_id: str, object_id: int = 0):
-    result = await asyncio.to_thread(get_manager().undo, session_id, object_id)
+async def undo_stroke(session_id: str, object_id: int = 0, steps: int = 1):
+    result = await asyncio.to_thread(get_manager().undo, session_id, object_id, steps)
     if result is None:
         exists = await asyncio.to_thread(get_manager().session_exists, session_id)
         if not exists:
@@ -1157,8 +1137,8 @@ async def undo_stroke(session_id: str, object_id: int = 0):
 
 
 @app.post("/api/sessions/{session_id}/redo", response_model=PredictResponse)
-async def redo_stroke(session_id: str, object_id: int = 0):
-    result = await asyncio.to_thread(get_manager().redo, session_id, object_id)
+async def redo_stroke(session_id: str, object_id: int = 0, steps: int = 1):
+    result = await asyncio.to_thread(get_manager().redo, session_id, object_id, steps)
     if result is None:
         exists = await asyncio.to_thread(get_manager().session_exists, session_id)
         if not exists:

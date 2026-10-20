@@ -1,6 +1,6 @@
 # Backend Guide
 
-How to work on the Spectra Segment backend — **both forks at once**, the CPU/NVIDIA
+How to work on the Spectra Segment backend - **both forks at once**, the CPU/NVIDIA
 one in `backend\` and the AMD ROCm one in `backend_amd_gpu\`. This is the practical
 companion to `docs\CODE_GUIDE.md`, which has the deep architectural narrative.
 
@@ -57,7 +57,10 @@ backend\utils\humantime.py           format_duration
 backend\utils\logctx.py              contextvars for rid / sid
 ```
 
-`backend_amd_gpu\` mirrors this exactly. Only the files in section 9 differ.
+The AMD fork adds two files with no CPU/CUDA counterpart: `amd_gfx.py` (gfx target to
+`HSA_OVERRIDE_GFX_VERSION`) and `detect_amd_gpu.py` (the launcher's standalone gfx/VRAM
+probe, which runs before torch is importable). Everything else mirrors this map;
+section 9 lists the files allowed to differ.
 
 ---
 
@@ -71,7 +74,7 @@ start.bat          # CPU / NVIDIA, backend :8000, frontend :3000
 start_amd.bat      # AMD ROCm
 ```
 
-Verify a change — run all of it for both forks:
+Verify a change - run all of it for both forks:
 
 ```
 # syntax
@@ -103,7 +106,7 @@ ServerErrorMiddleware
   -> CORS
     -> RequestLogging
       -> SecurityHeaders
-        -> HostValidation      (host must be 127.0.0.1/localhost AND port 8000)
+        -> HostValidation      (host must be 127.0.0.1/localhost; a port, if sent, must be 8000)
           -> RateLimit         (300 req / 60 s / IP)
             -> RequestSizeLimit (50 MiB)
               -> TokenAuth      (X-Local-Token, except the exempt paths)
@@ -115,38 +118,44 @@ Auth is a `secrets.token_urlsafe(32)` generated once at startup, never written t
 disk, and handed to the frontend by `GET /api/token`. Comparison runs on **bytes**,
 because headers arrive latin-1 and a non-ASCII token used to raise `TypeError`.
 
-Auth-exempt paths: `/api/token`, `/health`, the SSE endpoints, `/api/logs`,
-`/api/models/stream`, and `POST /api/sessions/{id}/release` (called by
-`navigator.sendBeacon`, which cannot set headers). SSE carries its own caps instead:
-5 connections per IP, 100 subscribers total, 1800 s max lifetime.
+Auth-exempt paths: `/api/token`, `/health`, the SSE endpoints (`/api/logs/stream`,
+`/api/models/stream`), and `POST /api/sessions/{id}/release` (called by
+`navigator.sendBeacon`, which cannot set headers). `/api/logs` itself requires the
+token.
 
-Every handler runs on the threadpool through `asyncio.to_thread`. The rid/sid
-context is captured in `contextvars` and copied into the worker thread
+SSE cannot carry the header, so it has its own caps instead: `/api/logs/stream` allows
+5 connections per IP with a 1800 s maximum lifetime, and both streams share one global
+cap of 100 subscribers (503 when full). `/api/models/stream` has no per-IP cap and no
+lifetime cap - it closes only with the client.
+
+Every handler that touches the manager runs on the threadpool through
+`asyncio.to_thread`; the token route and the SSE streams stay on the event loop. The
+rid/sid context is captured in `contextvars` and copied into the worker thread
 automatically.
 
 ---
 
 ## 5. Endpoint reference
 
-Auth column: **Y** = token required, **–** = exempt.
+Auth column: **Y** = token required, **-** = exempt.
 
 | Method | Path | Auth | Body / notes |
 |---|---|---|---|
-| GET | `/health` | – | liveness + active session count |
-| GET | `/api/token` | – | bootstrap token |
-| GET | `/api/logs` | – | tail of the 300-entry ring |
-| GET | `/api/logs/stream` | – | SSE log stream |
+| GET | `/health` | - | liveness + active session count |
+| GET | `/api/token` | - | bootstrap token |
+| GET | `/api/logs` | Y | tail of the 300-entry ring |
+| GET | `/api/logs/stream` | - | SSE log stream |
 | GET | `/api/models/status` | Y | one-shot model + detector list |
-| GET | `/api/models/stream` | – | SSE model status, 3 s poll |
+| GET | `/api/models/stream` | - | SSE model status, 3 s poll |
 | POST | `/api/sessions` | Y | `CreateSessionRequest` -> `CreateSessionResponse` |
 | GET | `/api/sessions/{id}` | Y | session info |
 | DELETE | `/api/sessions/{id}` | Y | destroy |
-| POST | `/api/sessions/{id}/release` | – | teardown from `sendBeacon` |
+| POST | `/api/sessions/{id}/release` | - | teardown from `sendBeacon` |
 | POST | `/api/sessions/{id}/image` | Y | upload, decode, resize, encode |
 | POST | `/api/sessions/{id}/predict` | Y | `StrokeRequest` -> `PredictResponse` |
 | POST | `/api/sessions/{id}/segment-batch` | Y | `SegmentBatchRequest` |
-| POST | `/api/sessions/{id}/undo` \| `/redo` | Y | -> `PredictResponse` |
-| POST | `/api/sessions/{id}/clear-object` | Y | -> `PredictResponse` |
+| POST | `/api/sessions/{id}/undo` \| `/redo` | Y | `?object_id=<int>&steps=<int>` -> `PredictResponse` (404 gone, 409 nothing to move) |
+| POST | `/api/sessions/{id}/clear-object` | Y | `?object_id=<int>` -> `PredictResponse` |
 | POST | `/api/sessions/{id}/sam3-prompt` | Y | `Sam3PromptRequest` -> `Sam3PromptResponse` |
 | POST | `/api/sessions/{id}/sam3-undo` \| `/redo` | Y | -> `Sam3PromptResponse` |
 | POST | `/api/sessions/{id}/sam3-remove-instance` | Y | `Sam3RemoveInstanceRequest` |
@@ -184,21 +193,42 @@ ExportImageRequest     files, format, background_color, feather_radius
 
 ```
 CreateSessionResponse  session_id: str, model_name: str
-PredictResponse        masks: [b64 png], scores: [float],
-                       object_masks: {oid: b64}, object_history: {oid: {undo,redo,strokes,has_mask}}
+PredictResponse        scores: [float], object_masks: {oid: b64 png},
+                       object_history: {oid: {undo,redo,strokes,has_mask}}
 Sam3PromptResponse     masks: [b64 png], scores: [float], bboxes: [[x1,y1,x2,y2]]
 ```
+
+`object_masks` is the only place a brush response carries masks: each subject
+appears once, keyed by object id, and an unchanged subject is served from its
+cached PNG encode (`ObjectState.png_cache`, invalidated by `mask_revision`).
+Mask data is not repeated in a second positional list. `masks` remains the
+positional field of `SegmentBatch` and `Sam3PromptResponse`, which have no
+object ids to key on.
 
 ### The history error contract
 
 `/undo` and `/redo` distinguish two failures that used to share one status code:
 
-- **404** — the session is gone. The client rebuilds it.
-- **409** — the session exists but this subject has no strokes. The client
-  resynchronises its counters and stops retrying.
+- **404** - the session is gone. The client rebuilds it.
+- **409** - the session exists but this subject has no strokes to pop (undo) or
+  none to push back (redo). The client corrects that subject's counters and stops.
+
+`steps` (default 1) pops or pushes up to that many entries and **clamps to what the
+subject actually has**, so a burst of clicks or key repeats never turns into a 409:
+one undo with `steps=5` on a three-stroke subject pops three and succeeds. A caller
+that asks for more than exists gets the truthful end state, not an error.
+
+`/predict` answers by the same rule: **404** only when the session is really gone,
+and **400** for every other `ValueError` - no image loaded, object cap reached - with
+the reason in the detail. It used to answer 400 for a missing session as well, and
+since the client rebuilds the session on 404 it had been taught to rebuild on 400
+too; a stroke refused by `SPECTRA_MAX_OBJECTS` therefore discarded the live session
+and everything in it.
 
 `object_history` on every mutating response is the authority: the client adopts it
 instead of guessing, which is what makes repeated undo-failure loops impossible.
+Only `object_history` keys are authoritative - a subject absent from it has been
+cleared, so the client drops it rather than keeping stale counters.
 
 ---
 
@@ -210,8 +240,8 @@ and each subject's mask history.
 | Type | Holds |
 |---|---|
 | `Session` | id, model name, backend, image RGB/BGR, `objects`, SAM3 prompt history + redo stack, `has_image`, `last_active`, per-session lock |
-| `ObjectState` | one **subject**: `stroke_history`, `redo_stack`, `last_mask`, `last_low_res_mask`, `mask_snapshots` |
-| `MaskSnapshot` | low-res decoder logits for one stroke (or `None`) |
+| `ObjectState` | one **subject**: `stroke_history`, `redo_stack`, `last_mask`, `last_low_res_mask`, `mask_snapshots`, `mask_revision` + `png_cache`/`png_revision` (per-subject encode cache) |
+| `MaskSnapshot` | low-res decoder logits for one stroke (or `None`); normally a fixed 256x256 float32 plane, so roughly 256 KB per stroke per subject, bounded by `SPECTRA_MAX_HISTORY`. SAM 3 returns no low-res logits, so its snapshots carry `None` and cost far less |
 | `StrokeEntry` / `SAM3PromptEntry` / `SAM3Snapshot` | prompt inputs and results |
 
 ### Locks
@@ -227,11 +257,27 @@ and each subject's mask history.
 
 1. **Residency.** `_evict_loaded_models`, `_can_unload`, `_safe_unload`,
    `_ensure_vram_headroom`, `get_or_load_model`. A model with inference in flight is
-   left in the registry — removing it while it holds VRAM would leak.
-2. **History.** `_replay_history` runs in two modes: **incremental** (one decoder
-   pass, the live drawing path) for `predict`, and **full replay** for `undo`/`redo`
-   so every stroke runs exactly once from the state before it. `mask_snapshots` is
-   index-aligned with `stroke_history`.
+   left in the registry - removing it while it holds VRAM would leak.
+2. **History.** A stroke's mask depends only on its own points and on the low-res
+   mask of the stroke before it, and `mask_snapshots[i].low_res` is the low-res mask
+   that stroke `i + 1` chained on. So:
+   - `predict` -> `_replay_history` incremental: one decoder pass for the new stroke.
+   - `undo`/`redo` -> `_restore_object_mask`: one decoder pass for the stroke that is
+     now last (`None` when the history emptied). Cost is one pass regardless of how
+     long the history is; the old path replayed every remaining stroke.
+
+   The snapshot per stroke is what buys that: at 256 KB each, `SPECTRA_MAX_HISTORY`
+   (200) caps a subject at about 50 MB and eight subjects at about 400 MB. A stroke
+   sits in `stroke_history` **or** `redo_stack`, never both, so the two share that
+   budget rather than doubling it. Caching full-resolution masks instead would make
+   undo a copy, at 4 bytes per image pixel per stroke - an order of magnitude more
+   than the low-res chain.
+   - `_replay_history(full_replay=True)` remains as the correctness fallback, used
+     when `mask_snapshots` is not index-aligned with `stroke_history`. It also
+     differs in one detail: it feeds `mask_input` to a bbox stroke, while the
+     incremental path deliberately passes `None` for bbox strokes (matching how the
+     stroke was first computed). The single-step restore reproduces the incremental
+     semantics exactly, which is the state the user was looking at.
 3. **Lifetime.** `create_session` reserves its slot under the lock; `evict_idle_sessions`
    sweeps every 10 s and reclaims idle SAM3 models; `last_active` is refreshed by
    every working endpoint so an active session is not evicted mid-edit.
@@ -255,16 +301,16 @@ and redo correct across deletes, recoveries and id reuse.
 | `grounding_detector.py` | `GroundingDetector` | Grounding DINO + Florence-2 + CogFlorence |
 | `yoloe_detector.py` | `YOLEDetector` | YOLOE + MobileCLIP |
 
-Key facts to remember while editing them (full detail in `CODE_GUIDE.md` §6):
+Key facts to remember while editing them (full detail in `CODE_GUIDE.md` section 6):
 
 - SAM 2 / SAM 3 wrappers do all their prompt work under `torch.inference_mode()`.
   Without it, every prompt builds a live autograd graph over the prompt encoder and
   decoder; with it, that memory is never allocated. Keep it.
 - Precision is decided at runtime by `_model_dtype()` / `*_QUANTIZE`; the AMD fork
   sets `SPECTRA_DETECTOR_FP16=1` by default, the CUDA fork does not.
-- `torch.load` is patched to default `weights_only=True` in `UltralyticsBackend` —
-  that is the guard against arbitrary code execution from a malicious checkpoint.
-  Keep it.
+- `torch.load` is patched to default `weights_only=True` in `UltralyticsBackend` and
+  in `SAM3Backend` - that is the guard against arbitrary code execution from a
+  malicious checkpoint. Keep it, and restore the original in `finally`.
 - Florence-2 / CogFlorence need `_enable_florence_generation` on `transformers`
   >= 4.50: those releases removed `GenerationMixin` from `PreTrainedModel` while the
   repos' remote code still relies on inheriting it. The loader re-bases the model and
@@ -313,28 +359,41 @@ echo only) and `SPECTRA_CPU_RAM_MB` (saved and shown, read by nothing).
 ## 9. What is allowed to differ between the forks
 
 These files are **byte-identical** and must stay that way:
-`security.py`, `compositing.py`, `torch_threads.py`, `stderr_progress.py`,
-`model_integrity.py`, `net_check.py`, `offline.py`, `humantime.py`, `logctx.py`.
+`utils/security.py`, `utils/compositing.py`, `utils/torch_threads.py`,
+`utils/stderr_progress.py`, `utils/model_integrity.py`, `utils/net_check.py`,
+`utils/offline.py`, `utils/humantime.py`, `utils/logctx.py`,
+`utils/__init__.py`, `models/__init__.py`, `models/ultralytics_backend.py` and
+`requirements.txt`.
 
 Files that legitimately differ:
 
 | File | Allowed difference |
 |---|---|
 | `main.py` | AMD-only gfx/HIP preamble, MIOpen cache dirs, `torch` vs `_torch` aliasing, the `torch.version.hip` branch, `cudnn.benchmark=False` on HIP, `matmul.allow_fp16_reduced_precision_reduction` on HIP, `_log_gpu_mem()` around detect, the AMD no-GPU warning, and `backend_amd_gpu.*` import paths |
-| `utils/device.py` | AMD adds `_detect_rocm()` and only claims NVIDIA when `torch.version.cuda` is set |
-| `models/sam3_backend.py` | AMD also applies `cudnn_disabled` around the SAM3 encode and decode paths |
-| `models/grounding_detector.py` | AMD already had the per-detect `empty_cache` removals and the 1024-square Florence pre-warm |
-| `models/ultralytics_backend.py` | AMD already had the `RLock` and the locked `unload_model()` |
+| `utils/device.py` | AMD adds `_detect_rocm()`. **Both** forks only claim NVIDIA when `torch.version.cuda` is set, so a ROCm build is never mislabelled on the CUDA/CPU side either |
+| `models/sam3_backend.py` | AMD also wraps the SAM3 **encode** in `cudnn_disabled` (both forks already wrap the decode paths), and its missing-`clip` hint names `install_amd.bat`. Nothing else: model resolution and download live in `utils/model_integrity.ensure_model_file()` for both forks |
+| `models/grounding_detector.py` | One absolute import path (the `net_check` import inside the download path). The per-detect `empty_cache` and the 1024-square Florence pre-warm are in both forks |
+| `models/yoloe_detector.py` | Three absolute import paths (`net_check`, `model_integrity` twice) |
+| `models/manager.py` | Three absolute import paths (`net_check`, `model_integrity` twice) |
 | `models/base.py`, `models/detector_base.py` | `...` vs `pass` in the abstract stubs |
-| `models/manager.py` | import paths only |
+| `run.cmd` | AMD adds the MIOpen env vars and cache dirs, `PYTORCH_TUNABLEOP_CACHE_DIR`, `OCL_SET_SVM_SIZE`, `TORCH_BLAS_PREFER_HIPBLASLT`/`DISABLE_ADDMM_CUDA_LT`, `SPECTRA_DETECTOR_FP16=1` (all only when unset), and runs `backend_amd_gpu.main:app` |
+| `amd_gfx.py` | AMD only; no CPU/CUDA counterpart |
+| `detect_amd_gpu.py` | AMD only; no CPU/CUDA counterpart |
 
 Every other shared file must be byte-identical. To mirror a change:
 
 1. Copy the edit across.
 2. Swap `backend.` for `backend_amd_gpu.` in **absolute** imports; leave relative
    imports alone.
-3. Run the section-3 verification for both forks.
+3. Run the section-3 checks for both forks.
 4. Confirm only the differences in the table above remain.
+
+The duplication the forks carry is deliberate: each tree is a self-contained
+deployment that its own installer and venv own, so nothing is imported across
+the `backend/` boundary. The only close call inside a tree is
+`_fallback_cpu_and_reencode` in `sam3_backend.py` versus `_fallback_full_cpu` in
+`ultralytics_backend.py` - eight near-identical lines that stay separate because
+the two classes reload and re-encode differently.
 
 ---
 
@@ -358,8 +417,12 @@ Every other shared file must be byte-identical. To mirror a change:
    `utils/model_integrity.py`. `PINNED_MODEL_URLS` and `PUBLISHED_DIGESTS` must have
    the same key set; a key with no digest silently falls back to a trust-on-first-use
    branch that is otherwise unreachable.
-3. If it is HuggingFace-hosted, confirm `is_downloaded` reads the HF cache and that
-   the load goes through `offline_guard(True)`.
+   Resolution and download are shared: call `ensure_model_file(model_path, model_dir)`
+   and it returns the absolute path, downloading (digest-checked) only when the file
+   is missing, and raising a message that names `model_dir` when the machine is
+   offline.
+3. If it is HuggingFace-hosted, confirm `hf_weights_downloaded` reads the HF cache and
+   that the load goes through `offline_guard(True)`.
 
 ### Add a detector
 
@@ -382,12 +445,14 @@ the guard permissive for a download. Never edit the read-only HF model cache.
 - **`get_or_create_token()` mints a new token on every call.** It is safe only
   because `lifespan` calls it exactly once. A second call would invalidate every
   token already issued.
-- **`_collect_all_masks` reads the id list under one lock and each `last_mask` under
-  a second.** A `clear_object` landing between the two yields a partial result.
+- **`_object_masks_png` reads the object list under the session lock but encodes
+  outside it**, on purpose: a full-size PNG encode must not stall stroke appends.
+  The list therefore reflects the moment of the read, and a mask computed during the
+  encode is picked up by the next response.
 - **Export memory is unbounded.** `export-zip` builds the whole archive in a
   `BytesIO` and base64-encodes it into one JSON field.
 - **Session memory is unbounded.** Worst case ~3.5 GB for 50 brush subjects, or
-  ~6–13 GB for a 100-prompt SAM3 history at 30 instances each. `MAX_SESSIONS = 100`
+  ~6-13 GB for a 100-prompt SAM3 history at 30 instances each. `MAX_SESSIONS = 100`
   limits the count only.
 - **`cpu_threads` saves/sets/restores a process-wide torch setting** and is not
   atomic; overlapping contexts can restore a value nobody asked for.
@@ -398,8 +463,9 @@ the guard permissive for a download. Never edit the read-only HF model cache.
 - **`start.bat` / `stop.bat` kill any process whose command line contains `main:app`**,
   which includes the AMD backend.
 - **`detect_amd_gpu.py` reports 0 MB VRAM for whole GPU families** (Strix Point,
-  Strix Halo, Krackan, Navi 24, Rembrandt, Mendocino, Instinct). `setup_memory.ps1`
-  then silently substitutes a fallback budget.
+  Strix Halo, Krackan, Phoenix, Van Gogh, Rembrandt, Mendocino, Instinct).
+  `setup_memory.ps1` then silently substitutes a fallback budget. Navi 24 is not in
+  that group: RX 6500/6400 report 4096 MB.
 - **`sam3.pt` is fetched from a community mirror** with a digest that cannot be
   confirmed against any official source.
 
@@ -409,6 +475,6 @@ the guard permissive for a download. Never edit the read-only HF model cache.
 
 `ultralytics` is **AGPL-3.0**. Because the backend links it, the combined,
 distributed work is AGPL-3.0, and running it as a network service triggers AGPL-3.0
-§13. The Meta SAM 3 weights are governed by the Meta SAM License, which is separate
+section 13. The Meta SAM 3 weights are governed by the Meta SAM License, which is separate
 from and in addition to the code license. See `THIRD-PARTY-LICENSES.txt` before
 distributing anything.

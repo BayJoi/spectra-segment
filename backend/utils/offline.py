@@ -29,8 +29,6 @@ def _apply(offline: bool) -> None:
     try:
         import transformers.utils.hub as tf_hub
 
-        # `is_offline_mode()` returns this module global, not the environment,
-        # so patching it is the only way to flip transformers at runtime.
         tf_hub._is_offline_mode = offline
     except Exception:
         pass
@@ -52,12 +50,6 @@ def is_offline() -> bool:
 
 @contextmanager
 def offline_guard(offline: bool = True):
-    """Force (or allow) network access for HuggingFace-backed loads.
-
-    Cached model loads run under `offline_guard(True)` so a fully downloaded
-    model never contacts the Hub again. Downloads run under
-    `offline_guard(False)` to opt back into the network for that call only.
-    """
     with _lock:
         previous = is_offline()
         _apply(offline)

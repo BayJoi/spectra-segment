@@ -1,6 +1,7 @@
-import { useRef, useEffect, useMemo, type RefObject } from "react";
+import { useRef, useMemo, type RefObject } from "react";
 import { useAtom, useSetAtom } from "jotai";
 import { useLayers } from "@/hooks/useLayers";
+import { usePanelDismiss } from "@/hooks/usePanelDismiss";
 import { perDetectionMasksAtom } from "@/store/session";
 import { detectionsAtom, selectedDetectionAtom } from "@/store/detection";
 import { selectedSam3InstanceAtom } from "@/store/sam3";
@@ -26,26 +27,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
   const [selectedSam3Instance, setSelectedSam3Instance] = useAtom(selectedSam3InstanceAtom);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (panelRef.current && !panelRef.current.contains(target) && !ignoredRef?.current?.contains(target)) {
-        onClose();
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open, onClose, ignoredRef]);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [open, onClose]);
+  usePanelDismiss(open, onClose, panelRef, ignoredRef);
 
   const detectionGroups = useMemo(() => {
     const groups: Record<string, typeof layers> = {};
@@ -76,7 +58,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
       <div className="flex items-center justify-between px-1 mb-1.5">
         <span className="text-[11px] text-neutral-500 uppercase tracking-wider font-sans">Detections</span>
         <span className="text-[10px] text-neutral-600 font-mono">
-          {detections.length} found · {Object.keys(perDetectionMasks).length} masked
+          {detections.length} found - {Object.keys(perDetectionMasks).length} masked
         </span>
       </div>
 
@@ -126,7 +108,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
                   title={layer.detectionIndex !== undefined && detections[layer.detectionIndex] ? `${Math.round(detections[layer.detectionIndex].score * 100)}% confidence` : undefined}
                 >
                   {layer.detectionIndex !== undefined && detections[layer.detectionIndex]
-                    ? `#${layer.detectionIndex + 1} ${detections[layer.detectionIndex].label} · ${Math.round(detections[layer.detectionIndex].score * 100)}%`
+                    ? `#${layer.detectionIndex + 1} ${detections[layer.detectionIndex].label} - ${Math.round(detections[layer.detectionIndex].score * 100)}%`
                     : layer.label}
                 </span>
                 <span className={cn(

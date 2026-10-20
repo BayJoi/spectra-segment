@@ -19,8 +19,9 @@ class DeviceInfo:
 def _detect_nvidia() -> tuple[bool, str]:
     try:
         import torch
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and torch.version.cuda:
             gpu_name = torch.cuda.get_device_name(0)
+            LOGGER.debug("NVIDIA CUDA device: %s", gpu_name)
             return True, gpu_name
     except Exception:
         pass
@@ -37,7 +38,6 @@ def detect_device() -> DeviceInfo:
 
     is_nvidia, gpu_name = _detect_nvidia()
     if is_nvidia:
-        LOGGER.debug("NVIDIA GPU detected: %s", gpu_name)
         return DeviceInfo(
             torch_device="cuda:0",
             description=f"NVIDIA CUDA - {gpu_name}",

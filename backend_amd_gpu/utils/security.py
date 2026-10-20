@@ -226,7 +226,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         duration_ms = (time.monotonic() - start) * 1000
         status = response.status_code
         sid = logctx.sid()
-        msg = "%s %s %d · %s" % (
+        msg = "%s %s %d - %s" % (
             request.method,
             path,
             status,

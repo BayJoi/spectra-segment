@@ -1,7 +1,7 @@
 # Spectra Segment
 
 A local image background remover with three editing modes. Everything runs on
-your own machine — nothing leaves your computer.
+your own machine - nothing leaves your computer.
 
 > **Note:** This project was built entirely from scratch using AI. There is no
 > human-written code.
@@ -15,54 +15,67 @@ start removing.
 
 ### Three Ways to Remove Backgrounds
 
-**Brush Mode** — Draw strokes around the objects you want to keep. Select
+**Brush Mode** - Draw strokes around the objects you want to keep. Select
 multiple objects separately. Each object gets its own mask.
 
-**Detection Mode** — Type what you want to remove (like "person" or "red car").
+**Detection Mode** - Type what you want to remove (like "person" or "red car").
 The AI finds it, shows a box around it, and removes the background when you
 click. Add as many detections as you want.
 
-**SAM 3 Mode** — Type a text prompt and SAM 3 handles detection, segmentation,
-and masking in one step. The most powerful mode — single model, no tier
+**SAM 3 Mode** - Type a text prompt and SAM 3 handles detection, segmentation,
+and masking in one step. The most powerful mode - single model, no tier
 selection needed.
 
 ### Every Mode Has
 
-- **Transparent button** — View your cutout with a transparent background
-- **Feather slider** — Soften mask edges for smoother results
-- **Export** — Save as PNG or JPG with transparent or colored backgrounds,
+- **Transparent button** - View your cutout with a transparent background
+- **Feather control** - Soften mask edges for smoother results; the brush and
+  detection toolbars have a slider, and every export has the same setting
+- **Export** - Save as PNG or JPG with transparent or colored backgrounds,
   as a single image or a ZIP per layer/subject
-- **Undo/Redo** — Fix mistakes with Ctrl+Z / Ctrl+Y
-- **Console panel** — Live backend log stream with download progress bars
+- **Undo/Redo** - Fix mistakes with Ctrl+Z / Ctrl+Y. In brush mode the history is
+  per subject, and a burst of clicks is merged into one request instead of one
+  request per click. One undo or redo is one decoder pass no matter how long the
+  history is, so the cost does not grow as you edit (`SPECTRA_MAX_HISTORY` bounds
+  how much history is kept)
+- **Console panel** - Live backend log stream with download progress bars
 
 ### Brush Mode Extras
 
-- **Brush size slider** — Adjust stroke width
-- **Negative strokes** — Right-drag subtracts from the mask
-- **Multiple subjects** — Keep separate objects in separate layers
-- **Subjects panel** — Switch, add, or delete subjects
+- **Brush size slider** - Adjust stroke width
+- **Negative strokes** - Right-drag subtracts from the mask
+- **Multiple subjects** - Keep separate objects in separate layers
+- **Colour-coded masks** - Every subject's mask is drawn in the same colour the
+  subjects panel and toolbar chip use, so they are told apart on the canvas too. The
+  palette starts ten hues apart and shifts repeats in lightness, so nearby subjects
+  stay distinguishable, and the active subject is drawn on top at a higher opacity
+- **Per-subject undo/redo** - Each subject keeps its own stroke history. Undo/redo
+  acts on the active subject only, and the subjects panel has an undo/redo pair on
+  every row that targets just that subject. Undoing one subject never touches another
+  subject's strokes, mask or redo stack
+- **Subjects panel** - Switch, add, or delete subjects
 
 ### Detection Mode Extras
 
-- **Multiple detections** — Find and remove several objects at once
-- **Layers panel** — View and manage all detected objects
-- **Batch segmentation ("All")** — Segment every detection with one click
-- **YOLOE masks toggle** — Use the detector's own masks (faster) or SAM masks
+- **Multiple detections** - Find and remove several objects at once
+- **Layers panel** - View and manage all detected objects
+- **Batch segmentation ("All")** - Segment every detection with one click
+- **YOLOE masks toggle** - Use the detector's own masks (faster) or SAM masks
   (higher quality)
 
 ### SAM 3 Mode Extras
 
-- **Text-to-mask** — Type what to segment, SAM 3 finds and masks automatically
-- **Encode quality selector** — Fast (512), Balanced (1024), High (1500)
-- **Keep loaded toggle** — Prevent the model from unloading between prompts
-- **Per-instance control** — Keep/remove individual instances, undo/redo prompts
+- **Text-to-mask** - Type what to segment, SAM 3 finds and masks automatically
+- **Encode quality selector** - Fast (512), Balanced (1024), High (1500)
+- **Keep loaded toggle** - Prevent the model from unloading between prompts
+- **Per-instance control** - Keep/remove individual instances, undo/redo prompts
 
 ---
 
 ## Getting Started
 
 Everything is portable. The installers fetch their own toolchain (uv, Python,
-Bun), the launcher provisions a virtual environment inside the repo folder, and
+Bun), the installer provisions the virtual environment inside the repo folder, and
 model weights and runtime caches stay under `model_weights\`. The package cache
 lives in the backend folder (`backend\.uv\` or `backend_amd_gpu\.uv_cache_amd\`),
 and the installers and launchers redirect temp and cache paths into the project
@@ -88,12 +101,13 @@ CUDA build of PyTorch; otherwise it falls back to CPU.
 The AMD path uses AMD's official ROCm PyTorch wheels built by
 [TheRock](https://github.com/ROCm/TheRock). The installer detects your GPU's
 architecture (gfx target) automatically and selects the matching `device-gfxNNNN`
-extra from TheRock's multi-arch wheel index. Only the ROCm runtime wheels are
-installed — the `rocm-sdk-devel` development package is deliberately skipped,
-as it is only needed to compile HIP code and would add ~1.4 GB.
+extra from TheRock's multi-arch wheel index (`https://rocm.nightlies.amd.com/whl-multi-arch/`).
+That pulls the runtime packages (`rocm-sdk-core`, `rocm-sdk-libraries` and the
+`device-gfxNNNN` extra), not `rocm-sdk-devel` - the HIP compiler toolchain is
+only needed to build HIP code, which this project never does.
 
 **Only the RX 6600 (8 GB, gfx1032) has been actually tested by this project.**
-Other cards may work — the wheels exist for them — but nothing below is
+Other cards may work - the wheels exist for them - but nothing below is
 verified. Treat it as experimental on any other GPU.
 
 #### AMD Compatibility Notes
@@ -110,7 +124,7 @@ someone ran Spectra Segment on it.
 | RDNA 4 | RX 9000 series | published, runtime still being validated upstream | **no** |
 
 If you try an untested card and hit crashes or black outputs, it is most
-likely the wheel/runtime combination rather than the app — check TheRock's
+likely the wheel/runtime combination rather than the app - check TheRock's
 issues for your gfx target first.
 
 If your system has both an iGPU and a discrete GPU and torch picks the wrong
@@ -120,26 +134,29 @@ one, set `HIP_VISIBLE_DEVICES=1` (or disable the iGPU in BIOS).
 
 ## First Time Setup
 
-1. **Install** — Run the install script for your hardware.
-2. **Start** — Run the start script. On first launch it asks for a memory
+1. **Install** - Run the install script for your hardware.
+2. **Start** - Run the start script. On first launch it asks for a memory
    profile (how much VRAM/RAM to allow); the defaults are fine.
-3. **Choose mode** — Pick Brush/Detect or SAM 3 from the home screen.
-4. **Download model** — Click the model selector in the top left and choose
-   one. Models download automatically with checksum verification on first use.
-5. **Upload image** — Drag an image onto the app or click Upload.
-6. **Start removing** — Draw strokes, type prompts, or let SAM 3 do the work.
+3. **Choose mode** - Pick Brush/Detect or SAM 3 from the home screen.
+4. **Download model** - Click the model selector in the top left and choose
+   one. Models download automatically on first use; the single-file checkpoints
+   are sha256-verified before they are used (see below for the HuggingFace ones).
+5. **Upload image** - Drag an image onto the app or click Upload.
+6. **Start removing** - Draw strokes, type prompts, or let SAM 3 do the work.
 
-Large photos are fitted to the working resolution automatically before upload
-(the overlay says "Resizing & re-encoding..."), so phone-camera shots just
-work. Images beyond 32 MP are rejected as a safety measure.
+Large photos are fitted automatically before upload - the frontend downscales
+to 4096 x 4096 (16.7 MP) and 8192 px on the longest side, and the backend applies
+the same fit again for direct API uploads. The decoder hard-rejects anything
+whose header reports more than 32 MP or 32768 px on a side.
 
 ### Model Downloads
 
 - The single-file checkpoints (SAM 2 / SAM 3 / YOLOE) come from pinned URLs and
   every one is sha256-verified against a published digest before it is used.
 - The HuggingFace detector repos (GroundingDINO, Florence, CogFlorence) are pulled
-  with `snapshot_download` and rely on the Hub's own integrity checks; they are not
-  covered by the local digest table.
+  with `hf_hub_download` per file, falling back to `snapshot_download` when the file
+  listing fails, and rely on the Hub's own integrity checks; they are not covered by
+  the local digest table.
 - HuggingFace-hosted models use chunked Xet downloads when available.
 - Progress appears live in the console panel: one bar for the main weights
   file plus a per-file counter for the smaller support files.
@@ -155,16 +172,17 @@ work. Images beyond 32 MP are rejected as a safety measure.
 
 ### Brush Mode
 
-1. Upload an image — it gets encoded by the segmentation model.
+1. Upload an image - it gets encoded by the segmentation model.
 2. Draw strokes around objects you want to keep.
 3. Each stroke produces a mask instantly; right-drag subtracts.
-4. Add more subjects with the + button, switch via the subjects panel.
+4. Add more subjects with the + button, switch via the subjects panel. Each subject
+   draws in its own colour, and each one has its own undo/redo history.
 5. Toggle transparent view to inspect, then export.
 
 ### Detection Mode
 
 1. Upload an image and load a detector (GroundingDINO, Florence, or YOLOE).
-2. Type what to find — boxes appear over matching objects.
+2. Type what to find - boxes appear over matching objects.
 3. Click a box to segment it, or press "All" for everything at once.
 4. Manage results in the layers panel, then export.
 
@@ -172,13 +190,13 @@ Florence-2 / CogFlorence run on current `transformers` (>= 4.50) again: their
 remote code predates the release that removed `GenerationMixin` from
 `PreTrainedModel`, so the loader re-attaches it (and a valid generation config)
 at load time. Florence has no per-box confidence score, so the confidence
-slider does not filter its results — GroundingDINO and YOLOE do report scores.
+slider does not filter its results - GroundingDINO and YOLOE do report scores.
 
 ### SAM 3 Mode
 
-1. Switch to SAM 3 mode and pick the SAM 3 model (~3.3 GB download).
-2. Upload an image — encode quality follows your chosen setting.
-3. Type a prompt like "red bottle" — every matching instance gets masked.
+1. Switch to SAM 3 mode and pick the SAM 3 model (the largest single download).
+2. Upload an image - encode quality follows your chosen setting.
+3. Type a prompt like "red bottle" - every matching instance gets masked.
 4. Stack prompts, remove instances, adjust quality, then export.
 
 ---
@@ -187,12 +205,12 @@ slider does not filter its results — GroundingDINO and YOLOE do report scores.
 
 The launcher sets these automatically; they are listed here for reference:
 
-- `TORCH_BLAS_PREFER_HIPBLASLT=1` + `DISABLE_ADDMM_CUDA_LT=1` — hipBLASLt is
+- `TORCH_BLAS_PREFER_HIPBLASLT=1` + `DISABLE_ADDMM_CUDA_LT=1` - hipBLASLt is
   preferred for speed, but its addmm path is disabled because it crashes on
   some RDNA2 wheels.
-- `MIOPEN_USER_DB_PATH` + `MIOPEN_CUSTOM_CACHE_DIR` — keep the MIOpen kernel
+- `MIOPEN_USER_DB_PATH` + `MIOPEN_CUSTOM_CACHE_DIR` - keep the MIOpen kernel
   database inside `model_weights\miopen` so it persists between runs.
-- `HSA_ENABLE_SDMA=0` — avoids DMA-engine copy stalls reported on Windows.
+- `HSA_ENABLE_SDMA=0` - avoids DMA-engine copy stalls reported on Windows.
 - Encoders run under `torch.inference_mode()`, which stops autograd from building a
   live graph over the prompt encoder and decoder. That cut SAM2's per-image encoder
   memory dramatically and made encodes much faster.
@@ -212,6 +230,11 @@ Most knobs have sensible defaults set by the launcher:
 | `SPECTRA_DETECTOR_FP16` | Load detectors in fp16 on GPU (halves their VRAM; CPU stays fp32). |
 | `SAM2_QUANTIZE`, `SAM3_QUANTIZE` | Working precision override (16 = fp16). |
 | `SAM2_OFFLOAD_ENCODER` | Keep the SAM2 image encoder on CPU between images. |
+| `SPECTRA_MAX_HISTORY` | Undo steps kept per subject (default 200). Each step normally holds one 256x256 float32 low-res snapshot, about 256 KB, so the default caps a subject near 50 MB. A backend that does not expose low-res logits (SAM 3) stores no snapshot and uses less. |
+| `SAM3_MAX_HISTORY` | Prompt history depth in SAM 3 mode (default 100). |
+| `SPECTRA_MAX_OBJECTS` | Subjects allowed per session (default 50). A stroke past it is rejected, not silently dropped. |
+| `SPECTRA_MAX_SESSIONS` | Concurrent sessions (default 100). |
+| `SPECTRA_VRAM_HARD_CAP` | Hard fraction of device memory PyTorch is allowed to allocate (default 0.90). |
 
 ---
 
@@ -219,7 +242,7 @@ Most knobs have sensible defaults set by the launcher:
 
 - Windows 10 or later (all launchers are Windows-only)
 - 8 GB RAM minimum (16 GB recommended)
-- 10–20 GB free disk space for models and caches
+- 10-20 GB free disk space for models and caches
 - The first download of each model needs internet; after that the app runs
   fully offline
 
@@ -244,7 +267,22 @@ are never touched.
 ## Stopping the App
 
 Run `stop.bat` or `stop_amd.bat`. This stops the backend and frontend without
-removing files — start again anytime.
+removing files - start again anytime.
+
+---
+
+## Documentation
+
+- `docs/CODE_GUIDE.md` - architecture, invariants, verification and the fork rules
+- `docs/FRONTEND.md` - browser side: state, canvas, prompts, undo/redo
+- `docs/BACKEND_GUIDE.md` - routes, manager state, model backends, env vars
+- `docs/LOGGING.md` - log format, structured fields and the console panel
+- `docs/CODE_REFERENCE.md` - the per-file reference: every module, route, symbol and
+  script in both backends and the frontend, indexed by `path#symbol`, plus the
+  no-comments-in-code policy
+
+The source deliberately carries no explanatory comments or docstrings; rationale lives
+in the files above, tied to the code it describes.
 
 ---
 
@@ -252,27 +290,42 @@ removing files — start again anytime.
 
 ```
 spectra-segment/
-├── install.bat           # CPU/NVIDIA installer (fetches uv, python, bun)
-├── install_amd.bat       # AMD ROCm installer (TheRock wheels)
-├── start.bat             # CPU/NVIDIA launcher
-├── start_amd.bat         # AMD launcher (memory profile + GPU setup)
-├── stop.bat / stop_amd.bat
-├── cleanup.bat / cleanup_amd.bat
-├── launcher/             # setup_memory.ps1 - memory profile (called by both start scripts)
-├── checks/               # health-check script + bat wrapper + run logs
-├── backend/              # FastAPI backend - CUDA/CPU fork
-│   └── model_weights/    # downloaded models + runtime caches (CPU/NVIDIA)
-├── backend_amd_gpu/      # FastAPI backend - ROCm fork
-│   ├── model_weights/    # downloaded models + runtime caches (AMD)
-│   └── detect_amd_gpu.py # AMD-only gfx target detection
-├── frontend/             # React 19 + Vite UI (served on :3000)
-└── tools/                # portable uv/python/bun (created by installers)
+|-- install.bat           # CPU/NVIDIA installer (fetches uv, python, bun)
+|-- install_amd.bat       # AMD ROCm installer (TheRock wheels)
+|-- start.bat             # CPU/NVIDIA launcher
+|-- start_amd.bat         # AMD launcher (memory profile + GPU setup)
+|-- stop.bat / stop_amd.bat
+|-- cleanup.bat / cleanup_amd.bat
+|-- launcher/             # setup_memory.ps1 - memory profile (called by both start scripts)
+|-- checks/               # health-check script + bat wrapper + run logs
+|-- backend/              # FastAPI backend - CUDA/CPU fork
+|   `-- model_weights/    # downloaded models + runtime caches (CPU/NVIDIA)
+|-- backend_amd_gpu/      # FastAPI backend - ROCm fork
+|   |-- model_weights/    # downloaded models + runtime caches (AMD)
+|   `-- detect_amd_gpu.py # AMD-only gfx target detection
+|-- frontend/             # React 19 + Vite UI (served on :3000)
+`-- tools/                # portable uv/python/bun (created by installers)
 ```
 
 Backend API highlights: session lifecycle with token auth, stroke/bbox/SAM3
 prompting, detector catalog with live status streaming, server-side compositing
-for exports, SSE log and model-status streams. Both backend forks share the
-same API surface and differ only in hardware-specific loading and tuning.
+for exports, SSE log and model-status streams. Both backend forks expose the same
+API surface and the same manager logic; they differ in the hardware preamble
+(`main.py`, `device.py`, `run.cmd`) and in the AMD tree's MIOpen/HIP tuning and its
+`SPECTRA_DETECTOR_FP16=1` default.
+
+---
+
+## Checks
+
+- `checks\check_gpu.bat` - verifies the GPU stack (see Performance Notes above).
+- `frontend\use_web.bat <WebDir>` - links the shared frontend sources,
+  `node_modules` and `dist` into a backend's `web` folder. The install and start
+  scripts call it; running it by hand is not needed.
+
+There is no automated test suite in the repository. Verification is manual: run
+`install*.bat` -> `start*.bat`, then exercise the three modes in the browser and
+watch the console panel for backend errors.
 
 ---
 
@@ -283,7 +336,7 @@ Spectra Segment's own source is under the GNU General Public License v3.0
 
 It also depends on `ultralytics`, which is **AGPL-3.0**. GPL-3.0 and AGPL-3.0 are
 only one-way compatible, so the combined, distributed work must be released as
-AGPL-3.0 — it is not accurate to call the whole app GPL-3.0 while ultralytics is
+AGPL-3.0 - it is not accurate to call the whole app GPL-3.0 while ultralytics is
 linked. Commercial or closed-source distribution requires an Ultralytics
 Enterprise license.
 

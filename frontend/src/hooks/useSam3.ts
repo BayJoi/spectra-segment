@@ -108,7 +108,7 @@ export function useSam3() {
         return res;
       } catch (err) {
         console.error("SAM3 prompt failed:", err);
-        setError(extractError(err) || "Segmentation failed — please try again.");
+        setError(extractError(err) || "Segmentation failed - please try again.");
         return null;
       } finally {
         setPrompting(false);

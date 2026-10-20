@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -11,6 +10,7 @@ import torch
 
 from .base import SegmentationBackend
 from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
+from ..utils.model_integrity import ensure_model_file
 from ..utils.stderr_progress import StderrInterceptor as _StderrInterceptor
 from ..utils.torch_threads import cpu_threads, resolve_threads, cudnn_disabled
 
@@ -39,14 +39,14 @@ ULTRALYTICS_MODELS = {
 }
 
 MODEL_METADATA: dict[str, dict[str, str]] = {
-    "sam2.1_t.pt":        {"tier": "tiny",  "perf": "Very fast — good for real-time workflows"},
-    "sam2_t.pt":          {"tier": "tiny",  "perf": "Very fast — lightweight SAM2 variant"},
-    "sam2.1_s.pt":        {"tier": "small", "perf": "Balanced speed/quality — great for most tasks"},
-    "sam2_s.pt":          {"tier": "small", "perf": "Balanced speed/quality — SAM2 small"},
-    "sam2.1_b.pt":        {"tier": "medium","perf": "Higher accuracy — needs GPU for best speed"},
-    "sam2_b.pt":          {"tier": "medium","perf": "Higher accuracy — SAM2 base"},
-    "sam2.1_l.pt":        {"tier": "large", "perf": "Best accuracy — requires GPU, slower"},
-    "sam2_l.pt":          {"tier": "large", "perf": "Best accuracy — SAM2 large"},
+    "sam2.1_t.pt":        {"tier": "tiny",  "perf": "Very fast - good for real-time workflows"},
+    "sam2_t.pt":          {"tier": "tiny",  "perf": "Very fast - lightweight SAM2 variant"},
+    "sam2.1_s.pt":        {"tier": "small", "perf": "Balanced speed/quality - great for most tasks"},
+    "sam2_s.pt":          {"tier": "small", "perf": "Balanced speed/quality - SAM2 small"},
+    "sam2.1_b.pt":        {"tier": "medium","perf": "Higher accuracy - needs GPU for best speed"},
+    "sam2_b.pt":          {"tier": "medium","perf": "Higher accuracy - SAM2 base"},
+    "sam2.1_l.pt":        {"tier": "large", "perf": "Best accuracy - requires GPU, slower"},
+    "sam2_l.pt":          {"tier": "large", "perf": "Best accuracy - SAM2 large"},
 }
 
 DENYLIST = {"FastSAM-s.pt", "FastSAM-x.pt", "sam3_b.pt", "sam3_l.pt"}
@@ -75,22 +75,7 @@ class UltralyticsBackend(SegmentationBackend):
         os.environ["ULTRALYTICS_HOME"] = str(model_dir)
         os.environ["YOLO_CONFIG_DIR"] = str(model_dir)
 
-        abs_model = str(model_dir / model_path)
-        if not Path(abs_model).exists():
-            from backend.utils.net_check import is_connected
-            if not is_connected():
-                raise RuntimeError(
-                    f"No internet connection and '{model_path}' not found locally.\n"
-                    f"  Connect to the internet to download, or place the file in:\n"
-                    f"  {model_dir}"
-                )
-            from backend.utils.model_integrity import download_model_file, PINNED_MODEL_URLS
-            url = PINNED_MODEL_URLS.get(model_path)
-            if url:
-                LOGGER.debug("Not cached: %s", model_path)
-                download_model_file(model_path, Path(abs_model), url=url)
-            else:
-                LOGGER.debug("Not cached: %s", model_path)
+        abs_model = ensure_model_file(model_path, model_dir)
 
         with _MODEL_LOAD_LOCK:
             import sys
@@ -104,7 +89,6 @@ class UltralyticsBackend(SegmentationBackend):
                 from ultralytics.models.sam.predict import SAM2Predictor
                 from ultralytics.utils import SETTINGS
                 SETTINGS["weights_dir"] = str(model_dir)
-                abs_model = str(model_dir / model_path)
                 try:
                     self._predictor = SAM2Predictor(overrides={"model": abs_model, "imgsz": 1024, "device": self._device, "quantize": int(os.environ.get("SAM2_QUANTIZE", "32" if self._device == "cpu" else "16"))})
                     self._predictor.setup_model()

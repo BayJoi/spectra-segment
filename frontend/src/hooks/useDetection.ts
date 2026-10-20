@@ -66,8 +66,6 @@ export function useDetection() {
         );
         const base = detections.length;
         setDetections((prev) => [...prev, ...res.detections]);
-        // Detections append, so masks for indices that still exist are kept and
-        // the rest are dropped rather than left pointing at nothing.
         setPerDetectionMasks((prev) => {
           const next: Record<number, PackedMask> = {};
           for (const [k, v] of Object.entries(prev)) {
@@ -80,7 +78,7 @@ export function useDetection() {
         return { detections: res.detections, baseOffset: base };
       } catch (err) {
         logErr("detect", err);
-        pushToast("Detection failed — check the console for details");
+        pushToast("Detection failed - check the console for details");
         setLoadedDetector(null);
         return null;
       } finally {

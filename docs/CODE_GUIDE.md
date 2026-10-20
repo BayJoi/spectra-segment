@@ -1,4 +1,4 @@
-# Spectra Segment — Code Guide
+# Spectra Segment - Code Guide
 
 A single, complete reference for the project: how it is shaped, how it starts, the
 HTTP layer, the model manager, the model backends, the utilities, the model
@@ -6,16 +6,18 @@ catalogue, the frontend, the known limitations, how to verify a change and how t
 keep the two forks in sync.
 
 This file exists so the source stays free of prose. Anything that would otherwise
-be a comment in the code lives here instead. The companion files are
-`docs\BACKEND_GUIDE.md` (working on the backend), `docs\FRONTEND.md` (browser side)
-and `docs\LOGGING.md` (logging).
+be a comment in the code lives here or in `docs\CODE_REFERENCE.md`, which is the
+per-file reference and indexes every explanation by `path#symbol`. The companion
+files are `docs\BACKEND_GUIDE.md` (working on the backend), `docs\FRONTEND.md`
+(browser side) and `docs\LOGGING.md` (logging). The no-comment policy itself is
+stated in `docs\CODE_REFERENCE.md`.
 
 ---
 
 
 ## 1. Shape of the project
 
-Windows only. Portable. Local first — nothing leaves the machine. Three editing
+Windows only. Portable. Local first - nothing leaves the machine. Three editing
 modes on top of one FastAPI backend:
 
 | Mode | What it does |
@@ -36,7 +38,7 @@ The backend exists in **two forks**:
 
 Both forks share the same API surface, the same request/response models, and the
 same `models/manager.py` logic. They differ only in hardware-specific loading and
-tuning. **Every change to `backend/` must be mirrored to `backend_amd_gpu/`** —
+tuning. **Every change to `backend/` must be mirrored to `backend_amd_gpu/`** -
 see part 2, section 12.
 
 ### Directory map
@@ -75,7 +77,7 @@ AMD only: torch comes from TheRock's **nightly** multi-arch index,
 `https://rocm.nightlies.amd.com/whl-multi-arch/`, with the `torch[device-gfxNNNN]`
 extra. The `gfxNNNN` target comes from `detect_amd_gpu.py`, from
 `AMD_GFX_OVERRIDE`, or from a small hard-coded PCI-ID table. `rocm-sdk-devel` is
-deliberately skipped — it is only needed to compile HIP code, and it adds about
+deliberately skipped - it is only needed to compile HIP code, and it adds about
 1.4 GB.
 
 Nothing except the Python version is pinned. That means installs are not
@@ -194,7 +196,7 @@ the safety net for when the backend is started by hand.
 
 ---
 
-## 4. Backend — the HTTP layer
+## 4. Backend - the HTTP layer
 
 `main.py` builds the app, picks the device, and creates the `ModelManager`.
 
@@ -215,15 +217,16 @@ ServerErrorMiddleware
 ```
 
 `HostValidationMiddleware` requires the host to be `127.0.0.1` or `localhost`
-**and** the port to be 8000. That combination is what makes DNS rebinding useless
-against this app. `CORSMiddleware` sits outside everything, so preflight `OPTIONS`
-requests skip the whole inner stack including host validation. They carry no body,
-so nothing is disclosed.
+**and**, when the header carries a port, that port to be 8000. A `Host` with no port
+passes the port check. That combination is what makes DNS rebinding useless against
+this app. `CORSMiddleware` sits outside everything, so preflight `OPTIONS` requests
+skip the whole inner stack including host validation. They carry no body, so nothing
+is disclosed.
 
-The token is `secrets.token_urlsafe(32)`. It is generated once during startup, is
-never written to disk, and the frontend fetches it from the auth-exempt
-`/api/token`. The comparison runs on **bytes**, because Starlette decodes headers
-as latin-1 and a non-ASCII `X-Local-Token` used to raise `TypeError` — producing a
+The token is `secrets.token_urlsafe(32)`. It is generated once during startup (the
+`list`-named `get_or_create_token()` helper mints a new one on every call), is never
+written to disk, and the frontend fetches it from the auth-exempt `/api/token`. The comparison runs on **bytes**, because Starlette decodes headers
+as latin-1 and a non-ASCII `X-Local-Token` used to raise `TypeError` - producing a
 500 and a traceback instead of a clean 401.
 
 ### Endpoints
@@ -259,9 +262,15 @@ as latin-1 and a non-ASCII `X-Local-Token` used to raise `TypeError` — produci
 
 `/undo` and `/redo` now tell apart two cases that used to share one 404:
 
-- **404** — the session is gone. The client should rebuild it.
-- **409** — the session is there, but this subject has no strokes. The client
+- **404** - the session is gone. The client should rebuild it.
+- **409** - the session is there, but this subject has no strokes. The client
   should resynchronise its counters and stop retrying.
+
+`/predict` follows the same rule: a missing session answers **404**, and every other
+`ValueError` - no image loaded, object cap reached - stays a **400** carrying its own
+reason. A missing session used to answer 400 as well, and the client rebuilt the
+session on any 400, so reaching the per-session object cap quietly threw the session
+away and rebuilt it instead of telling the user why the stroke was refused.
 
 Reading the server's ledger instead of guessing is what makes the loop of repeated
 undo failures impossible.
@@ -287,15 +296,17 @@ The log ring is a `deque(maxlen=300)` written to from any thread. Fan-out uses
 an `asyncio.Queue` from a worker thread. Both queues are bounded at 128 and 64, and
 drops are silent by design.
 
-The SSE endpoints cannot use auth (`EventSource` cannot send headers), so they
-carry a per-IP cap of 5, a global cap of 100, and a maximum connection lifetime of
-1800 seconds. Without those, any local client could hold every slot open forever.
+The SSE endpoints cannot use auth (`EventSource` cannot send headers). The **log**
+stream (`/api/logs/stream`) therefore carries a per-IP cap of 5, a maximum
+connection lifetime of 1800 seconds and a 30 s keepalive. Both streams share one
+global subscriber cap of 100 (503 when full); only the log stream enforces the
+per-IP and lifetime limits, so `/api/models/stream` can be held open indefinitely.
 
 See `docs\LOGGING.md` for the full logging story.
 
 ---
 
-## 5. Backend — `models/manager.py`
+## 5. Backend - `models/manager.py`
 
 This is the single stateful part of the backend, and the most intricate file in the
 project. It owns sessions, which models are loaded, and each subject's mask
@@ -306,7 +317,7 @@ history.
 | Type | Holds |
 |---|---|
 | `Session` | Session id, model name, backend, image RGB and BGR, `objects`, the SAM3 prompt history and redo stack, `has_image`, `last_active`, and a per-session lock |
-| `ObjectState` | One **subject**: `stroke_history`, `redo_stack`, `last_mask`, `last_low_res_mask`, `mask_snapshots` |
+| `ObjectState` | One **subject**: `stroke_history`, `redo_stack`, `last_mask`, `last_low_res_mask`, `mask_snapshots`, plus `mask_revision` with the `png_cache`/`png_revision` pair that caches its encoded mask |
 | `MaskSnapshot` | The low-resolution decoder logits for one stroke, or `None` |
 | `StrokeEntry` | `points`, `labels`, `bboxes` |
 | `SAM3PromptEntry` | The prompt text and its confidence |
@@ -339,7 +350,7 @@ directly. `_object_history()` reads the real lists under `session.lock`.
 ### Subject identity
 
 A **subject** is an `ObjectState` addressed by an integer object id. The UI keeps
-`brushObjectsAtom` — the ordered ids — and `subjectMetaAtom` — the name and colour
+`brushObjectsAtom` - the ordered ids - and `subjectMetaAtom` - the name and colour
 for each id.
 
 Ids only ever increase. That matters because `clear_object` deletes the
@@ -349,22 +360,43 @@ a deleted one's stroke history.
 `subjectColor(id)` picks a stable entry from a colour palette. The same colour
 appears in the subjects panel, the toolbar chip, the brush preview and the mask
 overlay. That shared colour is what makes "which subject is which" answerable
-everywhere at once.
+everywhere at once - but it only holds if the overlay tints each subject's own layer,
+which is what `rebuildSubjectMaskCache` does - the renderer is covered in section 9.
+
+The ten palette entries sit at roughly 36-degree hue steps (the tightest gap is 24.7
+degrees, between the first two), and `shiftLightness` moves a repeat of the cycle up or
+down in lightness, so nearby subjects stay distinguishable without adding new base hues.
+The palette it replaced was not hue-separated: its closest pair (`#b85c2a` and `#a8705f`) was 7.2 degrees
+apart, which reads as one colour in the overlay.
 
 Deleting a subject calls `clear_object`, removes the id from `brushObjects`,
 deletes its metadata, and moves `activeObjectId` to a neighbouring id.
 
 ### Undo and redo
 
-`_replay_history(session, obj, full_replay=...)` has two modes:
+`_restore_object_mask` recomputes an object's mask for the stroke history as it
+stands after an undo or a redo. A stroke's result depends only on its own prompt and
+on the low-res mask produced by the stroke before it, and that value is exactly
+`mask_snapshots[i - 1].low_res`. So restoring costs **one decoder pass** for the
+stroke that is now last - or none at all when the history became empty - no matter
+how long the history is. Undo and redo used to call
+`_replay_history(full_replay=True)` and re-decode every remaining stroke, so the cost
+grew with the history: the single heaviest thing the backend did on a click.
+
+`_replay_history(session, obj, full_replay=...)` still has two modes:
 
 - **Incremental**, used by `predict`. It applies only the newest stroke, chaining
   on the cached low-resolution mask. That is one decoder pass, and it is the live
   drawing path.
-- **Full replay**, used by `undo` and `redo`. It starts from a clean state and
-  re-applies every stroke in order, so each stroke runs exactly once from the state
-  that existed before it. The image encoder is already warm, so the extra cost is
-  one cheap decoder pass per stroke.
+- **Full replay**, kept as the correctness fallback for when `mask_snapshots` is not
+  index-aligned with `stroke_history` (both lists are trimmed together, but a
+  partial history can still get there after an interrupted sequence). It starts from
+  a clean state and re-applies every stroke in order.
+
+One deliberate difference between the two: full replay hands `mask_input` to a bbox
+stroke, while the incremental path passes `None` for bbox strokes, which is how that
+stroke was originally computed. The single-step restore follows the incremental
+semantics, so it reproduces the mask the user was actually looking at.
 
 The old code only ever replayed the *last* stroke while setting
 `last_low_res_mask` to the *previous* stroke's output. That applied a stroke twice
@@ -373,7 +405,25 @@ restored the mask you actually had.
 
 `mask_snapshots` runs parallel to `stroke_history` and has to stay index-aligned.
 `redo` therefore appends a placeholder `MaskSnapshot(low_res=None)` when the saved
-one is missing, so the two lists cannot drift apart.
+one is missing, so the two lists cannot drift apart; the restore then overwrites that
+snapshot with the low-res mask it just produced and the chain heals.
+
+`steps` on `/undo` and `/redo` pops or pushes that many entries, clamped to the depth
+the subject actually has. The client coalesces a burst of clicks into one request per
+subject and never has to interpret a 409 caused by its own burst; see
+`lib/historyQueue.ts` and `hooks/useSession.ts`.
+
+The price of the one-pass restore is `mask_snapshots`: one `MaskSnapshot` per history
+entry, each holding the low-resolution decoder output as a float32 plane. That plane
+is a fixed 256x256 regardless of image size when the backend returns one, so it is about
+**256 KB per stroke** (SAM 3 returns no low-res logits, so its snapshots store `None`), and
+it is held for the session's lifetime. `SPECTRA_MAX_HISTORY` (200 by default) bounds
+it at roughly 50 MB per subject and 400 MB across eight subjects; the redo stack
+shares the same budget because a stroke lives in one list or the other, never both.
+Lowering `SPECTRA_MAX_HISTORY` trades undo depth for memory - it does not change the
+one-pass cost of an undo. Storing full-resolution masks instead would make undo a
+pure copy, at 4 bytes per image pixel per stroke, which is far more than the
+snapshot chain costs.
 
 ### Model residency
 
@@ -397,15 +447,21 @@ evicted at `IDLE_TIMEOUT = 600` seconds and your work destroyed.
 `_ensure_model_loaded` is the self-heal path. It reloads a backend that was evicted
 or re-encodes when the cached features were dropped.
 
-`load_image` records `session.has_image` on both success and failure. It used to
-return HTTP 200 with nothing encoded.
+`load_image` records `session.has_image` on both success and failure, and an encode
+failure is logged and swallowed. The upload route still answers 200 with the image
+dimensions, so a failed encode is invisible to the client at upload time. The next
+stroke goes through `_ensure_model_loaded`, which re-encodes from the stored BGR
+array; if that retry also fails, the exception surfaces as 500 (or 507 for OOM)
+rather than as a clean "no image" error.
 
 ### Detection flow
 
-`load_detector` validates the name **before** it tears anything down. It builds
-the new detector into local variables and only commits on success. A failed load
-therefore leaves the previous detector loaded and selectable, instead of leaving a
-dead one reported as current. It honours `SPECTRA_KEEP_SEG_ON_DETECT` by passing
+`load_detector` unloads the current detector **before** it validates the new name:
+the name check sits after the eviction and the `_safe_unload`. A failed *load* is
+safe (the new detector is built into locals and only committed on success), but an
+unknown *name* leaves `_detector` holding the old object in an unloaded state while
+`_current_detector` keeps the old name, so it still reports as loaded. It honours
+`SPECTRA_KEEP_SEG_ON_DETECT` by passing
 `keep_backend=self._loaded_models.get(self._current_model)`.
 
 `detect` unloads the segmentation model through `_can_unload` and `_safe_unload`, so
@@ -424,7 +480,7 @@ session bytes, so `MAX_SESSIONS = 100` limits the count only.
 ---
 
 
-## 6. Backend — the model backends
+## 6. Backend - the model backends
 
 | File | Class | Notes |
 |---|---|---|
@@ -441,17 +497,18 @@ passes it explicitly, so the mismatch is dormant.
 
 ### UltralyticsBackend (SAM 2)
 
-`DENYLIST` blocks `FastSAM-*`, `sam3_b.pt` and `sam3_l.pt`. `ULTRALYTICS_MODELS` is
-the allowlist. Loading happens under a module-level lock, with `torch.load`
-patched to default `weights_only=True` — that is protection against arbitrary code
-execution from a malicious checkpoint — and with `sys.stderr` swapped for
-`StderrInterceptor`. Any failure other than a missing `clip` package on a GPU
-device falls back to rebuilding on CPU. That fallback is too broad: a corrupt
-checkpoint or a plain bug also gets treated as "GPU unavailable".
+`DENYLIST` blocks `FastSAM-s.pt`, `FastSAM-x.pt`, `sam3_b.pt` and `sam3_l.pt`.
+`ULTRALYTICS_MODELS` is the allowlist. Loading happens under a module-level lock,
+with `torch.load` patched to default `weights_only=True` - that is protection
+against arbitrary code execution from a malicious checkpoint - and with `sys.stderr`
+swapped for `StderrInterceptor`. Any failure on a non-CPU device falls back to
+rebuilding the predictor on CPU. That fallback is too broad: a corrupt checkpoint or
+a plain bug also gets treated as "GPU unavailable". (`SAM3Backend` is the one that
+excludes `ModuleNotFoundError` and `clip` mentions from its fallback.)
 
 `_model_dtype()` works out the working precision at runtime, and every prompt
 tensor is built with it. `_offload_encoder` and `_restore_encoder` implement
-`SAM2_OFFLOAD_ENCODE`. `_image_pe`, the dense positional encoding, is cached per
+`SAM2_OFFLOAD_ENCODER`. `_image_pe`, the dense positional encoding, is cached per
 image and read under the inference lock.
 
 `predict` letterboxes the image into 1024x1024. It turns a box into two corner
@@ -477,7 +534,9 @@ thresholds at 0.5.
 `inference_features(features, self._proc_shape or self._src_shape, text=[text])`
 inside `cpu_threads` + `cudnn_disabled` + `torch.inference_mode()`, and
 `_format_result` filters by confidence. `predict` is the visual-prompt path and
-raises `NotImplementedError` for point prompts.
+raises `NotImplementedError` for point prompts. `cudnn_disabled` wraps these two
+decode paths in **both** forks; the fork difference is that the AMD copy also wraps
+`_encode_image` in it.
 
 The `inference_mode()` call matters. Without it, every prompt built a live autograd
 graph over the prompt encoder, the mask decoder and the full-resolution masks.
@@ -515,7 +574,7 @@ loaded model and its `language_model` onto subclasses that also inherit
 `GenerationMixin`, and gives the language model a generation config built from its
 own config (which carries `decoder_start_token_id` and `bos_token_id`) overlaid
 with the outer repo's settings. Copying the outer `generation_config` straight
-across does **not** work — it has no special-token ids and `generate()` then dies
+across does **not** work - it has no special-token ids and `generate()` then dies
 with "`decoder_start_token_id` or `bos_token_id` has to be defined". The patch is
 idempotent and is applied again at the top of `_detect_florence`, so a detector
 loaded before the patch existed still gets fixed.
@@ -525,14 +584,14 @@ box `score = 1.0` and ignores its `confidence` argument. The confidence slider i
 the UI therefore has **no effect** on Florence results. Grounding DINO and YOLOE
 do report real scores.
 
-`_nms` uses `supervision` when it is importable — class-agnostic, IoU 0.5 — and
+`_nms` uses `supervision` when it is importable - class-agnostic, IoU 0.5 - and
 otherwise a hand-written greedy pass. That fallback stops as soon as it has enough
 boxes instead of finishing suppression, so the kept set differs depending on
 whether `supervision` imported.
 
 `SPECTRA_DETECTOR_FP16` only applies on GPU. On CPU the model loads in fp32 and the
 flag is ignored. **The AMD fork sets it to 1 by default and the CUDA fork does not
-set it at all** — that is a real difference in behaviour between the forks.
+set it at all** - that is a real difference in behaviour between the forks.
 
 ### YOLEDetector
 
@@ -540,17 +599,19 @@ Seven YOLOE variants. Each one also needs the matching MobileCLIP text encoder:
 `mobileclip2_b.ts` for `yoloe-26*`, `mobileclip_blt.ts` for `yoloe-11*`.
 
 It permanently patches `ultralytics.nn.text_model.build_text_model` to force local
-encoder paths, and it changes the working directory to the weights folder during
-load. Neither change is undone afterwards. It reads no environment variables and
-uses no explicit `inference_mode`, relying on ultralytics internals.
+encoder paths - that patch is never undone. It also swaps `sys.stderr` and changes
+the working directory to the weights folder for the `YOLOE(...)` call; both of those
+**are** restored in a `finally`. It reads no environment variables, never uses
+`inference_mode`, and stores `self._device` without passing it to `YOLOE` or
+`predict`, so Ultralytics chooses the device.
 
 Its default confidence floor is **0.05** when the caller passes nothing. Grounding
-DINO's library default is 0.1. So detection density varies a lot depending on which
-detector you pick.
+DINO's library default is **0.25** in `transformers 4.57.6`, and the frontend never
+sends `confidence`, so the two detectors differ by 5x in default density.
 
 ---
 
-## 7. Backend — the utilities
+## 7. Backend - the utilities
 
 | Module | Responsibility |
 |---|---|
@@ -566,12 +627,18 @@ detector you pick.
 
 ### `model_integrity.py`
 
+`ensure_model_file(model_path, model_dir)` is the single entry point the loaders use:
+it returns the absolute path when the file is on disk, downloads it (digest-checked)
+when it is not, and raises a message naming `model_dir` when the machine is offline.
+`load_model` in `sam3_backend.py` and `ultralytics_backend.py` both call it, so the
+missing-file and download policy exists once.
+
 There are 18 entries. Each has both a pinned URL and a published digest. 17 of them
 point at the `ultralytics/assets` release `v8.4.0`, and those digests were checked
 character for character against the upstream release page.
 
 The exception is `sam3.pt`, at `huggingface.co/bodhicitta/sam3`. That is a
-community mirror, and its digest cannot be confirmed from any official source —
+community mirror, and its digest cannot be confirmed from any official source -
 yet `verify_model` treats it as absolute truth. A single wrong constant there
 permanently breaks SAM 3 for every user.
 
@@ -585,8 +652,8 @@ Neither of those is where the weights actually come from, so a proxy that allows
 one and blocks the other produces a misleading "no internet connection" error.
 
 There is no resume, no retry, no disk-space check, and no `fsync` before the
-rename. The TOFU branch of `verify_model` — remember the hash of whatever file is
-already on disk when no digest is published — is unreachable today, because every
+rename. The TOFU branch of `verify_model` - remember the hash of whatever file is
+already on disk when no digest is published - is unreachable today, because every
 name has a digest. If a name ever loses its digest, a hand-dropped file becomes the
 trust anchor and the real file is then rejected forever. `.hashes.json` is written
 without a lock and without an atomic rename.
@@ -596,11 +663,19 @@ without a lock and without an atomic rename.
 `mask_to_png_b64` enforces the dtype rules instead of trusting callers: bool
 becomes 0 or 255, floats are normalised (handling both 0..1 and 0..255), and
 anything else is clamped. The cv2 return value is checked rather than assumed.
+Integer masks are clamped in their own dtype and then converted straight to
+float32 - every integer in 0..255 is exact in float32, so the old float64
+intermediate only bought a full-resolution temp plane (measured on a 4K uint8
+mask: 40.4 ms before, 14.8 ms after, bit-identical output).
 
 `feather_mask_edge` pads with zeros before blurring so the image border does not
 darken, and always returns a float in 0..1. `composite_background` is ordinary
 straight-alpha "over" compositing. The RGBA handed to PIL is not premultiplied,
 which is what PNG expects.
+
+`composite_and_encode` takes the opaque-RGB path when **either**
+`background_color` or `bg_image` is set, so a caller that only passes a backdrop
+image no longer gets the transparent-RGBA path and a silently ignored argument.
 
 ### `torch_threads.py`
 
@@ -667,14 +742,16 @@ Detectors: 7 Grounding DINO / Florence models and 7 YOLOE models. Each has a
 Whether a model is downloaded is read from the HuggingFace cache for grounding
 models, and from `model_weights\<name>.pt` for YOLOE.
 
-`list_detectors` reports `loaded` from `_current_detector`. So a detector that the
-idle sweep unloaded still reads as loaded if the name was not cleared.
+`list_detectors` reports `loaded` from `_current_detector`, not from the backend's
+`is_loaded`. The idle sweep clears both, so it is consistent there; the stale case is
+the failed unknown-name `load_detector` described above, which clears neither when
+the previous detector had just been unloaded.
 
 ---
 
 ## 9. Frontend architecture
 
-React 19, Vite, UnoCSS and jotai. There is no router — `App.tsx` switches between
+React 19, Vite, UnoCSS and jotai. There is no router - `App.tsx` switches between
 `EmptyState`, `Canvas` (which covers Brush and Detection) and `Sam3Page` based on
 `sam3ModeAtom`.
 
@@ -683,13 +760,13 @@ Full detail lives in `docs\FRONTEND.md`. The short version:
 ### Build config
 
 `vite.config.ts` runs on port 3000. `server.fs.allow` covers `import.meta.dirname`,
-`../frontend`, `../backend/web` and `../backend_amd_gpu\web` — that list is what
+`../frontend`, `../backend/web` and `../backend_amd_gpu\web` - that list is what
 makes the junction indirection work. It also sets a dev CSP, `X-Frame-Options:
 DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 
 `server.host: "localhost"` in the config is dead. Both launchers override it with
 `--host 127.0.0.1`. `connect-src` allows both `127.0.0.1:8000` and
-`localhost:8000`, which matches `BASE`. There is no proxy — the frontend talks to
+`localhost:8000`, which matches `BASE`. There is no proxy - the frontend talks to
 the backend directly.
 
 ### State
@@ -699,7 +776,7 @@ every `useAtom` call in every component shares one store.
 
 | Store | Atoms |
 |---|---|
-| `session.ts` | `sessionIdAtom`, `modelNameAtom`, `imageUrlAtom`, `imageWidthAtom`, `imageHeightAtom`, `imageFileAtom`, `masksAtom`, `objectMasksAtom`, `perDetectionMasksAtom`, `brushObjectsAtom`, `activeObjectIdAtom`, `objectUndoCountsAtom`, `objectRedoCountsAtom`, `objectHistoryAtom`, `subjectMetaAtom`, `brushPredictInFlightAtom`, `modelsAtom` |
+| `session.ts` | `sessionIdAtom`, `modelNameAtom`, `imageUrlAtom`, `imageWidthAtom`, `imageHeightAtom`, `imageFileAtom`, `masksAtom`, `objectMasksAtom`, `perDetectionMasksAtom`, `brushObjectsAtom`, `activeObjectIdAtom`, `objectUndoCountsAtom`, `objectRedoCountsAtom`, `objectHistoryAtom`, `subjectMetaAtom`, `modelsAtom` |
 | `ui.ts` | Dialog and overlay flags, the console state, toasts, imperative callback atoms |
 | `detection.ts` | `detectModeAtom`, `toolModeAtom`, `brushSizeAtom`, `featherRadiusAtom`, `detectorsAtom`, `selectedDetectorAtom`, `loadedDetectorAtom`, `detectorLoadingAtom`, `detectQueryAtom`, `detectionsAtom`, `selectedDetectionAtom`, `isDetectingAtom`, `yoloeMasksEnabledAtom` |
 | `layers.ts` | `layersAtom`, `selectedLayersAtom`, and the `nextLayerId()` counter that mints every layer id |
@@ -708,12 +785,12 @@ every `useAtom` call in every component shares one store.
 Four atoms persist to `localStorage` through `atomWithStorage`: `consoleFilterAtom`,
 `consoleSourceAtom`, `consoleCategoryAtom` and `consoleShowTimeAtom`.
 
-`masksAtom` carries three meanings at once. In brush mode it is the union of every
-subject's mask. In SAM3 mode it is the flat list of every instance. It is also the
-"is there anything to export or show transparently" check. `objectMasksAtom` is the
-per-subject breakdown, and it is what the per-subject colour overlay is built from.
-`perDetectionMasksAtom` is keyed by **detection array index**, which is why
-detection indices have to stay stable.
+`masksAtom` carries three meanings at once. In brush mode it is `Object.values` of
+`objectMasksAtom`, in id order. In SAM3 mode it is the flat list of every instance. It
+is also the "is there anything to export or show transparently" check.
+`objectMasksAtom` is the per-subject breakdown, and it is what the per-subject colour
+overlay is built from. `perDetectionMasksAtom` is keyed by **detection array index**,
+which is why detection indices have to stay stable.
 
 ### `useSession` and its module-level guards
 
@@ -727,18 +804,44 @@ are module-level instead:
 | `uploadGuardRef` | One upload at a time |
 | `endGuardRef` | One session teardown at a time |
 | `blobUrlRef` | The single live object URL, revoked exactly once. The old per-instance ref leaked a blob URL on every mode switch and every End Session |
-| `predictQueueMap` | One promise chain per session id, which serialises predict calls |
+| `sessionQueueMap` | One promise chain per session id, which serialises every mutation: predict, undo/redo bursts and clear-object |
 
-`applyHistory(history)` is the only writer of the undo and redo counters. It adopts
-the server's `object_history` as-is, and it also creates subject metadata for any
-new id.
+The undo/redo ledger, the in-flight stroke counter, the burst queue and the drain flag
+are module-level for the same reason. `Canvas` is the instance that runs predictions,
+while `Toolbar`, `SubjectsPanel` and the Ctrl+Z handler in `App` read the ledger to
+decide whether a click is allowed. A per-hook copy in those components would stay
+empty, so their guard would read depth 0 and drop every click.
+
+`applyHistory(history)` adopts the server's `object_history` as-is, and it also creates
+subject metadata for any new id. It is authoritative for the keys it carries: a subject
+missing from it has been cleared, so its entry is dropped. `patchHistory(oid, patch)`
+corrects one subject without touching the others, and is what the 409 paths use - the
+old code called `applyHistory({ [oid]: ... })` there, which replaced the whole ledger
+and zeroed every other subject's depth.
 
 ### Undo and redo flow
 
-`predict` calls `applyHistory(res.objectHistory)`. `undo` and `redo` do the same on
-success. On **409** the local counter is zeroed and a toast is shown — no session
-teardown, no retry. On **404** the session is recovered. `clearObjectHistory`
-follows the same pattern.
+`predict` calls `applyPredict(res)`: masks come from `res.object_masks` (one PNG per
+subject, decoded only when the string changed, in parallel across the subjects that
+did change) and the ledger from `res.objectHistory`.
+
+`undo` and `redo` do not call the endpoint when they are pressed. They push an intent
+onto `lib/historyQueue.ts`, which accumulates per subject and kind, and a scheduled task
+on the session queue drains it as one request per subject carrying `steps`. So five fast
+clicks on one subject become one `POST /undo?steps=5`, a click cannot overtake an
+in-flight prediction, and two undos cannot race each other into out-of-order responses.
+The backend clamps `steps` to the depth the subject actually has, so a burst cannot
+manufacture a **409**. The client clamps as well, to the depth the subject has when the
+drain runs. Its guard also counts a stroke that is still in flight: `availableSteps`
+adds it to the undo depth and subtracts it from the redo depth, because the stroke was
+queued first, will land in the history before the click's request, and clears the redo
+stack. Within a drain, undo clicks run before redo clicks, so a burst that mixes both
+resolves undo-first rather than in click order.
+
+On **409** only that subject is corrected (`patchHistory`) and a toast is shown - no
+session teardown, no retry, and no effect on other subjects. On **404** the session is
+recovered. `clearObjectHistory` runs inside the same queue so it cannot interleave with
+a stroke or an undo.
 
 ### Canvas pipeline
 
@@ -748,17 +851,49 @@ Four stacked canvases: `imageCanvas`, `maskCanvas`, `detectCanvas`, `drawCanvas`
 `scale = baseScale x zoom`, and integer offsets centred in the container. The wheel
 handler reproduces that rounding exactly so the cursor stays anchored.
 
-`redraw` sizes every backing store in **device pixels** — `clientWidth x dpr` — and
+`redraw` sizes every backing store in **device pixels** - `clientWidth x dpr` - and
 scales each context by the DPR. Coordinates stay in CSS space, but the rendering is
 crisp on high-density displays. There was no `devicePixelRatio` handling at all
 before, so everything was soft on any HiDPI screen.
 
-Mask rendering prefers the per-subject overlay. `rebuildSubjectMaskCache` builds
-one offscreen canvas per subject, blurs it if feathering is on, and tints it with
-that subject's colour using `source-in`. They are drawn back to front, with the
-active subject last. It falls back to the single union overlay when there are no
-per-subject masks. Transparent mode builds a separate composite using
-`destination-in`.
+Mask rendering prefers the per-subject overlay. `rebuildSubjectMaskCache` draws each
+subject on one reused scratch canvas, blurs it if feathering is on, tints **that
+layer** with the subject's colour using `source-in`, and only then composites the
+tinted layer at 42% alpha (56% for the active subject). Tinting the accumulator
+instead re-colours every subject already composited and multiplies alpha by 0.42 per
+subject, so with several subjects every mask ended up in one colour and faded toward
+invisible (0.42^N) - the reason subjects could look like they had disappeared while
+the panel still listed them. Layers are composited back to front with the active
+subject last, so the active one wins overlaps. It falls back to the single union
+overlay when there are no per-subject masks. Transparent mode builds a separate
+composite using `destination-in`.
+
+Each subject's tinted, full-resolution layer is cached between rebuilds in
+`ensureSubjectLayer`, keyed by the `PackedMask` **object identity**. That is exact and
+free: `decodeObjectMasks` in `lib/api.ts` returns the same object while a subject's
+base64 PNG is unchanged, so identity means "these mask bytes are the ones already on
+screen". A rebuild therefore re-tints only the subjects that actually changed and
+composites the cached layers for the rest - the composite itself is one `drawImage`
+per subject at the alpha the active subject needs, so changing the active subject does
+not re-tint anything. Measured in the browser harness, eight 2048x2048 subjects with
+one subject changing per update: **74.6 ms** for a full rebuild of all eight versus
+**9.7 ms** for the cached path, about 7.7x cheaper.
+
+The cache is held to `SUBJECT_LAYER_BUDGET_BYTES` (192 MB) by evicting the least
+recently used subject first, and a layer is discarded when its subject, image,
+feather radius or colour changes. Past the budget a subject rebuilds instead of being
+cached, which is the behaviour before the cache existed, so memory stays bounded
+rather than scaling with the object count. Each cached layer is a canvas of its own:
+the scratch canvas is reused for the next subject, so it can never be the cached copy.
+
+Masks whose resolution is not the image's resolution are scaled onto the image rect
+rather than skipped. Skipping them was silent: the composite simply came out empty,
+the empty composite was cached, and every later redraw painted that blank overlay -
+which is how the overlay could vanish after a stroke and not come back. `noteMaskScale`
+now reports the mismatch once per pair of sizes, so the scaling is visible in the log.
+The rebuild gate also keys its deferred jobs by name (`subject`, `masks`,
+`transparent`); they used to share one slot, so a deferred subject rebuild was
+silently overwritten by a mask-cache rebuild and never ran.
 
 `blurMaskCanvas` calls `blurPadded`, which pads by the radius so the border does
 not darken, then either uses `ctx.filter = blur(...)` or a three-pass separable box
@@ -767,9 +902,20 @@ allocated a single-channel destination while being handed a `w x h x 4` plane. S
 horizontal pass only saw the first quarter of the image, and the rest came out as
 `NaN`. Most of the feather ended up fully transparent.
 
-The rebuild cache key includes the mask ids, the active subject and the feather
-radius. `Canvas.tsx` calls `invalidateCache()` whenever the relevant arrays change
-identity.
+The rebuild cache key includes the mask ids, the active subject, the feather radius
+and the mask revision, and both the write and the compare side build it through the
+same helper. They used to disagree - the comparison appended a revision the stored key
+never had - so the key could not match and every single redraw rebuilt every subject's
+overlay: a full-size canvas per subject, several times a second, for as long as the
+editor was open. `Canvas.tsx` calls `invalidateCache()` whenever the relevant arrays
+change identity, and that now **empties the keys instead of dropping the canvases**, so
+a rebuild deferred by the 80 ms gate redraws the previous overlay rather than a blank
+one.
+
+The two flat caches behind it - `rebuildMaskCache` and
+`rebuildTransparentComposite` - keyed on the masks' **widths** alone, so a mask that
+changed content without changing size was served stale forever. They key on the
+feather radius and the mask revision now, which is exact.
 
 ### Brush drawing
 
@@ -789,7 +935,7 @@ gesture.
 |---|---|
 | Fewer than 3 points | One point, label +1 or 0 |
 | Negative | Always an area prompt |
-| Positive and closed | A ring prompt — a donut of up to 8 interior positive points plus the ring as negative |
+| Positive and closed | A ring prompt - a donut of up to 8 interior positive points plus the ring as negative |
 | Positive and open | An area prompt |
 
 `buildAreaPrompt` rasterises into an offscreen canvas at most 1024 px wide. It
@@ -810,11 +956,11 @@ backend used to drop the empty entries, which shifted every later mask onto the
 wrong detection. Indexing by position is only correct now because positions are
 preserved.
 
-`addLayer` makes ids from a module-level counter that is also advanced past any id
-already in the store. The old version derived the id from a closure value of
-`layerIdCounter`. That meant every `addLayer` call inside one synchronous loop
-produced the **same** id. So `selectedLayers` addressed them all at once, and
-`removeLayer(id)` deleted them all.
+Layer ids come from `nextLayerId` in `store/layers.ts`: it scans the ids already in
+the store, advances the module-level counter past the highest one and returns
+`layer-<n>`. Deriving the id from a closure value instead made every `addLayer`
+call inside one synchronous loop produce the **same** id, so `selectedLayers`
+addressed them all at once and `removeLayer(id)` deleted them all.
 
 Removing a detection has to reindex `perDetectionMasks`, `detections`,
 `layers[].detectionIndex` and `selectedDetection` together. That logic used to be
@@ -835,7 +981,7 @@ counter, so it is immune to the duplicate-id bug.
 
 `api.sam3Undo` and `api.sam3Redo` throw away the masks the server returns, so the
 **local** prompt stack is the authority for the mask pixels. After a
-`recoverSession` — which recreates an empty server history — the two diverge.
+`recoverSession` - which recreates an empty server history - the two diverge.
 
 `removeInstance` drops any prompt whose mask list becomes empty. The backend does
 the same, which means every later `prompt_index` shifts down. The client's cached
@@ -844,7 +990,7 @@ indices go stale, and there is no way for it to notice.
 ### Export
 
 `ExportDialog` encodes every mask to a base64 PNG synchronously on the main thread
-— one `w x h` loop plus a `toDataURL` per mask — and posts it to `/export-zip`. 20
+- one `w x h` loop plus a `toDataURL` per mask - and posts it to `/export-zip`. 20
 masks at 4096x4096 is a multi-second freeze. `/export-image` exists but is never
 called.
 
@@ -879,8 +1025,8 @@ callers can tell 404 (recover) from 409 (resync).
 The token is memoised in `_token` and `_tokenPromise`. A 401 clears both and
 retries exactly once with a fresh token.
 
-`releaseSession` fires `sendBeacon` — which cannot set headers, so the backend
-exempts that path from auth — **and** a token-bearing `DELETE`. A page teardown
+`releaseSession` fires `sendBeacon` - which cannot set headers, so the backend
+exempts that path from auth - **and** a token-bearing `DELETE`. A page teardown
 therefore sends two destroy requests. Both are idempotent.
 
 ---
@@ -897,7 +1043,7 @@ Ranked, with the reason each one is still open.
    re-upload under the same name breaks every existing install.
 3. ~~`request._body` replay is almost certainly a no-op.~~ **Resolved / not a bug.**
    This was a suspicion, not a finding. It was tested against the installed Starlette
-   (1.7.0): a chunked request with no `Content-Length` is fully readable by the
+   (1.8.0): a chunked request with no `Content-Length` is fully readable by the
    endpoint, and an oversized chunked request is correctly rejected with 413, so the
    `request._body` replay in `RequestSizeLimitMiddleware` does work. The initial
    `Content-Length` check covers the common case; the buffered path is the fallback
@@ -907,18 +1053,20 @@ Ranked, with the reason each one is still open.
    RAM into the gigabyte range, with no cap on the output side.
 5. **Session memory is unbounded.** Worst case is about 6-13 GB per session times
    100 sessions, tracked by count only.
-6. **`_collect_all_masks` snapshots the id list under `session.lock`**, but each
-   object's `last_mask` is read in a second critical section. A `clear_object`
-   landing between the two still yields a partial result.
+6. **`_object_masks_png` reads the object list under `session.lock` but encodes
+   outside it**, deliberately, so a multi-megabyte PNG encode cannot stall stroke
+   appends. The list is therefore a snapshot from the moment of the read, and a mask
+   computed during the encode appears in the next response.
 7. **One Escape press can close several UI layers at once.** App, ConsolePanel,
    LayersPanel, SubjectsPanel and Select each register their own listener.
 8. **`start.bat` and `stop.bat` interfere across forks.** `start.bat` kills any
    process whose command line contains `main:app`, which includes the AMD backend.
 9. **`install_amd.bat` still installs from a nightly index**, and there is no
    rollback path.
-10. **`detect_amd_gpu.py` reports 0 MB of VRAM for whole GPU families** — Strix
-    Point, Strix Halo, Krackan, Navi 24, Rembrandt, Mendocino and all Instinct.
-    `setup_memory.ps1` then quietly substitutes a fallback budget with no warning.
+10. **`detect_amd_gpu.py` reports 0 MB of VRAM for whole GPU families** - Strix
+    Point, Strix Halo, Krackan, Phoenix, Van Gogh, Rembrandt, Mendocino and every
+    Instinct. `setup_memory.ps1` then quietly substitutes a fallback budget with no
+    warning. (Navi 24 does have entries: RX 6500/6400 and friends report 4096 MB.)
 11. **`get_or_create_token()` makes a fresh token on every call.** It is safe only
     because it is called exactly once. A second call would invalidate every token
     already issued.
@@ -944,16 +1092,16 @@ Backend, both forks:
 ```
 & "backend_amd_gpu\.venv\Scripts\python.exe" -m py_compile backend\main.py backend\models\manager.py
 & "backend_amd_gpu\.venv\Scripts\python.exe" -m py_compile backend_amd_gpu\main.py backend_amd_gpu\models\manager.py
-$env:PYTHONPATH = "D:\Spectra Group\Spectra Segment"
-& "backend_amd_gpu\.venv\Scripts\python.exe" -X utf8 -c "import importlib,sys; sys.path.insert(0,'D:/Spectra Group/Spectra Segment'); importlib.import_module('backend.main'); importlib.import_module('backend_amd_gpu.main')"
+$env:PYTHONPATH = "<repo root>"
+& "backend_amd_gpu\.venv\Scripts\python.exe" -X utf8 -c "import importlib; importlib.import_module('backend.main'); importlib.import_module('backend_amd_gpu.main')"
 ```
 
 Frontend:
 
 ```
 cd frontend
-& "D:\Spectra Group\Spectra Segment\tools\bun-amd\bun.exe" x tsc --noEmit
-& "D:\Spectra Group\Spectra Segment\tools\bun-amd\bun.exe" run build
+& "..\tools\bun-amd\bun.exe" x tsc --noEmit
+& "..\tools\bun-amd\bun.exe" run build
 ```
 
 GPU health, after any wheel change:
@@ -962,7 +1110,7 @@ GPU health, after any wheel change:
 checks\check_gpu.bat
 ```
 
-That script does not reproduce the launchers' environment —
+That script does not reproduce the launchers' environment -
 `PYTORCH_HIP_ALLOC_CONF`, `HSA_OVERRIDE_GFX_VERSION`, `HSA_ENABLE_SDMA`, the
 attention toggles and the hard cap are all absent. So a regression caused by a
 launcher-set variable cannot be caught by it.
@@ -971,21 +1119,27 @@ launcher-set variable cannot be caught by it.
 
 ## 12. Keeping the two forks in sync
 
-These utility files are **byte-identical** between the forks and must stay that
-way: `security.py`, `compositing.py`, `torch_threads.py`, `stderr_progress.py`,
-`model_integrity.py`, `net_check.py`, `offline.py`, `humantime.py`, and `logctx.py`.
+These files are **byte-identical** between the forks and must stay that way:
+`utils/security.py`, `utils/compositing.py`, `utils/torch_threads.py`,
+`utils/stderr_progress.py`, `utils/model_integrity.py`, `utils/net_check.py`,
+`utils/offline.py`, `utils/humantime.py`, `utils/logctx.py`, the three
+`__init__.py` files, `models/ultralytics_backend.py` and `requirements.txt`.
 
 Files that legitimately differ, and how:
 
 | File | Allowed difference |
 |---|---|
 | `main.py` | The AMD-only gfx and HIP preamble, `miopen` cache directories, `torch` versus `_torch` aliasing, the `torch.version.hip` branch, `cudnn.benchmark=False` on HIP, `matmul.allow_fp16_reduced_precision_reduction` on HIP, `_log_gpu_mem()` around detect, the AMD no-GPU warning, and `backend_amd_gpu.*` import paths |
-| `utils/device.py` | AMD adds `_detect_rocm()` and only claims NVIDIA when `torch.version.cuda` is set |
-| `models/sam3_backend.py` | AMD imports and applies `cudnn_disabled` in the SAM3 encode and decode paths |
-| `models/grounding_detector.py` | AMD already had the per-detect `empty_cache` removals and the 1024-square Florence pre-warm |
-| `models/ultralytics_backend.py` | AMD already had the `RLock` and the locked `unload_model()` |
+| `utils/device.py` | AMD adds `_detect_rocm()`. **Both** forks only claim NVIDIA when `torch.version.cuda` is set, so the CUDA/CPU fork falls back to CPU on a ROCm build instead of mislabelling the card |
+| `models/sam3_backend.py` | AMD wraps the SAM3 **encode** in `cudnn_disabled` as well (both forks already wrap the two decode paths), and its missing-`clip` hint says `install_amd.bat`. Model resolution and download are shared via `utils/model_integrity.ensure_model_file()` |
+| `models/grounding_detector.py` | Import paths only (`backend.utils.*` vs `backend_amd_gpu.utils.*`); the per-detect `empty_cache` and the 1024-square Florence pre-warm live in both forks |
+| `models/ultralytics_backend.py` | Nothing: byte-identical, including the `RLock` and the locked `unload_model()` |
+| `models/yoloe_detector.py` | Absolute import paths only (three of them) |
+| `run.cmd` | AMD adds MIOpen env vars and cache dirs, the tunable-op cache, `OCL_SET_SVM_SIZE`, the HIPBLASLt/addmm switches, `SPECTRA_DETECTOR_FP16=1`, and runs `backend_amd_gpu.main:app` |
 | `models/base.py`, `models/detector_base.py` | `...` versus `pass` in the abstract stubs |
 | `models/manager.py` | Import paths only |
+| `amd_gfx.py` | AMD only; no CPU/CUDA counterpart |
+| `detect_amd_gpu.py` | AMD only; no CPU/CUDA counterpart |
 
 Every other shared file must be byte-identical, with no exceptions.
 
@@ -994,5 +1148,5 @@ How to mirror a change:
 1. Copy the change across.
 2. Swap `backend.` for `backend_amd_gpu.` in absolute imports. Leave relative
    imports alone.
-3. Run the verification in section 11 for **both** forks.
+3. Run the checks in section 11 for **both** forks.
 4. Check that only the differences in the table above remain.

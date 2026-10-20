@@ -200,12 +200,12 @@ export function Canvas({ interactive = true }: CanvasProps) {
     if (!imageRef.current) return;
     invalidateCache();
     requestAnimationFrame(() => redraw());
-  }, [masks, perDetectionMasks, detections, featherRadius, sam3Instances, redraw, invalidateCache]);
+  }, [masks, objectMasks, perDetectionMasks, detections, featherRadius, sam3Instances, redraw, invalidateCache]);
 
   useEffect(() => {
     if (!imageRef.current) return;
     requestAnimationFrame(() => redraw());
-  }, [selectedDetection, showTransparent, hideBboxes, selectedSam3Instance, redraw]);
+  }, [activeObjectId, selectedDetection, showTransparent, hideBboxes, selectedSam3Instance, redraw]);
 
   useEffect(() => {
     const removeDetectionAt = (idx: number) => {
@@ -433,7 +433,7 @@ export function Canvas({ interactive = true }: CanvasProps) {
     const sampled = prompt.points;
     const labels = prompt.labels;
     if (sampled.length === 0) {
-      emitUi("brush", "WARNING", "Stroke ignored — too small to sample any points");
+      emitUi("brush", "WARNING", "Stroke ignored - too small to sample any points");
       return;
     }
     emitUi("brush", "DEBUG", `Stroke submitted (${sampled.length} sample points, ${activeStrokeModeRef.current})`);
@@ -502,25 +502,27 @@ export function Canvas({ interactive = true }: CanvasProps) {
               setDetections((prev) => prev.map((d, di) => (di === i && d.mask ? { ...d, mask: null } : d)));
               emitUi("segment", "INFO", `Used the detector's own mask for #${i + 1} in ${Date.now() - t}ms`);
             } catch (err) {
-              emitUi("segment", "WARNING", `Detector mask for #${i + 1} undecodable — falling back to SAM`);
+              emitUi("segment", "WARNING", `Detector mask for #${i + 1} undecodable - falling back to SAM`);
               const res = await api.segmentBatch(sessionIdRef.current!, [[...det.bbox]]);
-              if (res?.masks?.length) {
-                setPerDetectionMasks((prev) => ({ ...prev, [i]: res.masks[0] }));
+              const mask = res?.masks[0];
+              if (mask) {
+                setPerDetectionMasks((prev) => ({ ...prev, [i]: mask }));
               }
             }
           } else {
             const t = Date.now();
             try {
               const res = await api.segmentBatch(sessionIdRef.current!, [[...det.bbox]]);
-              if (res?.masks?.length) {
-                setPerDetectionMasks((prev) => ({ ...prev, [i]: res.masks[0] }));
+              const mask = res?.masks[0];
+              if (mask) {
+                setPerDetectionMasks((prev) => ({ ...prev, [i]: mask }));
                 emitUi("segment", "INFO", `Segmented detection #${i + 1} in ${Date.now() - t}ms`);
               } else {
                 emitUi("segment", "WARNING", `Segmentation returned no mask for detection #${i + 1}`);
               }
             } catch (err) {
               logErr("segment", err);
-              pushToast("Segmentation failed — check the console");
+              pushToast("Segmentation failed - check the console");
             }
           }
 

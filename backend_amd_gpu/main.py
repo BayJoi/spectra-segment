@@ -3,17 +3,7 @@ from __future__ import annotations
 import os
 import time
 
-
-def _gfx_override_value(gfx: str | None) -> str | None:
-    if not gfx:
-        return None
-    if gfx.startswith("gfx101"):
-        return "10.1.0"
-    if gfx.startswith("gfx103"):
-        return "10.3.0"
-    if gfx.startswith("gfx110"):
-        return "11.0.0"
-    return None
+from backend_amd_gpu.amd_gfx import gfx_override_value
 
 
 def _configure_amd_gfx_override() -> None:
@@ -23,7 +13,7 @@ def _configure_amd_gfx_override() -> None:
     if not override:
         gfx = os.environ.get("AMD_GFX") or os.environ.get("AMD_GFX_OVERRIDE")
         if gfx:
-            override = _gfx_override_value(gfx)
+            override = gfx_override_value(gfx)
         else:
             try:
                 import subprocess
@@ -182,7 +172,7 @@ _BOX_DRAWING_RE = re.compile(r"\u2501|\u2500|\u2577")
 
 _DOWNLOAD_RES = (
     re.compile(r"^(?P<name>[^:]{1,80}):\s+\S+\s+(?P<pct>\d{1,3})%\s+complete"),
-    re.compile(r"^(?P<name>[^:]{1,80}):\s+(?P<pct>\d{1,3})%\s+—"),
+    re.compile(r"^(?P<name>[^:]{1,80}):\s+(?P<pct>\d{1,3})%\s+-"),
     re.compile(r"^(?P<name>[^:]{1,80}):\s+(?P<pct>\d{1,3})%\|"),
 )
 
@@ -424,18 +414,18 @@ async def lifespan(app: FastAPI):
 
     if not torch.cuda.is_available():
         LOGGER.warning(
-            "No GPU detected — the AMD backend will run on CPU. "
+            "No GPU detected - the AMD backend will run on CPU. "
             "Install ROCm (rocm.docs.amd.com) or use the standard backend for CPU-only inference."
         )
     else:
         try:
             props = torch.cuda.get_device_properties(0)
-            gpu_line = "%s · %.0f GB" % (torch.cuda.get_device_name(0), props.total_memory / (1024**3))
+            gpu_line = "%s - %.0f GB" % (torch.cuda.get_device_name(0), props.total_memory / (1024**3))
             arch = getattr(props, "gcnArchName", "") or ""
             if arch:
-                gpu_line += " · " + arch.split(":")[0]
+                gpu_line += " - " + arch.split(":")[0]
             if torch.version.hip:
-                gpu_line += " · ROCm %s" % torch.version.hip
+                gpu_line += " - ROCm %s" % torch.version.hip
             LOGGER.info(gpu_line)
         except Exception:
             pass
@@ -614,7 +604,6 @@ class StrokeRequest(BaseModel):
 
 
 class PredictResponse(BaseModel):
-    masks: list[str]
     scores: list[float]
     object_masks: dict[str, str] = {}
     object_history: dict[str, dict[str, int]] = {}
@@ -1013,10 +1002,6 @@ async def create_session(req: CreateSessionRequest):
         extra={"phase": "session", "model": session.model_name,
                "sid": session.session_id},
     )
-    LOGGER.info(
-        "Session %s created with %s", session.session_id, session.model_name,
-        extra={"phase": "session", "model": session.model_name, "sid": session.session_id},
-    )
     return CreateSessionResponse(
         session_id=session.session_id,
         model_name=session.model_name,
@@ -1133,18 +1118,9 @@ def _decode_mask_resized(mask_b64: str, h: int, w: int) -> np.ndarray:
 
 
 def _masks_to_predict_response(result: dict) -> PredictResponse:
-    masks = result.get("all_masks")
-    if masks is None:
-        masks = result.get("masks", [])
-    scores = result.get("all_scores")
-    if scores is None:
-        scores = result.get("scores", [])
-    if hasattr(scores, "tolist"):
-        scores = scores.tolist()
     return PredictResponse(
-        masks=_masks_to_png_list(masks),
-        scores=list(scores),
-        object_masks=_masks_to_png_dict(result.get("object_masks")),
+        scores=list(result.get("all_scores") or []),
+        object_masks=dict(result.get("object_masks") or {}),
         object_history=result.get("object_history") or {},
     )
 
@@ -1162,18 +1138,6 @@ def _masks_positional_png_list(masks: Any) -> list[str | None]:
     return out
 
 
-def _masks_to_png_dict(masks: Any) -> dict[str, str]:
-    if not masks:
-        return {}
-    out: dict[str, str] = {}
-    for key, m in masks.items():
-        arr = np.asarray(m)
-        if arr.size == 0:
-            continue
-        out[str(key)] = mask_to_png_b64(arr)
-    return out
-
-
 @app.post("/api/sessions/{session_id}/predict", response_model=PredictResponse)
 async def run_prediction(session_id: str, req: StrokeRequest):
     try:
@@ -1186,6 +1150,8 @@ async def run_prediction(session_id: str, req: StrokeRequest):
             bboxes=req.bboxes,
         )
     except ValueError as e:
+        if not await asyncio.to_thread(get_manager().session_exists, session_id):
+            raise HTTPException(404, "Session not found")
         LOGGER.exception("Prediction failed for session %s", session_id)
         raise HTTPException(400, f"Invalid prediction request: {e}")
 
@@ -1214,8 +1180,8 @@ async def segment_batch(session_id: str, req: SegmentBatchRequest):
 
 
 @app.post("/api/sessions/{session_id}/undo", response_model=PredictResponse)
-async def undo_stroke(session_id: str, object_id: int = 0):
-    result = await asyncio.to_thread(get_manager().undo, session_id, object_id)
+async def undo_stroke(session_id: str, object_id: int = 0, steps: int = 1):
+    result = await asyncio.to_thread(get_manager().undo, session_id, object_id, steps)
     if result is None:
         exists = await asyncio.to_thread(get_manager().session_exists, session_id)
         if not exists:
@@ -1225,8 +1191,8 @@ async def undo_stroke(session_id: str, object_id: int = 0):
 
 
 @app.post("/api/sessions/{session_id}/redo", response_model=PredictResponse)
-async def redo_stroke(session_id: str, object_id: int = 0):
-    result = await asyncio.to_thread(get_manager().redo, session_id, object_id)
+async def redo_stroke(session_id: str, object_id: int = 0, steps: int = 1):
+    result = await asyncio.to_thread(get_manager().redo, session_id, object_id, steps)
     if result is None:
         exists = await asyncio.to_thread(get_manager().session_exists, session_id)
         if not exists:

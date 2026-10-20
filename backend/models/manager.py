@@ -79,6 +79,9 @@ class ObjectState:
     last_mask: np.ndarray | None = None
     last_low_res_mask: np.ndarray | None = None
     mask_snapshots: list[MaskSnapshot] = field(default_factory=list)
+    mask_revision: int = 0
+    png_cache: str | None = None
+    png_revision: int = -1
 
 
 @dataclass(slots=True)
@@ -200,7 +203,7 @@ class ModelManager:
             return
 
         LOGGER.info(
-            "VRAM: freeing headroom â€” over budget by %.0f MB "
+            "VRAM: freeing headroom - over budget by %.0f MB "
             "(free %.0f / total %.0f MB, need %.0f MB)",
             max(0.0, projected_mb - budget_mb), free_mb, total_mb, required_mb,
             extra={"phase":"vram","reason":"over-budget"},
@@ -232,7 +235,7 @@ class ModelManager:
         model_dir = MODEL_WEIGHTS_DIR
         model_file = model_dir / model_name
         if not model_file.exists():
-            LOGGER.info("%s not cached â€” downloading", model_name)
+            LOGGER.info("%s not cached - downloading", model_name)
             if self._status_callback:
                 self._status_callback("downloading")
             from backend.utils.net_check import is_connected
@@ -251,7 +254,7 @@ class ModelManager:
             try:
                 verified = verify_model(model_file, model_name)
             except Exception as exc:
-                LOGGER.warning("Model integrity check failed (%s) â€” continuing: %s", model_name, exc)
+                LOGGER.warning("Model integrity check failed (%s) - continuing: %s", model_name, exc)
             else:
                 if not verified:
                     raise RuntimeError(
@@ -325,9 +328,6 @@ class ModelManager:
         with self._lock:
             if len(self._sessions) >= MAX_SESSIONS:
                 raise RuntimeError(f"Maximum sessions ({MAX_SESSIONS}) reached")
-            # Reserve the slot under the same lock so N concurrent creations
-            # cannot all pass the MAX_SESSIONS check. The value stays None until
-            # the backend exists, and every consumer skips reserved slots.
             session_id = str(uuid.uuid4())
             self._sessions[session_id] = None  # type: ignore[assignment]
         try:
@@ -378,7 +378,7 @@ class ModelManager:
                 if self._can_unload(session.backend):
                     session.backend.reset_image()
                 else:
-                    LOGGER.debug("Session %s backend busy â€” skipping reset_image", session_id)
+                    LOGGER.debug("Session %s backend busy - skipping reset_image", session_id)
             session.image_rgb = None
             session.image_bgr = None
             session.objects.clear()
@@ -434,7 +434,7 @@ class ModelManager:
             session.has_image = True
         except Exception:
             LOGGER.exception(
-                "SAM encoding failed for session %s â€” continuing without features", session_id
+                "SAM encoding failed for session %s - continuing without features", session_id
             )
             session.has_image = False
             if self._can_unload(session.backend):
@@ -544,22 +544,14 @@ class ModelManager:
             with session.lock:
                 masks = result["masks"]
                 has_mask = masks is not None and len(masks) > 0
+                low_res = result.get("low_res_masks")
                 obj.mask_snapshots.append(
-                    MaskSnapshot(
-                        low_res=result.get("low_res_masks") if has_mask else None,
-                    )
+                    MaskSnapshot(low_res=low_res if has_mask else None)
                 )
-                if has_mask:
-                    obj.last_mask = masks
-                    obj.last_low_res_mask = result.get("low_res_masks")
-                else:
-                    obj.last_mask = None
-                    obj.last_low_res_mask = None
+                self._store_object_mask(obj, masks if has_mask else None, low_res if has_mask else None)
 
         session.last_active = time.time()
-        result["all_masks"], result["all_scores"], result["object_masks"] = self._collect_all_masks(session)
-        result["object_history"] = self._object_history(session)
-        return result
+        return self._brush_response(session, result)
 
     def _object_history(self, session: Session) -> dict[str, dict[str, int]]:
         with session.lock:
@@ -573,22 +565,45 @@ class ModelManager:
                 for oid, obj in session.objects.items()
             }
 
-    def _collect_all_masks(self, session: Session) -> tuple[list[np.ndarray], list[float], dict[str, np.ndarray]]:
-        masks: list[np.ndarray] = []
-        scores: list[float] = []
-        object_masks: dict[str, np.ndarray] = {}
+    @staticmethod
+    def _store_object_mask(
+        obj: ObjectState,
+        mask: np.ndarray | None,
+        low_res: np.ndarray | None,
+    ) -> None:
+        obj.last_mask = mask
+        obj.last_low_res_mask = low_res
+        obj.mask_revision += 1
+
+    def _object_mask_png(self, obj: ObjectState) -> str | None:
+        mask = obj.last_mask
+        if mask is None or len(mask) == 0:
+            return None
+        if obj.png_cache is None or obj.png_revision != obj.mask_revision:
+            obj.png_cache = mask_to_png_b64(np.asarray(mask)[0])
+            obj.png_revision = obj.mask_revision
+        return obj.png_cache
+
+    def _object_masks_png(self, session: Session) -> dict[str, str]:
         with session.lock:
-            oids = sorted(session.objects.keys())
-        for oid in oids:
-            with session.lock:
-                obj = session.objects.get(oid)
-                if obj is None or obj.last_mask is None or len(obj.last_mask) == 0:
-                    continue
-                m = np.asarray(obj.last_mask)[0]
-            masks.append(m)
-            scores.append(1.0)
-            object_masks[str(oid)] = m
-        return masks, scores, object_masks
+            items = sorted(session.objects.items(), key=lambda kv: kv[0])
+        out: dict[str, str] = {}
+        for oid, obj in items:
+            png = self._object_mask_png(obj)
+            if png is not None:
+                out[str(oid)] = png
+        return out
+
+    def _brush_response(
+        self,
+        session: Session,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        object_masks = self._object_masks_png(session)
+        result["object_masks"] = object_masks
+        result["all_scores"] = [1.0] * len(object_masks)
+        result["object_history"] = self._object_history(session)
+        return result
 
     def segment_batch(
         self,
@@ -613,11 +628,11 @@ class ModelManager:
         t0 = time.time()
         masks = session.backend.predict_batch(bboxes)
         elapsed = time.time() - t0
-        LOGGER.info("Batch segment complete in %s â€” %d mask(s)", format_duration(elapsed), len(masks), extra={"phase":"segment","sid":session_id,"dur_ms":int(elapsed*1000),"model":session.model_name})
+        LOGGER.info("Batch segment complete in %s - %d mask(s)", format_duration(elapsed), len(masks), extra={"phase":"segment","sid":session_id,"dur_ms":int(elapsed*1000),"model":session.model_name})
         session.last_active = time.time()
         return masks
 
-    def undo(self, session_id: str, object_id: int) -> dict[str, Any] | None:
+    def undo(self, session_id: str, object_id: int, steps: int = 1) -> dict[str, Any] | None:
         with self._lock:
             session = self._sessions.get(session_id)
         if not session:
@@ -628,12 +643,10 @@ class ModelManager:
             return None
 
         with session.lock:
-            popped = obj.stroke_history.pop()
-            if obj.mask_snapshots:
-                saved_snapshot = obj.mask_snapshots.pop()
-            else:
-                saved_snapshot = None
-            obj.redo_stack.append((popped, saved_snapshot))
+            for _ in range(min(max(steps, 1), len(obj.stroke_history))):
+                popped = obj.stroke_history.pop()
+                saved_snapshot = obj.mask_snapshots.pop() if obj.mask_snapshots else None
+                obj.redo_stack.append((popped, saved_snapshot))
             if len(obj.redo_stack) > MAX_STROKE_HISTORY:
                 excess = len(obj.redo_stack) - MAX_STROKE_HISTORY
                 del obj.redo_stack[:excess]
@@ -641,12 +654,10 @@ class ModelManager:
         session.last_active = time.time()
         if not session.backend.is_loaded:
             self._ensure_model_loaded(session)
-        result = self._replay_history(session, obj, full_replay=True)
-        result["all_masks"], result["all_scores"], result["object_masks"] = self._collect_all_masks(session)
-        result["object_history"] = self._object_history(session)
-        return result
+        result = self._restore_object_mask(session, obj)
+        return self._brush_response(session, result)
 
-    def redo(self, session_id: str, object_id: int) -> dict[str, Any] | None:
+    def redo(self, session_id: str, object_id: int, steps: int = 1) -> dict[str, Any] | None:
         with self._lock:
             session = self._sessions.get(session_id)
         if not session:
@@ -657,17 +668,18 @@ class ModelManager:
             return None
 
         with session.lock:
-            entry, saved_snapshot = obj.redo_stack.pop()
-            obj.stroke_history.append(entry)
-            obj.mask_snapshots.append(saved_snapshot if saved_snapshot is not None else MaskSnapshot(low_res=None))
+            for _ in range(min(max(steps, 1), len(obj.redo_stack))):
+                entry, saved_snapshot = obj.redo_stack.pop()
+                obj.stroke_history.append(entry)
+                obj.mask_snapshots.append(
+                    saved_snapshot if saved_snapshot is not None else MaskSnapshot(low_res=None)
+                )
 
         session.last_active = time.time()
         if not session.backend.is_loaded:
             self._ensure_model_loaded(session)
-        result = self._replay_history(session, obj, full_replay=True)
-        result["all_masks"], result["all_scores"], result["object_masks"] = self._collect_all_masks(session)
-        result["object_history"] = self._object_history(session)
-        return result
+        result = self._restore_object_mask(session, obj)
+        return self._brush_response(session, result)
 
     def clear_object(self, session_id: str, object_id: int) -> dict[str, Any] | None:
         with self._lock:
@@ -678,13 +690,7 @@ class ModelManager:
                 session.objects.pop(object_id, None)
         LOGGER.debug("Cleared object %d in session %s", object_id, session_id)
         session.last_active = time.time()
-        all_masks, all_scores, object_masks = self._collect_all_masks(session)
-        return {
-            "all_masks": all_masks,
-            "all_scores": all_scores,
-            "object_masks": object_masks,
-            "object_history": self._object_history(session),
-        }
+        return self._brush_response(session, {"masks": np.array([]), "scores": np.array([])})
 
     def sam3_predict(
         self,
@@ -709,7 +715,7 @@ class ModelManager:
         result = session.backend.predict_text(text, confidence=confidence)
         elapsed = time.time() - t0
         mask_count = len(result.get("masks", [])) if hasattr(result.get("masks", []), "__len__") else 0
-        LOGGER.info("SAM3 prompt complete in %s â€” %d mask(s)", format_duration(elapsed), mask_count, extra={"phase":"sam3","sid":session_id,"dur_ms":int(elapsed*1000),"model":SAM3_MODEL})
+        LOGGER.info("SAM3 prompt complete in %s - %d mask(s)", format_duration(elapsed), mask_count, extra={"phase":"sam3","sid":session_id,"dur_ms":int(elapsed*1000),"model":SAM3_MODEL})
 
         with session.lock:
             session.sam3_prompt_history.append((entry, self._sam3_snapshot(result)))
@@ -922,8 +928,7 @@ class ModelManager:
             history = list(obj.stroke_history)
 
         if full_replay:
-            obj.last_mask = None
-            obj.last_low_res_mask = None
+            self._store_object_mask(obj, None, None)
             if not history:
                 return {"masks": np.array([]), "scores": np.array([]), "low_res_masks": None}
 
@@ -939,6 +944,7 @@ class ModelManager:
                 )
                 obj.last_mask = result["masks"]
                 obj.last_low_res_mask = result.get("low_res_masks")
+            obj.mask_revision += 1
             LOGGER.debug(
                 "Full replay: %d stroke(s) (%d positive, %d negative in last)",
                 len(history),
@@ -948,8 +954,7 @@ class ModelManager:
             return result
 
         if len(history) == 0:
-            obj.last_mask = None
-            obj.last_low_res_mask = None
+            self._store_object_mask(obj, None, None)
             return {"masks": np.array([]), "scores": np.array([]), "low_res_masks": None}
 
         entry = history[-1]
@@ -960,8 +965,36 @@ class ModelManager:
         result = self._apply_stroke(
             session, obj, entry, first_stroke=is_first_prompt, mask_input=mask_input
         )
-        obj.last_mask = result["masks"]
-        obj.last_low_res_mask = result.get("low_res_masks")
+        self._store_object_mask(obj, result["masks"], result.get("low_res_masks"))
+        return result
+
+    def _restore_object_mask(self, session: Session, obj: ObjectState) -> dict[str, Any]:
+        history = obj.stroke_history
+        with session.lock:
+            snapshots_align = len(obj.mask_snapshots) == len(history)
+            prev_low_res = (
+                obj.mask_snapshots[-2].low_res
+                if snapshots_align and len(history) >= 2
+                else None
+            )
+
+        if not history:
+            self._store_object_mask(obj, None, None)
+            return {"masks": np.array([]), "scores": np.array([]), "low_res_masks": None}
+
+        if not snapshots_align:
+            return self._replay_history(session, obj, full_replay=True)
+
+        self._ensure_full_image_encoded(session)
+        entry = history[-1]
+        is_first_prompt = prev_low_res is None
+        mask_input = None if (is_first_prompt or entry.bboxes) else prev_low_res
+        result = self._apply_stroke(
+            session, obj, entry, first_stroke=is_first_prompt, mask_input=mask_input
+        )
+        if obj.mask_snapshots:
+            obj.mask_snapshots[-1] = MaskSnapshot(low_res=result.get("low_res_masks"))
+        self._store_object_mask(obj, result["masks"], result.get("low_res_masks"))
         return result
 
     def _apply_stroke(
@@ -1248,7 +1281,7 @@ class ModelManager:
         release_gpu_memory()
 
         LOGGER.info(
-            "Detected '%s' â€” %d found, %d kept (%s)",
+            "Detected '%s' - %d found, %d kept (%s)",
             query, len(detections), len(det_list), format_duration(detect_elapsed),
         )
 

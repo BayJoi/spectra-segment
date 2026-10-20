@@ -1,5 +1,6 @@
 import { useCallback, useRef } from "react";
-import { useAtom } from "jotai";import {
+import { useAtom } from "jotai";
+import {
   sessionIdAtom,
   modelNameAtom,
   imageUrlAtom,
@@ -15,7 +16,6 @@ import { useAtom } from "jotai";import {
   objectRedoCountsAtom,
   objectHistoryAtom,
   subjectMetaAtom,
-  brushPredictInFlightAtom,
   type ObjectHistory,
   subjectColor,
   subjectName,
@@ -32,23 +32,36 @@ import {
   sam3InstancesAtom,
   selectedSam3InstanceAtom,
 } from "@/store/sam3";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, resetObjectMaskCache } from "@/lib/api";
 import { emitUi, logErr } from "@/store/logs";
 import { isSupportedImage, fitImageFile } from "@/lib/utils";
+import { HistoryQueue, availableSteps, type HistoryKind } from "@/lib/historyQueue";
+import type { PackedMask } from "@/lib/mask";
 
 const uploadGuardRef = { busy: false };
 const endGuardRef = { busy: false };
 const blobUrlRef: { current: string | null } = { current: null };
-const predictQueueMap = new Map<string, Promise<unknown>>();
+const sessionQueueMap = new Map<string, Promise<unknown>>();
 const deletedSubjects = new Set<number>();
 
+const pendingStrokesRef: { current: Map<number, number> } = { current: new Map() };
+const historyRef: { current: Record<number, ObjectHistory> } = { current: {} };
+const historyQueueRef: { current: HistoryQueue } = { current: new HistoryQueue() };
+const historyScheduledRef: { current: boolean } = { current: false };
+
 function queueFor(sessionId: string): Promise<unknown> {
-  let q = predictQueueMap.get(sessionId);
+  let q = sessionQueueMap.get(sessionId);
   if (!q) {
     q = Promise.resolve();
-    predictQueueMap.set(sessionId, q);
+    sessionQueueMap.set(sessionId, q);
   }
   return q;
+}
+
+function enqueue<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+  const next = queueFor(sessionId).then(task);
+  sessionQueueMap.set(sessionId, next.catch(() => {}));
+  return next;
 }
 
 export function useSession() {
@@ -85,17 +98,12 @@ export function useSession() {
   const [objectRedoCounts, setObjectRedoCounts] = useAtom(objectRedoCountsAtom);
   const [, setObjectHistory] = useAtom(objectHistoryAtom);
   const [, setSubjectMeta] = useAtom(subjectMetaAtom);
-  const [predictInFlight, setPredictInFlight] = useAtom(brushPredictInFlightAtom);
 
   const uploadGuard = uploadGuardRef;
   const endGuard = endGuardRef;
   const blobUrlGuard = blobUrlRef;
   const activeObjectIdRef = useRef(activeObjectId);
   activeObjectIdRef.current = activeObjectId;
-  const objectUndoCountsRef = useRef(objectUndoCounts);
-  objectUndoCountsRef.current = objectUndoCounts;
-  const objectRedoCountsRef = useRef(objectRedoCounts);
-  objectRedoCountsRef.current = objectRedoCounts;
 
   const syncSubjects = useCallback(
     (history?: Record<string, Partial<ObjectHistoryEntry>>) => {
@@ -104,8 +112,6 @@ export function useSession() {
         for (const k of Object.keys(history ?? {})) {
           const oid = Number(k);
           if (!Number.isFinite(oid) || next[oid]) continue;
-          // A subject the user deleted must not be re-created by a late or
-          // out-of-order server response.
           if (deletedSubjects.has(oid)) continue;
           next[oid] = { id: oid, name: subjectName(oid), color: subjectColor(oid) };
         }
@@ -139,25 +145,33 @@ export function useSession() {
         nextUndo[oid] = undo;
         nextRedo[oid] = redo;
       }
+      historyRef.current = nextHist;
       setObjectHistory(nextHist);
       setObjectUndoCounts(nextUndo);
       setObjectRedoCounts(nextRedo);
       syncSubjects(history);
+      return nextHist;
     },
     [setObjectHistory, setObjectUndoCounts, setObjectRedoCounts, syncSubjects]
   );
 
   const resetUndoRedoState = useCallback(() => {
+    deletedSubjects.clear();
+    resetObjectMaskCache();
+    pendingStrokesRef.current.clear();
+    historyRef.current = {};
+    historyQueueRef.current.clear();
     setObjectUndoCounts({});
     setObjectRedoCounts({});
     setObjectHistory({});
     setObjectMasks({});
+    setMasks([]);
     setBrushObjects([0]);
     setActiveObjectId(0);
     setSubjectMeta({ 0: { id: 0, name: subjectName(0), color: subjectColor(0) } });
   }, [
     setObjectUndoCounts, setObjectRedoCounts, setObjectHistory, setObjectMasks,
-    setBrushObjects, setActiveObjectId, setSubjectMeta,
+    setMasks, setBrushObjects, setActiveObjectId, setSubjectMeta,
   ]);
 
   const sam3ModeRef = useRef(sam3Mode);
@@ -200,7 +214,7 @@ export function useSession() {
   const uploadImage = useCallback(
     async (file: File) => {
       if (uploadGuard.busy) {
-        emitUi("upload", "WARNING", "Upload ignored — an upload is already running");
+        emitUi("upload", "WARNING", "Upload ignored - an upload is already running");
         return;
       }
       if (!isSupportedImage(file)) {
@@ -218,14 +232,14 @@ export function useSession() {
         if (!sid) {
           const activeModel = modelNameRef.current;
           if (!activeModel) {
-            emitUi("upload", "WARNING", "Upload dropped — no model selected yet");
+            emitUi("upload", "WARNING", "Upload dropped - no model selected yet");
             return;
           }
           try {
             const res = await api.createSession(activeModel);
             if (modelNameRef.current !== activeModel) {
               api.destroySession(res.session_id).catch(() => {});
-              emitUi("upload", "WARNING", "Upload dropped — model changed mid-flight");
+              emitUi("upload", "WARNING", "Upload dropped - model changed mid-flight");
               return;
             }
             sessionIdRef.current = res.session_id;
@@ -274,7 +288,7 @@ export function useSession() {
           })
           .catch((err) => {
             logErr("upload", err);
-            pushToast("Upload failed — check the console");
+            pushToast("Upload failed - check the console");
           })
           .finally(() => {
             setImageEncoding(false);
@@ -371,116 +385,185 @@ export function useSession() {
   const recoverSession = useCallback(async () => {
     if (!sessionId) return;
     if (await api.sessionHealth(sessionId)) return;
-    emitUi("session", "WARNING", "Session expired on the server — recovering");
+    emitUi("session", "WARNING", "Session expired on the server - recovering");
+    resetUndoRedoState();
+    setLayers((prev) => prev.filter((l) => l.type !== "brush"));
     await createSession(modelName, imageFile);
-  }, [sessionId, modelName, imageFile, createSession]);
+  }, [sessionId, modelName, imageFile, createSession, resetUndoRedoState, setLayers]);
+
+  const applyPredict = useCallback(
+    (res: {
+      objectMasks?: Record<number, PackedMask>;
+      objectHistory?: Record<string, Partial<ObjectHistoryEntry>>;
+    }) => {
+      const objectMasks = res.objectMasks ?? {};
+      setMasks(Object.values(objectMasks));
+      setObjectMasks(objectMasks);
+      return applyHistory(res.objectHistory);
+    },
+    [setMasks, setObjectMasks, applyHistory]
+  );
+
+  const adjustPendingStrokes = useCallback((oid: number, delta: number) => {
+    const map = pendingStrokesRef.current;
+    const next = (map.get(oid) ?? 0) + delta;
+    if (next > 0) map.set(oid, next);
+    else map.delete(oid);
+  }, []);
 
   const predict = useCallback(
     (params: { object_id?: number; points?: number[][]; labels?: number[]; bboxes?: number[] }) => {
-      if (!sessionIdRef.current) return Promise.resolve(null);
-      const oid = params.object_id ?? activeObjectIdRef.current;
       const sid = sessionIdRef.current;
-      setPredictInFlight((c) => c + 1);
-      const run = async () => {
+      if (!sid) return Promise.resolve(null);
+      const oid = params.object_id ?? activeObjectIdRef.current;
+      const isStroke = !!(params.points?.length || params.bboxes?.length);
+      if (isStroke) adjustPendingStrokes(oid, 1);
+      return enqueue(sid, async () => {
+        const active = sessionIdRef.current;
+        if (!active) return null;
         try {
-          const sid = sessionIdRef.current;
-          if (!sid) return null;
-          const res = await api.predict(sid, { ...params, object_id: oid });
-          setMasks(res.masks);
-          setObjectMasks(res.objectMasks ?? {});
-          applyHistory(res.objectHistory);
+          const res = await api.predict(active, { ...params, object_id: oid });
+          applyPredict(res);
           return res;
         } catch (err) {
           logErr("brush", err);
-          if (err instanceof ApiError && (err.status === 404 || err.status === 400)) {
-            pushToast("Session expired — recovering");
+          if (err instanceof ApiError && err.status === 404) {
+            pushToast("Session expired - recovering");
             await recoverSession();
+          } else if (err instanceof ApiError && err.status === 400) {
+            pushToast(err.message.replace(/^API \d+: /, "").slice(0, 140));
           } else {
             pushToast("Prediction failed");
           }
           return null;
         } finally {
-          setPredictInFlight((c) => c - 1);
+          if (isStroke) adjustPendingStrokes(oid, -1);
         }
-      };
-      const next = queueFor(sid).then(run);
-      predictQueueMap.set(sid, next.catch(() => {}));
-      return next;
+      });
     },
-    [setMasks, setObjectMasks, recoverSession, setPredictInFlight, applyHistory]
+    [applyPredict, recoverSession, adjustPendingStrokes]
   );
 
-  const undo = useCallback(async () => {
-    if (!sessionId) return;
-    if (predictInFlight !== 0) {
-      emitUi("brush", "WARNING", "Undo ignored — a prediction is still running");
-      return;
-    }
-    const oid = activeObjectIdRef.current;
-    if ((objectUndoCountsRef.current[oid] ?? 0) <= 0) return;
-    try {
-      const res = await api.undo(sessionId, oid);
-      emitUi("brush", "INFO", `Undid a stroke on Subject ${oid + 1}`);
-      setMasks(res.masks);
-      setObjectMasks(res.objectMasks ?? {});
-      applyHistory(res.objectHistory);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        applyHistory({ [oid]: { undo: 0, redo: 0, strokes: 0, has_mask: false } });
-        pushToast("Nothing left to undo for this subject");
-        return;
+  const patchHistory = useCallback(
+    (objectId: number, patch: Partial<ObjectHistoryEntry>) => {
+      setObjectHistory((prev) => {
+        const cur = prev[objectId] ?? { undo: 0, redo: 0, strokes: 0, has_mask: false };
+        const merged = { ...cur, ...patch };
+        historyRef.current = { ...historyRef.current, [objectId]: merged };
+        return { ...prev, [objectId]: merged };
+      });
+      if (patch.undo !== undefined) {
+        setObjectUndoCounts((prev) => ({ ...prev, [objectId]: patch.undo as number }));
       }
-      if (err instanceof ApiError && err.status === 404) {
-        await recoverSession();
-        return;
+      if (patch.redo !== undefined) {
+        setObjectRedoCounts((prev) => ({ ...prev, [objectId]: patch.redo as number }));
       }
-      pushToast("Undo failed");
-    }
-  }, [sessionId, predictInFlight, setMasks, setObjectMasks, recoverSession, applyHistory]);
+    },
+    [setObjectHistory, setObjectUndoCounts, setObjectRedoCounts]
+  );
 
-  const redo = useCallback(async () => {
-    if (!sessionId) return;
-    if (predictInFlight !== 0) {
-      emitUi("brush", "WARNING", "Redo ignored — a prediction is still running");
-      return;
-    }
-    const oid = activeObjectIdRef.current;
-    if ((objectRedoCountsRef.current[oid] ?? 0) <= 0) return;
-    try {
-      const res = await api.redo(sessionId, oid);
-      emitUi("brush", "INFO", `Redid a stroke on Subject ${oid + 1}`);
-      setMasks(res.masks);
-      setObjectMasks(res.objectMasks ?? {});
-      applyHistory(res.objectHistory);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        applyHistory({ [oid]: { undo: 0, redo: 0, strokes: 0, has_mask: false } });
-        pushToast("Nothing left to redo for this subject");
-        return;
+  const historyDepth = useCallback((objectId: number, kind: HistoryKind) => {
+    const ledger = historyRef.current[objectId];
+    const depth = kind === "undo" ? (ledger?.undo ?? 0) : (ledger?.redo ?? 0);
+    return availableSteps(depth, pendingStrokesRef.current.get(objectId) ?? 0, kind);
+  }, []);
+
+  const runHistoryOps = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    const ops = historyQueueRef.current.drain();
+    if (!sid) return;
+    for (const op of ops) {
+      const verb = op.kind === "undo" ? "Undid" : "Redid";
+      const depth = (ledger?: ObjectHistory) =>
+        op.kind === "undo" ? (ledger?.undo ?? 0) : (ledger?.redo ?? 0);
+      const steps = Math.min(op.steps, historyDepth(op.objectId, op.kind));
+      if (steps <= 0) continue;
+      const before = depth(historyRef.current[op.objectId]);
+      try {
+        const res =
+          op.kind === "undo"
+            ? await api.undo(sid, op.objectId, steps)
+            : await api.redo(sid, op.objectId, steps);
+        const ledger = applyPredict(res);
+        const applied = Math.max(0, before - depth(ledger?.[op.objectId]));
+        emitUi(
+          "brush",
+          "INFO",
+          `${verb} ${applied} stroke${applied === 1 ? "" : "s"} on Subject ${op.objectId + 1}`
+        );
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          if (op.kind === "undo") {
+            patchHistory(op.objectId, { undo: 0, strokes: 0, has_mask: false });
+            pushToast("Nothing left to undo for this subject");
+          } else {
+            patchHistory(op.objectId, { redo: 0 });
+            pushToast("Nothing left to redo for this subject");
+          }
+          continue;
+        }
+        if (err instanceof ApiError && err.status === 404) {
+          await recoverSession();
+          continue;
+        }
+        pushToast(op.kind === "undo" ? "Undo failed" : "Redo failed");
       }
-      if (err instanceof ApiError && err.status === 404) {
-        await recoverSession();
-        return;
-      }
-      pushToast("Redo failed");
     }
-  }, [sessionId, predictInFlight, setMasks, setObjectMasks, recoverSession, applyHistory]);
+  }, [applyPredict, patchHistory, recoverSession, historyDepth]);
+
+  const scheduleHistoryDrain = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (!sid || historyScheduledRef.current) return;
+    historyScheduledRef.current = true;
+    void enqueue(sid, async () => {
+      historyScheduledRef.current = false;
+      do {
+        await runHistoryOps();
+      } while (sessionIdRef.current === sid && historyQueueRef.current.size > 0);
+    }).catch((err) => logErr("brush", err));
+  }, [runHistoryOps]);
+
+  const requestHistory = useCallback(
+    (objectId: number, kind: HistoryKind) => {
+      if (historyDepth(objectId, kind) <= 0) return;
+      historyQueueRef.current.push(objectId, kind);
+      scheduleHistoryDrain();
+    },
+    [historyDepth, scheduleHistoryDrain]
+  );
+
+  const undoSubject = useCallback(
+    (objectId: number) => requestHistory(objectId, "undo"),
+    [requestHistory]
+  );
+  const redoSubject = useCallback(
+    (objectId: number) => requestHistory(objectId, "redo"),
+    [requestHistory]
+  );
+
+  const undo = useCallback(
+    () => requestHistory(activeObjectIdRef.current, "undo"),
+    [requestHistory]
+  );
+  const redo = useCallback(
+    () => requestHistory(activeObjectIdRef.current, "redo"),
+    [requestHistory]
+  );
 
   const clearObjectHistory = useCallback(async (objectId: number = 0) => {
-    if (sessionId) {
+    const sid = sessionIdRef.current;
+    if (sid) {
       try {
-        const res = await api.clearObject(sessionId, objectId);
-        setMasks(res.masks);
-        setObjectMasks(res.objectMasks ?? {});
-        applyHistory(res.objectHistory);
+        const res = await enqueue(sid, () => api.clearObject(sid, objectId));
+        applyPredict(res);
         return;
       } catch (err) {
         logErr("subject", err);
         pushToast("Could not clear that subject on the server");
       }
     }
-    applyHistory({ [objectId]: { undo: 0, redo: 0, strokes: 0, has_mask: false } });
-  }, [sessionId, setMasks, setObjectMasks, applyHistory]);
+    patchHistory(objectId, { undo: 0, redo: 0, strokes: 0, has_mask: false });
+  }, [applyPredict, patchHistory]);
 
   return {
     sessionId,
@@ -492,6 +575,8 @@ export function useSession() {
     predict,
     undo,
     redo,
+    undoSubject,
+    redoSubject,
     canUndo: (objectUndoCounts[activeObjectId] ?? 0) > 0,
     canRedo: (objectRedoCounts[activeObjectId] ?? 0) > 0,
     clearObjectHistory,

@@ -6,6 +6,7 @@ import { Tooltip } from "@/components/ui/Tooltip";
 import { LayersPanel } from "@/components/LayersPanel";
 import { SubjectsPanel } from "@/components/SubjectsPanel";
 import { TierIcon } from "@/components/ui/TierIcon";
+import { BoxesToggle } from "@/components/ui/BoxesToggle";
 import { useDetection } from "@/hooks/useDetection";
 import { useSession } from "@/hooks/useSession";
 import { useLayers } from "@/hooks/useLayers";
@@ -155,7 +156,7 @@ export function Toolbar() {
 
   const deleteSubject = useCallback(() => {
     if (brushObjects.length <= 1) {
-      emitUi("subject", "WARNING", "Cannot delete — at least one subject must remain");
+      emitUi("subject", "WARNING", "Cannot delete - at least one subject must remain");
       return;
     }
     const idx = Math.max(0, brushObjects.indexOf(activeObjectId));
@@ -223,7 +224,7 @@ export function Toolbar() {
       <div className="flex items-center gap-2 px-3 py-2 bg-[#0a0a0a]/95 border border-neutral-800/80 rounded-2xl shadow-2xl shadow-black/80 backdrop-blur-xl grain-bg w-max">
         {modeLock && (
           <>
-            <Tooltip tip={isBrushLocked ? "Brush mode — paint strokes to refine masks" : "Detect mode — find objects by text query"} className="shrink-0">
+            <Tooltip tip={isBrushLocked ? "Brush mode - paint strokes to refine masks" : "Detect mode - find objects by text query"} className="shrink-0">
               <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-neutral-900/50 border border-neutral-800/40">
                 {isBrushLocked ? (
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-orange-400"><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08"/><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z"/></svg>
@@ -271,7 +272,7 @@ export function Toolbar() {
               )}
             </div>
             {isYoloeSelected && (
-              <Tooltip tip={yoloeMasksEnabled ? "YOLOE masks ON — use detector's own masks (faster, skips SAM)" : "YOLOE masks OFF — use SAM for higher quality masks"} className="shrink-0">
+              <Tooltip tip={yoloeMasksEnabled ? "YOLOE masks ON - use detector's own masks (faster, skips SAM)" : "YOLOE masks OFF - use SAM for higher quality masks"} className="shrink-0">
                 <button
                   onClick={() => setYoloeMasksEnabled(!yoloeMasksEnabled)}
                   className={cn(
@@ -327,19 +328,15 @@ export function Toolbar() {
                   {detections.length} {detections.length === 1 ? "result" : "results"}
                 </span>
                 {showTransparent && (
-                  <Tooltip tip={hideBboxes ? "Detection boxes hidden in transparent mode — click to show" : "Hide all detection boxes in transparent mode"} className="shrink-0">
-                    <button
-                      onClick={() => setHideBboxes(!hideBboxes)}
-                      className={cn(
-                        "h-7 px-2 rounded-lg text-[10px] font-medium font-mono border transition-all duration-200 cursor-pointer whitespace-nowrap hover:scale-105 active:scale-95",
-                        hideBboxes
-                          ? "bg-orange-500/15 border-orange-500/40 text-orange-300 hover:bg-orange-500/25"
-                          : "bg-neutral-900/80 border-neutral-800/60 text-neutral-500 hover:text-neutral-300 hover:border-neutral-700"
-                      )}
-                    >
-                      {hideBboxes ? "Boxes off" : "Boxes"}
-                    </button>
-                  </Tooltip>
+                  <BoxesToggle
+                    hidden={hideBboxes}
+                    onToggle={() => setHideBboxes(!hideBboxes)}
+                    tip={
+                      hideBboxes
+                        ? "Detection boxes hidden in transparent mode - click to show"
+                        : "Hide all detection boxes in transparent mode"
+                    }
+                  />
                 )}
               </>
             )}
@@ -357,7 +354,7 @@ export function Toolbar() {
               </Button>
             </Tooltip>
             <div className="w-px h-5 bg-neutral-800/60 mx-0.5 shrink-0" />
-            <Tooltip tip="Subjects — switch, add, delete" className="shrink-0">
+            <Tooltip tip="Subjects - switch, add, delete" className="shrink-0">
               <div ref={subjectsToggleRef} className="flex items-center gap-0.5 shrink-0">
                 <button
                   onClick={() => switchSubject(-1)}
@@ -370,7 +367,7 @@ export function Toolbar() {
                 <button
                   onClick={() => setSubjectsOpen(!subjectsOpen)}
                   aria-label="Open subjects menu"
-                  title={`${activeLabel} — ${activeStrokes} stroke${activeStrokes === 1 ? "" : "s"}`}
+                  title={`${activeLabel} - ${activeStrokes} stroke${activeStrokes === 1 ? "" : "s"}`}
                   className="inline-flex items-center justify-center gap-0.5 text-[10px] text-neutral-400 hover:text-orange-300 font-mono tabular-nums whitespace-nowrap min-w-[36px] py-1 rounded-md hover:bg-orange-500/10 hover:scale-105 active:scale-95 transition-all duration-200 cursor-pointer"
                 >
                   <span
@@ -407,7 +404,7 @@ export function Toolbar() {
               </div>
             </Tooltip>
             <div className="w-px h-5 bg-neutral-800/60 mx-0.5 shrink-0" />
-            <Tooltip tip="Brush size — adjust stroke width" className="mr-2">
+            <Tooltip tip="Brush size - adjust stroke width" className="mr-2">
               <div className="flex items-center gap-1.5 shrink-0">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-neutral-500"><circle cx="12" cy="12" r="3"/></svg>
                 <input
@@ -424,7 +421,7 @@ export function Toolbar() {
               </div>
             </Tooltip>
             <div className="w-px h-5 bg-neutral-800/60 mx-0.5 shrink-0" />
-            <Tooltip tip="Feather radius — soften mask edges for smoother compositing" className="mr-2">
+            <Tooltip tip="Feather radius - soften mask edges for smoother compositing" className="mr-2">
               <div className="flex items-center gap-1.5 shrink-0">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-neutral-500"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/></svg>
                 <input
@@ -459,7 +456,7 @@ export function Toolbar() {
         {isDetectLocked && (
           <>
             <div className="w-px h-7 bg-neutral-800/60 shrink-0" />
-            <Tooltip tip="Feather radius — soften mask edges for smoother compositing" className="mr-2">
+            <Tooltip tip="Feather radius - soften mask edges for smoother compositing" className="mr-2">
               <div className="flex items-center gap-1.5 shrink-0">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-neutral-500"><path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/></svg>
                 <input
@@ -483,7 +480,7 @@ export function Toolbar() {
         <div className="flex items-center gap-2 shrink-0">
           {showLayers && (
             <div ref={layersToggleRef} className="flex items-center gap-0.5 shrink-0">
-              <Tooltip tip={`Detections — ${detections.length} found. Click one to segment it, or use "All".`}>
+              <Tooltip tip={`Detections - ${detections.length} found. Click one to segment it, or use "All".`}>
                 <Button
                   variant="ghost"
                   size="sm"

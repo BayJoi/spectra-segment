@@ -76,8 +76,6 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
       .catch((err) => logErr("detect", err));
 
     const handle = connectSse(`${BASE}/api/models/stream`, (data) => {
-      // Residency transitions are already logged by the backend, so this stream
-      // only drives the header UI - mirroring it here would duplicate every line.
       try {
         const parsed = JSON.parse(data);
         if (parsed.models) applyModelList(parsed.models);
@@ -257,7 +255,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
       <div className="flex items-center gap-1.5">
         {hasImage && (
           <span className={cn("text-[11px] text-neutral-500 mr-2 tabular-nums font-mono bg-neutral-900/50 px-2 py-1 rounded-lg border border-neutral-800/40 transition-opacity duration-200", showHighlight && "opacity-30")}>
-            {imageWidth}×{imageHeight}
+            {imageWidth}x{imageHeight}
           </span>
         )}
         {hasImage && (masks.length > 0 || Object.keys(perDetectionMasks).length > 0) && (
@@ -300,7 +298,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
             </button>
           </Tooltip>
         )}
-        <Tooltip tip={!modelName && !sam3 ? "Select a model first" : sam3 && !modelName ? "Select a SAM 3 model first" : sam3 && !sam3Loaded ? "Loading SAM 3 model…" : hasImage ? "Replace image" : "Upload image"} side="bottom">
+        <Tooltip tip={!modelName && !sam3 ? "Select a model first" : sam3 && !modelName ? "Select a SAM 3 model first" : sam3 && !sam3Loaded ? "Loading SAM 3 model..." : hasImage ? "Replace image" : "Upload image"} side="bottom">
           <span
             onMouseEnter={() => !modelName && !sam3 && setUploadHovered(true)}
             onMouseLeave={() => setUploadHovered(false)}

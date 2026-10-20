@@ -3,6 +3,7 @@ import type { CanvasState, Detection } from "@/lib/types";
 import type { Sam3Instance } from "@/store/sam3";
 import type { PackedMask } from "@/lib/mask";
 import { subjectColor } from "@/store/session";
+import { emitUi } from "@/store/logs";
 
 function clampIndex(v: number, max: number): number {
   return v < 0 ? 0 : v >= max ? max - 1 : v;
@@ -145,6 +146,44 @@ function blurMaskCanvas(source: HTMLCanvasElement, radius: number): HTMLCanvasEl
   return blurPadded(source, radius, true);
 }
 
+const MASK_OVERLAY_ALPHA = 0.42;
+
+const ACTIVE_OVERLAY_ALPHA = 0.56;
+
+const SUBJECT_LAYER_BUDGET_BYTES = 192 * 1024 * 1024;
+
+const REBUILD_MIN_INTERVAL = 80;
+
+const REBUILD_TRAILING_DELAY = 90;
+
+interface SubjectLayer {
+  mask: PackedMask;
+  image: HTMLImageElement;
+  feather: number;
+  color: string;
+  canvas: HTMLCanvasElement;
+}
+
+const reportedMaskScales = new Set<string>();
+
+function noteMaskScale(mw: number, mh: number, iw: number, ih: number): void {
+  const key = `${mw}x${mh}->${iw}x${ih}`;
+  if (reportedMaskScales.has(key)) return;
+  reportedMaskScales.add(key);
+  emitUi("subject", "WARNING", `Mask ${mw}x${mh} scaled to the ${iw}x${ih} image`);
+}
+
+function subjectIds(objectMasks: Record<number, PackedMask>): number[] {
+  return Object.keys(objectMasks)
+    .map(Number)
+    .filter((id) => Number.isFinite(id) && objectMasks[id])
+    .sort((a, b) => a - b);
+}
+
+function subjectMaskKey(ids: number[], activeId: number, featherRadius: number, revision: number): string {
+  return `${ids.join(",")}|${activeId}|f${featherRadius}|r${revision}`;
+}
+
 interface CanvasRendererRefs {
   containerRef: React.RefObject<HTMLDivElement | null>;
   imageCanvasRef: React.RefObject<HTMLCanvasElement | null>;
@@ -180,58 +219,155 @@ export function useCanvasRenderer(
   const maskRevisionRef = useRef(0);
   const checkerPatternCacheRef = useRef<{ pattern: CanvasPattern; width: number; height: number } | null>(null);
   const subjectMaskCacheRef = useRef<{ canvas: HTMLCanvasElement; key: string } | null>(null);
+  const scratchCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const subjectLayerRef = useRef(new Map<number, SubjectLayer>());
+  const subjectLayerBytesRef = useRef(0);
+
+  const scratchCanvas = useCallback((w: number, h: number) => {
+    let canvas = scratchCanvasRef.current;
+    if (!canvas) {
+      canvas = document.createElement("canvas");
+      scratchCanvasRef.current = canvas;
+    }
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    return canvas;
+  }, []);
+
+  const dropSubjectLayer = useCallback((id: number) => {
+    const layers = subjectLayerRef.current;
+    const layer = layers.get(id);
+    if (!layer) return;
+    subjectLayerBytesRef.current -= layer.canvas.width * layer.canvas.height * 4;
+    layers.delete(id);
+  }, []);
+
+  const clearSubjectLayers = useCallback(() => {
+    subjectLayerRef.current.clear();
+    subjectLayerBytesRef.current = 0;
+  }, []);
+
+  const ensureSubjectLayer = useCallback(
+    (
+      id: number,
+      mask: PackedMask,
+      featherRadius: number,
+      img: HTMLImageElement
+    ): HTMLCanvasElement | null => {
+      const iw = img.naturalWidth;
+      const ih = img.naturalHeight;
+      if (mask.w < 1 || mask.h < 1 || iw < 1 || ih < 1) return null;
+      const color = subjectColor(id);
+      const layers = subjectLayerRef.current;
+      const cached = layers.get(id);
+      if (
+        cached &&
+        cached.mask === mask &&
+        cached.image === img &&
+        cached.feather === featherRadius &&
+        cached.color === color
+      ) {
+        layers.delete(id);
+        layers.set(id, cached);
+        return cached.canvas;
+      }
+
+      const mw = mask.w;
+      const mh = mask.h;
+      const scratch = scratchCanvas(mw, mh);
+      const lctx = scratch.getContext("2d")!;
+      lctx.setTransform(1, 0, 0, 1, 0, 0);
+      const imgData = lctx.createImageData(mw, mh);
+      const u32 = new Uint32Array(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength >>> 2);
+      const src = mask.data;
+      for (let i = 0; i < src.length; i++) {
+        if (src[i]) u32[i] = 0xffffffff;
+      }
+      lctx.putImageData(imgData, 0, 0);
+
+      const maskSource: HTMLCanvasElement =
+        featherRadius > 0 ? blurMaskCanvas(scratch, featherRadius) : scratch;
+      const tctx = maskSource.getContext("2d")!;
+      tctx.globalCompositeOperation = "source-in";
+      tctx.fillStyle = color;
+      tctx.fillRect(0, 0, mw, mh);
+      tctx.globalCompositeOperation = "source-over";
+
+      if (mw !== iw || mh !== ih) {
+        noteMaskScale(mw, mh, iw, ih);
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = iw;
+      canvas.height = ih;
+      canvas.getContext("2d")!.drawImage(maskSource, 0, 0, mw, mh, 0, 0, iw, ih);
+
+      const bytes = iw * ih * 4;
+      if (bytes <= SUBJECT_LAYER_BUDGET_BYTES) {
+        const previous = layers.get(id);
+        if (previous) {
+          subjectLayerBytesRef.current -= previous.canvas.width * previous.canvas.height * 4;
+        }
+        layers.delete(id);
+        layers.set(id, { mask, image: img, feather: featherRadius, color, canvas });
+        subjectLayerBytesRef.current += bytes;
+        while (subjectLayerBytesRef.current > SUBJECT_LAYER_BUDGET_BYTES) {
+          const oldest = layers.keys().next();
+          if (oldest.done || oldest.value === id) break;
+          dropSubjectLayer(oldest.value);
+        }
+      } else if (layers.has(id)) {
+        dropSubjectLayer(id);
+      }
+      return canvas;
+    },
+    [dropSubjectLayer, scratchCanvas]
+  );
 
   const rebuildSubjectMaskCache = useCallback(
     (objectMasks: Record<number, PackedMask>, activeId: number, featherRadius: number) => {
       const img = refs.imageRef.current;
-      const ids = Object.keys(objectMasks);
+      const ids = subjectIds(objectMasks);
       if (!img || ids.length === 0) {
         subjectMaskCacheRef.current = null;
+        clearSubjectLayers();
         return null;
       }
+      for (const [id, layer] of Array.from(subjectLayerRef.current)) {
+        if (!objectMasks[id] || layer.image !== img) dropSubjectLayer(id);
+      }
+
       const iw = img.naturalWidth;
       const ih = img.naturalHeight;
-      const ordered = ids
-        .map(Number)
-        .filter((id) => objectMasks[id])
-        .sort((a, b) => Number(a === activeId) - Number(b === activeId));
+      const ordered = ids.slice().sort((a, b) => Number(a === activeId) - Number(b === activeId));
 
       const off = document.createElement("canvas");
       off.width = iw;
       off.height = ih;
       const octx = off.getContext("2d")!;
 
+      let drawn = 0;
       for (const id of ordered) {
-        const mask = objectMasks[id];
-        if (!mask || mask.w !== iw || mask.h !== ih) continue;
-        const layer = document.createElement("canvas");
-        layer.width = iw;
-        layer.height = ih;
-        const lctx = layer.getContext("2d")!;
-        const imgData = lctx.createImageData(iw, ih);
-        const u32 = new Uint32Array(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength >>> 2);
-        const src = mask.data;
-        for (let i = 0; i < src.length; i++) {
-          if (src[i]) u32[i] = 0xffffffff;
-        }
-        lctx.putImageData(imgData, 0, 0);
-        let maskSource: HTMLCanvasElement = layer;
-        if (featherRadius > 0) maskSource = blurMaskCanvas(layer, featherRadius);
-        octx.globalCompositeOperation = "source-over";
-        octx.drawImage(maskSource, 0, 0);
-        octx.globalCompositeOperation = "source-in";
-        octx.fillStyle = subjectColor(id);
-        octx.globalAlpha = 0.42;
-        octx.fillRect(0, 0, iw, ih);
+        const layer = ensureSubjectLayer(id, objectMasks[id], featherRadius, img);
+        if (!layer) continue;
+        octx.globalAlpha = id === activeId ? ACTIVE_OVERLAY_ALPHA : MASK_OVERLAY_ALPHA;
+        octx.drawImage(layer, 0, 0);
         octx.globalAlpha = 1;
-        octx.globalCompositeOperation = "source-over";
+        drawn += 1;
       }
 
-      const key = `${ordered.join(",")}|${activeId}|f${featherRadius}`;
+      if (drawn === 0) {
+        subjectMaskCacheRef.current = { canvas: off, key: "" };
+        return off;
+      }
+
+      const key = subjectMaskKey(ids, activeId, featherRadius, maskRevisionRef.current);
       subjectMaskCacheRef.current = { canvas: off, key };
       return off;
     },
-    [refs.imageRef]
+    [refs.imageRef, clearSubjectLayers, dropSubjectLayer, ensureSubjectLayer]
   );
 
   const computeState = useCallback(
@@ -260,32 +396,27 @@ export function useCanvasRenderer(
   const rebuildGateRef = useRef<{
     last: number;
     timer: ReturnType<typeof setTimeout> | null;
-    pending: (() => void) | null;
-  }>({ last: 0, timer: null, pending: null });
+    pending: Map<string, () => void>;
+  }>({ last: 0, timer: null, pending: new Map() });
 
-  const maybeRebuild = useCallback((fn: () => void) => {
+  const maybeRebuild = useCallback((key: string, fn: () => void) => {
     const gate = rebuildGateRef.current;
     const now = performance.now();
-    if (now - gate.last >= 80) {
+    if (now - gate.last >= REBUILD_MIN_INTERVAL) {
       gate.last = now;
-      if (gate.timer) {
-        clearTimeout(gate.timer);
-        gate.timer = null;
-        gate.pending = null;
-      }
       fn();
       return;
     }
-    gate.pending = fn;
+    gate.pending.set(key, fn);
     if (!gate.timer) {
       gate.timer = setTimeout(() => {
         gate.timer = null;
         gate.last = performance.now();
-        const p = gate.pending;
-        gate.pending = null;
-        p?.();
+        const jobs = Array.from(gate.pending.values());
+        gate.pending.clear();
+        for (const job of jobs) job();
         redrawRef.current();
-      }, 90);
+      }, REBUILD_TRAILING_DELAY);
     }
   }, []);
 
@@ -299,7 +430,7 @@ export function useCanvasRenderer(
 
     const iw = img.naturalWidth;
     const ih = img.naturalHeight;
-    const key = currentMasks.map((m) => m ? m.w : 0).join(",") + `:f${featherRadius}`;
+    const key = `f${featherRadius}|r${maskRevisionRef.current}`;
     if (key === maskCacheKeyRef.current && maskCacheRef.current) return;
 
     const off = document.createElement("canvas");
@@ -336,7 +467,7 @@ export function useCanvasRenderer(
     }
     const iw = img.naturalWidth;
     const ih = img.naturalHeight;
-    const key = currentMasks.map((m) => m ? m.w : 0).join(",") + `:f${featherRadius}`;
+    const key = `f${featherRadius}|r${maskRevisionRef.current}`;
     if (key === transparentCompositeKeyRef.current && transparentCompositeRef.current) return;
 
     const maskOff = document.createElement("canvas");
@@ -396,7 +527,7 @@ export function useCanvasRenderer(
           return;
         }
 
-        maybeRebuild(() => rebuildTransparentComposite(currentMasks, featherRadius));
+        maybeRebuild("transparent", () => rebuildTransparentComposite(currentMasks, featherRadius));
         if (transparentCompositeRef.current) {
           ctx.drawImage(transparentCompositeRef.current, ox, oy, dw, dh);
         }
@@ -405,15 +536,12 @@ export function useCanvasRenderer(
         const activeId = state.activeObjectIdRef.current;
         const dw = Math.floor(img!.naturalWidth * canvasState.scale);
         const dh = Math.floor(img!.naturalHeight * canvasState.scale);
-        const hasSubjectMasks = Object.keys(objectMasks).length > 0;
+        const ids = subjectIds(objectMasks);
+        const hasSubjectMasks = ids.length > 0;
         if (hasSubjectMasks) {
-          const ids = Object.keys(objectMasks)
-            .map(Number)
-            .sort((a, b) => a - b)
-            .join(",");
-          const key = `${ids}|${activeId}|f${featherRadius}|r${maskRevisionRef.current}`;
+          const key = subjectMaskKey(ids, activeId, featherRadius, maskRevisionRef.current);
           if (!subjectMaskCacheRef.current || subjectMaskCacheRef.current.key !== key) {
-            maybeRebuild(() => rebuildSubjectMaskCache(objectMasks, activeId, featherRadius));
+            maybeRebuild("subject", () => rebuildSubjectMaskCache(objectMasks, activeId, featherRadius));
           }
           if (subjectMaskCacheRef.current) {
             ctx.drawImage(
@@ -423,7 +551,7 @@ export function useCanvasRenderer(
             return;
           }
         }
-        maybeRebuild(() => rebuildMaskCache(currentMasks, featherRadius));
+        maybeRebuild("masks", () => rebuildMaskCache(currentMasks, featherRadius));
         if (maskCacheRef.current) {
           ctx.drawImage(maskCacheRef.current, canvasState.offsetX, canvasState.offsetY, dw, dh);
         }
@@ -607,7 +735,7 @@ export function useCanvasRenderer(
   const invalidateCache = useCallback(() => {
     maskCacheKeyRef.current = "";
     transparentCompositeKeyRef.current = "";
-    subjectMaskCacheRef.current = null;
+    if (subjectMaskCacheRef.current) subjectMaskCacheRef.current.key = "";
     maskRevisionRef.current += 1;
     checkerPatternCacheRef.current = null;
   }, []);

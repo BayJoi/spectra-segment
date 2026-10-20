@@ -30,13 +30,13 @@ GROUNDING_DETECTORS = {
 }
 
 DETECTOR_METADATA: dict[str, dict[str, str]] = {
-    "grounding-dino-tiny":  {"tier": "tiny",  "perf": "Fastest detector — great for quick object finding"},
+    "grounding-dino-tiny":  {"tier": "tiny",  "perf": "Fastest detector - great for quick object finding"},
     "grounding-dino-base":  {"tier": "medium","perf": "Accurate object detection with text prompts"},
-    "mm-gdino-base-all":    {"tier": "medium","perf": "Improved Grounding DINO — trained on 11 datasets, +7.5 mAP over original"},
-    "mm-gdino-large-all":   {"tier": "large", "perf": "Best accuracy Grounding DINO — 60.3 mAP on COCO, trained on 12 datasets"},
-    "florence-2-base":      {"tier": "medium","perf": "Versatile — captioning + detection + OCR"},
-    "florence-2-large":     {"tier": "large", "perf": "Most capable — best accuracy, needs GPU"},
-    "cogflorence-2.2-large":{"tier": "large", "perf": "Fine-tuned Florence — enhanced grounding + captioning"},
+    "mm-gdino-base-all":    {"tier": "medium","perf": "Improved Grounding DINO - trained on 11 datasets, +7.5 mAP over original"},
+    "mm-gdino-large-all":   {"tier": "large", "perf": "Best accuracy Grounding DINO - 60.3 mAP on COCO, trained on 12 datasets"},
+    "florence-2-base":      {"tier": "medium","perf": "Versatile - captioning + detection + OCR"},
+    "florence-2-large":     {"tier": "large", "perf": "Most capable - best accuracy, needs GPU"},
+    "cogflorence-2.2-large":{"tier": "large", "perf": "Fine-tuned Florence - enhanced grounding + captioning"},
 }
 
 HF_MODEL_IDS = {
@@ -92,7 +92,7 @@ def _emit(model_name: str, **fields: Any) -> None:
     payload = {"name": model_name, "phase": "download"}
     payload.update(fields)
     LOGGER.info(
-        "%s: %.0f%% · files %s/%s",
+        "%s: %.0f%% - files %s/%s",
         model_name,
         payload.get("pct") or 0,
         payload.get("files_done"),
@@ -115,7 +115,7 @@ def _snapshot_fetch(hf_id: str, cache_dir: Any, model_name: str) -> bool:
     state = {"files_done": 0, "bytes": 0}
     state_lock = threading.Lock()
 
-    def emit_combined(pct: int = 0, done_bytes: int = 0, total_bytes: int = 0, force: bool = False) -> None:
+    def emit_combined(pct: int = 0, done_bytes: int = 0, total_bytes: int = 0) -> None:
         with state_lock:
             fd, ft = state["files_done"], state["files_total"]
         _emit(
@@ -139,7 +139,7 @@ def _snapshot_fetch(hf_id: str, cache_dir: Any, model_name: str) -> bool:
             snapshot_download(repo_id=hf_id, cache_dir=hub_dir)
             return True
         except Exception as e:
-            LOGGER.warning("Snapshot fetch failed for %s (%s) — falling back", hf_id, e)
+            LOGGER.warning("Snapshot fetch failed for %s (%s) - falling back", hf_id, e)
             return False
 
     weight_files = [(n, s) for n, s in files if _WEIGHT_RE.search(n)]
@@ -181,7 +181,6 @@ def _snapshot_fetch(hf_id: str, cache_dir: Any, model_name: str) -> bool:
                         pct=100,
                         done_bytes=self._sp_total,
                         total_bytes=self._sp_total,
-                        force=True,
                     )
             finally:
                 super().close()
@@ -196,7 +195,7 @@ def _snapshot_fetch(hf_id: str, cache_dir: Any, model_name: str) -> bool:
             hf_hub_download(repo_id=hf_id, filename=fname, cache_dir=hub_dir)
             with state_lock:
                 state["files_done"] += 1
-            emit_combined(force=True)
+            emit_combined()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as main_pool:
             main_fut = main_pool.submit(fetch_one, main_name)
@@ -206,10 +205,10 @@ def _snapshot_fetch(hf_id: str, cache_dir: Any, model_name: str) -> bool:
             main_fut.result()
         if any(e is not None for e in errors):
             raise RuntimeError(f"{errors[0]}")
-        emit_combined(pct=100, done_bytes=main_size, total_bytes=main_size, force=True)
+        emit_combined(pct=100, done_bytes=main_size, total_bytes=main_size)
         return True
     except Exception as e:
-        LOGGER.warning("Snapshot fetch failed for %s (%s) — falling back", hf_id, e)
+        LOGGER.warning("Snapshot fetch failed for %s (%s) - falling back", hf_id, e)
         return False
     finally:
         _fd.tqdm, _ut.tqdm = orig_fd, orig_ut
@@ -230,15 +229,7 @@ def _is_trusted_local_path(hf_id: str) -> bool:
     return any(parts[0] == "models--" + trusted.replace("/", "--") for trusted in TRUSTED_HF_IDS)
 
 
-def _normalize_auto_map(auto_map: dict, local_repo: str) -> dict:
-    """Drop cross-repo pointers from an `auto_map`.
-
-    Some Florence repos point `AutoProcessor` at a *different* repo, e.g.
-    `microsoft/Florence-2-large--processing_florence2.Florence2Processor`.
-    transformers then tries to fetch that module from the other repo, which is
-    not in the local cache, so loading fails even though this repo contains
-    its own `processing_florence2.py`. Keep only the module path.
-    """
+def _normalize_auto_map(auto_map: dict) -> dict:
     cleaned = {}
     for key, value in auto_map.items():
         if not isinstance(value, str):
@@ -253,12 +244,6 @@ def _normalize_auto_map(auto_map: dict, local_repo: str) -> dict:
 
 
 def _florence_config_paths(hf_id: str) -> list[str]:
-    """Local paths for a repo's config files, resolved from the snapshot we already have.
-
-    `hf_hub_download(cache_dir=...)` resolves differently across
-    huggingface_hub versions and fails to find a repo that `_snapshot_fetch`
-    already downloaded. Resolving from the snapshot directory is exact.
-    """
     from huggingface_hub import scan_cache_dir
 
     out: list[str] = []
@@ -290,13 +275,11 @@ def _clean_florence_config(cache_dir, hf_id: str, local_only: bool = False) -> N
         auto_map = cfg.get("auto_map") or {}
         if not isinstance(auto_map, dict):
             continue
-        cleaned_map = _normalize_auto_map(auto_map, hf_id)
+        cleaned_map = _normalize_auto_map(auto_map)
         changed = cleaned_map != auto_map
 
-        bad_keys = [k for k in ("AutoModelForZeroShotObjectDetection",) if k in cleaned_map]
-        if bad_keys:
-            for k in bad_keys:
-                del cleaned_map[k]
+        if "AutoModelForZeroShotObjectDetection" in cleaned_map:
+            del cleaned_map["AutoModelForZeroShotObjectDetection"]
             changed = True
 
         if not changed:
@@ -364,15 +347,6 @@ def _load_florence_model(hf_id: str, dtype: Any, local_only: bool = False) -> An
 
 
 def _florence_language_generation_config(model: Any, language_model: Any) -> Any:
-    """Build a generation config for Florence's inner language model.
-
-    The outer config ships `num_beams`/`early_stopping` in its
-    `generation_config.json` but carries none of the special-token ids, so copying
-    it straight onto the language model leaves `decoder_start_token_id` and
-    `bos_token_id` unset and `generate()` raises "`decoder_start_token_id` or
-    `bos_token_id` has to be defined". The inner language config does have them,
-    so build from it and then overlay the outer's non-default settings.
-    """
     from transformers import GenerationConfig
 
     try:
@@ -392,20 +366,6 @@ def _florence_language_generation_config(model: Any, language_model: Any) -> Any
 
 
 def _enable_florence_generation(model: Any) -> None:
-    """Give Florence's remote-code model working `.generate()` on transformers >= 4.50.
-
-    transformers 4.50 dropped `GenerationMixin` from `PreTrainedModel`. The
-    Florence-2 / CogFlorence remote code predates that change: the outer
-    `Florence2ForConditionalGeneration.generate()` merges the image and text
-    embeddings and then delegates to `self.language_model.generate(...)`. The
-    language model never defined its own `generate` and relied on inheriting it,
-    so the delegated call raises `AttributeError`.
-
-    Re-basing the loaded instances onto a subclass that also inherits
-    `GenerationMixin` restores the inherited methods without touching the
-    read-only model cache. The language model needs a generation config with the
-    special-token ids, which this also installs.
-    """
     try:
         from transformers.generation.utils import GenerationMixin
     except Exception as e:
@@ -571,7 +531,6 @@ class GroundingDetector(DetectorBackend):
         self._device = device
         self._processor: Any = None
         self._model: Any = None
-        self._model_name: str | None = None
         self._is_florence: bool = False
         self._actual_device: str = device
 
@@ -597,7 +556,7 @@ class GroundingDetector(DetectorBackend):
         if no_exist_dir.exists() and not snapshots_dir.exists():
             try:
                 no_exist_dir.rename(snapshots_dir)
-                LOGGER.info("Fixed HF cache: renamed .no_exist → snapshots for %s", hf_id)
+                LOGGER.info("Fixed HF cache: renamed .no_exist -> snapshots for %s", hf_id)
             except OSError:
                 pass
 
@@ -631,12 +590,12 @@ class GroundingDetector(DetectorBackend):
                         loaded = True
                     except Exception as e:
                         LOGGER.debug(
-                            "Local cache load failed for %s: %s — trying network", hf_id, e
+                            "Local cache load failed for %s: %s - trying network", hf_id, e
                         )
                         processor = model = actual_device = None
 
             if not loaded:
-                LOGGER.info("Not cached — downloading %s", model_name)
+                LOGGER.info("Not cached - downloading %s", model_name)
                 from backend.utils.net_check import is_connected
                 if not is_connected():
                     raise RuntimeError(
@@ -652,7 +611,7 @@ class GroundingDetector(DetectorBackend):
                     )
                     if snapshot_dirs:
                         local_path = str(snapshot_dirs[0])
-                        LOGGER.info("Downloaded %s — loading from %s", model_name, hf_id)
+                        LOGGER.info("Downloaded %s - loading from %s", model_name, hf_id)
                         LOGGER.info(
                             "%s: download complete",
                             model_name,
@@ -692,7 +651,6 @@ class GroundingDetector(DetectorBackend):
                         if disable_progress_bars:
                             disable_progress_bars()
         except Exception:
-            self._model_name = model_name
             LOGGER.warning(
                 "Failed to load grounding detector: %s (%s)",
                 model_name,
@@ -705,13 +663,11 @@ class GroundingDetector(DetectorBackend):
         self._model = model
         self._actual_device = actual_device
         self._is_florence = is_florence
-        self._model_name = model_name
         LOGGER.debug("Loaded grounding detector: %s (%s)", model_name, hf_id)
 
     def unload_model(self) -> None:
         self._processor = None
         self._model = None
-        self._model_name = None
         self._is_florence = False
         release_gpu_memory()
 

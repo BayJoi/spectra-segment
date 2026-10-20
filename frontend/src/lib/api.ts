@@ -21,7 +21,6 @@ export class ApiError extends Error {
 }
 
 interface RawPredictResponse {
-  masks: string[];
   object_masks?: Record<string, string>;
   object_history?: Record<string, { undo?: number; redo?: number; strokes?: number; has_mask?: boolean }>;
   scores?: number[];
@@ -33,36 +32,60 @@ interface RawSam3PromptResponse {
   bboxes: number[][];
 }
 
+interface RawSegmentBatchResponse {
+  masks: (string | null)[];
+}
+
 async function decodeMasks(masks: string[]): Promise<PackedMask[]> {
   return Promise.all(masks.map((m) => decodeDetectionMask(m)));
 }
 
+const objectMaskCache = new Map<number, { source: string; mask: PackedMask }>();
+
+export function resetObjectMaskCache(): void {
+  objectMaskCache.clear();
+}
+
 async function decodeObjectMasks(obj?: Record<string, string>): Promise<Record<number, PackedMask>> {
   if (!obj) return {};
-  const entries = Object.entries(obj);
-  const decoded = await Promise.all(entries.map(([, v]) => decodeDetectionMask(v)));
+  const entries = Object.entries(obj).map(([key, source]) => ({ oid: Number(key), source }));
+
+  const decoded = await Promise.all(
+    entries.map(async ({ oid, source }) => {
+      const cached = objectMaskCache.get(oid);
+      if (cached && cached.source === source) return { oid, mask: cached.mask };
+      const mask = await decodeDetectionMask(source);
+      objectMaskCache.set(oid, { source, mask });
+      return { oid, mask };
+    })
+  );
+
   const out: Record<number, PackedMask> = {};
-  entries.forEach(([k], i) => {
-    out[Number(k)] = decoded[i];
-  });
+  const present = new Set<number>();
+  for (const { oid, mask } of decoded) {
+    present.add(oid);
+    out[oid] = mask;
+  }
+  for (const oid of Array.from(objectMaskCache.keys())) {
+    if (!present.has(oid)) objectMaskCache.delete(oid);
+  }
   return out;
 }
 
 async function toPredictResponse(r: RawPredictResponse): Promise<PredictResponse> {
   return {
-    masks: await decodeMasks(r.masks),
     objectMasks: await decodeObjectMasks(r.object_masks),
     objectHistory: r.object_history,
   };
 }
 
-export function resetToken(): void {
+let _token: string | null = null;
+let _tokenPromise: Promise<string> | null = null;
+
+function resetToken(): void {
   _token = null;
   _tokenPromise = null;
 }
-
-let _token: string | null = null;
-let _tokenPromise: Promise<string> | null = null;
 
 function getToken(): Promise<string> {
   if (_token) return Promise.resolve(_token);
@@ -122,8 +145,6 @@ export const api = {
         navigator.sendBeacon(`${base}/release`, "release");
       } catch {}
     }
-    // The backend regenerates its token on every start, so a cached token can
-    // go stale. Refresh and retry rather than leaving a 401 behind.
     const token = _token;
     if (!token) return;
     fetch(base, {
@@ -193,15 +214,15 @@ export const api = {
       body: JSON.stringify(params),
     }).then(toPredictResponse),
 
-  undo: (sessionId: string, objectId: number = 0) =>
+  undo: (sessionId: string, objectId: number = 0, steps: number = 1) =>
     apiFetch<RawPredictResponse>(
-      `/api/sessions/${sessionId}/undo?object_id=${objectId}`,
+      `/api/sessions/${sessionId}/undo?object_id=${objectId}&steps=${steps}`,
       { method: "POST" }
     ).then(toPredictResponse),
 
-  redo: (sessionId: string, objectId: number = 0) =>
+  redo: (sessionId: string, objectId: number = 0, steps: number = 1) =>
     apiFetch<RawPredictResponse>(
-      `/api/sessions/${sessionId}/redo?object_id=${objectId}`,
+      `/api/sessions/${sessionId}/redo?object_id=${objectId}&steps=${steps}`,
       { method: "POST" }
     ).then(toPredictResponse),
 
@@ -292,11 +313,15 @@ export const api = {
     ),
 
   segmentBatch: (sessionId: string, bboxes: number[][]) =>
-    apiFetch<RawPredictResponse>(`/api/sessions/${sessionId}/segment-batch`, {
+    apiFetch<RawSegmentBatchResponse>(`/api/sessions/${sessionId}/segment-batch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ bboxes }),
-    }).then(async (r) => ({ masks: await decodeMasks(r.masks) })),
+    }).then(async (r) => ({
+      masks: await Promise.all(
+        r.masks.map((m) => (m ? decodeDetectionMask(m) : Promise.resolve(null)))
+      ),
+    })),
 };
 
 export async function decodeDetectionMask(base64Png: string): Promise<PackedMask> {

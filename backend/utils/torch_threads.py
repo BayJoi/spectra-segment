@@ -20,7 +20,7 @@ def resolve_threads(env_var: str) -> int:
         try:
             return max(1, min(int(raw), MAX_THREADS))
         except ValueError:
-            LOGGER.warning("Invalid %s=%r — using default", env_var, raw)
+            LOGGER.warning("Invalid %s=%r - using default", env_var, raw)
     return max(1, min(os.cpu_count() or 4, MAX_THREADS))
 
 

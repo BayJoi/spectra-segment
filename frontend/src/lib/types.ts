@@ -6,7 +6,6 @@ export interface CreateSessionResponse {
 import type { PackedMask } from "./mask";
 
 export interface PredictResponse {
-  masks: PackedMask[];
   objectMasks?: Record<number, PackedMask>;
   objectHistory?: Record<string, Partial<ObjectHistoryEntry>>;
 }

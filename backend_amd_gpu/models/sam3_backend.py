@@ -4,7 +4,6 @@ import logging
 import os
 import sys
 import threading
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -13,6 +12,7 @@ import torch
 
 from .base import SegmentationBackend
 from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
+from ..utils.model_integrity import ensure_model_file
 from ..utils.stderr_progress import StderrInterceptor as _StderrInterceptor
 from ..utils.torch_threads import cpu_threads, cudnn_disabled, resolve_threads
 
@@ -73,22 +73,7 @@ class SAM3Backend(SegmentationBackend):
                 "  Re-run install_amd.bat to install it."
             ) from None
 
-        abs_model = str(model_dir / model_path)
-        if not Path(abs_model).exists():
-            from backend_amd_gpu.utils.net_check import is_connected
-            if not is_connected():
-                raise RuntimeError(
-                    f"No internet connection and '{model_path}' not found locally.\n"
-                    f"  Connect to the internet to download, or place the file in:\n"
-                    f"  {model_dir}"
-                )
-            from backend_amd_gpu.utils.model_integrity import download_model_file, PINNED_MODEL_URLS
-            url = PINNED_MODEL_URLS.get(model_path)
-            if url:
-                LOGGER.debug("Not cached: %s", model_path)
-                download_model_file(model_path, Path(abs_model), url=url)
-            else:
-                LOGGER.debug("Not cached: %s", model_path)
+        abs_model = ensure_model_file(model_path, model_dir)
 
         with _MODEL_LOAD_LOCK:
             _orig = torch.load

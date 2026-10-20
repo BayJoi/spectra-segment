@@ -6,15 +6,14 @@ import {
   nextLayerId,
   type Layer,
 } from "@/store/layers";
-import { masksAtom, objectMasksAtom, perDetectionMasksAtom, sessionIdAtom } from "@/store/session";
+import { masksAtom, objectMasksAtom, perDetectionMasksAtom } from "@/store/session";
 import { detectionsAtom, selectedDetectionAtom } from "@/store/detection";
 import {
   removeDetectionMask,
   removeDetectionIndexFromLayers,
   shiftSelectedDetection,
 } from "@/lib/detectionEdit";
-import { api } from "@/lib/api";
-import { emitUi, logErr } from "@/store/logs";
+import { emitUi } from "@/store/logs";
 import { useSession } from "./useSession";
 
 export function useLayers() {
@@ -25,22 +24,17 @@ export function useLayers() {
   const [, setPerDetectionMasks] = useAtom(perDetectionMasksAtom);
   const [, setDetections] = useAtom(detectionsAtom);
   const [, setSelectedDetection] = useAtom(selectedDetectionAtom);
-  const [sessionId] = useAtom(sessionIdAtom);
 
-  const { applyHistory } = useSession();
+  const { clearObjectHistory } = useSession();
 
   const clearServerBrushObjects = useCallback(
     (oids: number[]) => {
-      if (!sessionId || oids.length === 0) return;
-      emitUi("layer", "INFO", `Cleared ${oids.length} subject(s) on the server`);
-      oids.forEach((oid) => {
-        api
-          .clearObject(sessionId, oid)
-          .then((res) => applyHistory(res.objectHistory))
-          .catch((err) => logErr("subject", err));
-      });
+      const targets = Array.from(new Set(oids));
+      if (targets.length === 0) return;
+      emitUi("layer", "INFO", `Cleared ${targets.length} subject(s) on the server`);
+      targets.forEach((oid) => void clearObjectHistory(oid));
     },
-    [sessionId, applyHistory]
+    [clearObjectHistory]
   );
 
   const addLayer = useCallback(

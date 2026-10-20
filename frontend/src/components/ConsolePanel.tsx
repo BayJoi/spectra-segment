@@ -587,14 +587,14 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
             <span className="tabular-nums">
               {visibleLogs.length}{filteredLogs.length > visibleLogs.length ? ` +${hiddenCount}` : ""} shown
             </span>
-            {errorCount > 0 && <span className="text-red-400/80 tabular-nums">· {errorCount} err</span>}
-            {warnCount > 0 && <span className="text-yellow-400/70 tabular-nums">· {warnCount} warn</span>}
+            {errorCount > 0 && <span className="text-red-400/80 tabular-nums">- {errorCount} err</span>}
+            {warnCount > 0 && <span className="text-yellow-400/70 tabular-nums">- {warnCount} warn</span>}
             {categoryFilter !== "all" && (
               <button
                 onClick={() => setCategoryFilter("all")}
                 className="text-orange-400 hover:underline cursor-pointer"
               >
-                {uiCategoryLabels[categoryFilter as UiCategory] ?? categoryFilter} ×
+                {uiCategoryLabels[categoryFilter as UiCategory] ?? categoryFilter} x
               </button>
             )}
             {sourceFilter !== "all" && (
@@ -602,7 +602,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                 onClick={() => setSourceFilter("all")}
                 className="text-orange-400 hover:underline cursor-pointer"
               >
-                {sourceFilter === "ui" ? "App" : "Server"} ×
+                {sourceFilter === "ui" ? "App" : "Server"} x
               </button>
             )}
           </div>
@@ -682,7 +682,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                     </div>
                     {(files || sizeText || p.eta) && (
                       <div className="flex items-center justify-between text-[8px] font-mono text-neutral-500 mt-0.5">
-                        <span className="truncate">{[sizeText, p.file].filter(Boolean).join(" · ")}</span>
+                        <span className="truncate">{[sizeText, p.file].filter(Boolean).join(" - ")}</span>
                         <span className="shrink-0 ml-2 flex items-center gap-1.5">
                           {files && <span>{files}</span>}
                           {p.eta && <span>ETA {p.eta}</span>}
@@ -715,7 +715,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
             >
               {filteredLogs.length === 0 ? (
                 <p className="text-neutral-600 text-center py-4">
-                  {logs.length === 0 ? "No logs yet" : "No matches — clear the search or filters"}
+                  {logs.length === 0 ? "No logs yet" : "No matches - clear the search or filters"}
                 </p>
               ) : (
                 visibleLogs.map((entry) => (
@@ -747,7 +747,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                             : "text-neutral-400"
                     )}>
                       {entry.source === "ui" && entry.category && (
-                        <span className="text-neutral-600">{uiCategoryLabels[entry.category as UiCategory] ?? entry.category} · </span>
+                        <span className="text-neutral-600">{uiCategoryLabels[entry.category as UiCategory] ?? entry.category} - </span>
                       )}
                       {entry.message}
                     </span>

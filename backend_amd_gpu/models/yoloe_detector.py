@@ -24,13 +24,13 @@ YOLOE_MODELS = {
 }
 
 YOLOE_METADATA: dict[str, dict[str, str]] = {
-    "yoloe-26l-seg": {"tier": "large",  "perf": "Best accuracy — 36.8% LVIS mAP, 161 FPS on T4"},
-    "yoloe-26m-seg": {"tier": "medium", "perf": "Balanced — 35.4% LVIS mAP"},
-    "yoloe-26s-seg": {"tier": "small",  "perf": "Fast — 29.9% LVIS mAP"},
-    "yoloe-26n-seg": {"tier": "tiny",   "perf": "Fastest — 23.7% LVIS mAP"},
-    "yoloe-11l-seg": {"tier": "large",  "perf": "YOLO11-based — 35.2% LVIS mAP"},
-    "yoloe-11m-seg": {"tier": "medium", "perf": "YOLO11-based — balanced"},
-    "yoloe-11s-seg": {"tier": "small",  "perf": "YOLO11-based — fast"},
+    "yoloe-26l-seg": {"tier": "large",  "perf": "Best accuracy - 36.8% LVIS mAP, 161 FPS on T4"},
+    "yoloe-26m-seg": {"tier": "medium", "perf": "Balanced - 35.4% LVIS mAP"},
+    "yoloe-26s-seg": {"tier": "small",  "perf": "Fast - 29.9% LVIS mAP"},
+    "yoloe-26n-seg": {"tier": "tiny",   "perf": "Fastest - 23.7% LVIS mAP"},
+    "yoloe-11l-seg": {"tier": "large",  "perf": "YOLO11-based - 35.2% LVIS mAP"},
+    "yoloe-11m-seg": {"tier": "medium", "perf": "YOLO11-based - balanced"},
+    "yoloe-11s-seg": {"tier": "small",  "perf": "YOLO11-based - fast"},
 }
 
 _YOLOE_WEIGHTS: dict[str, str] = {
@@ -48,7 +48,6 @@ class YOLEDetector(DetectorBackend):
     def __init__(self, device: str = "cpu") -> None:
         self._device = device
         self._model: Any = None
-        self._model_name: str | None = None
         self._current_classes: list[str] = []
 
     def load_model(self, model_path: str | None = None) -> None:
@@ -131,13 +130,11 @@ class YOLEDetector(DetectorBackend):
 
         self._model.model.get_text_pe = types.MethodType(_cached_get_text_pe, self._model.model)
 
-        self._model_name = model_name
         self._current_classes = []
         LOGGER.debug("Loaded YOLOE detector: %s", model_name)
 
     def unload_model(self) -> None:
         self._model = None
-        self._model_name = None
         self._current_classes = []
         release_gpu_memory()
 

@@ -1,4 +1,5 @@
 import { useRef, useEffect, useCallback, type RefObject } from "react";
+import { usePanelDismiss } from "@/hooks/usePanelDismiss";
 import { useAtom } from "jotai";
 import { useSession } from "@/hooks/useSession";
 import {
@@ -7,6 +8,8 @@ import {
   objectMasksAtom,
   subjectMetaAtom,
   objectHistoryAtom,
+  objectUndoCountsAtom,
+  objectRedoCountsAtom,
   subjectColor,
 } from "@/store/session";
 import { cn } from "@/lib/utils";
@@ -18,34 +21,17 @@ interface SubjectsPanelProps {
 }
 
 export function SubjectsPanel({ open, onClose, ignoredRef }: SubjectsPanelProps) {
-  const { clearObjectHistory, forgetSubject } = useSession();
+  const { clearObjectHistory, forgetSubject, undoSubject, redoSubject } = useSession();
   const [brushObjects, setBrushObjects] = useAtom(brushObjectsAtom);
   const [activeObjectId, setActiveObjectId] = useAtom(activeObjectIdAtom);
   const [objectMasks] = useAtom(objectMasksAtom);
   const [subjectMeta, setSubjectMeta] = useAtom(subjectMetaAtom);
   const [objectHistory] = useAtom(objectHistoryAtom);
+  const [objectUndoCounts] = useAtom(objectUndoCountsAtom);
+  const [objectRedoCounts] = useAtom(objectRedoCountsAtom);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (panelRef.current && !panelRef.current.contains(target) && !ignoredRef?.current?.contains(target)) {
-        onClose();
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open, onClose, ignoredRef]);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [open, onClose]);
+  usePanelDismiss(open, onClose, panelRef, ignoredRef);
 
   useEffect(() => {
     const missing = brushObjects.filter((oid) => !subjectMeta[oid]);
@@ -99,6 +85,8 @@ export function SubjectsPanel({ open, onClose, ignoredRef }: SubjectsPanelProps)
           const color = meta?.color ?? subjectColor(oid);
           const strokes = objectHistory[oid]?.undo ?? 0;
           const hasMask = oid in objectMasks;
+          const canUndoHere = (objectUndoCounts[oid] ?? 0) > 0;
+          const canRedoHere = (objectRedoCounts[oid] ?? 0) > 0;
           return (
             <div
               key={oid}
@@ -131,6 +119,32 @@ export function SubjectsPanel({ open, onClose, ignoredRef }: SubjectsPanelProps)
                 "w-1.5 h-1.5 rounded-full flex-shrink-0",
                 hasMask ? "bg-orange-400" : "bg-neutral-600"
               )} />
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setActiveObjectId(oid);
+                  undoSubject(oid);
+                }}
+                disabled={!canUndoHere}
+                aria-label={`Undo a stroke on ${meta?.name ?? `Subject ${oid + 1}`}`}
+                title="Undo this subject's last stroke"
+                className="w-6 h-6 min-w-[24px] min-h-[24px] rounded flex items-center justify-center text-neutral-600 hover:text-orange-300 hover:bg-orange-500/10 transition-all duration-150 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setActiveObjectId(oid);
+                  redoSubject(oid);
+                }}
+                disabled={!canRedoHere}
+                aria-label={`Redo a stroke on ${meta?.name ?? `Subject ${oid + 1}`}`}
+                title="Redo this subject's last stroke"
+                className="w-6 h-6 min-w-[24px] min-h-[24px] rounded flex items-center justify-center text-neutral-600 hover:text-orange-300 hover:bg-orange-500/10 transition-all duration-150 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+              </button>
               <button
                 onClick={(e) => {
                   e.stopPropagation();

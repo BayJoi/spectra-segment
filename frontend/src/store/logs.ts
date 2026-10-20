@@ -1,4 +1,4 @@
-export type LogLevel = "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL" | "DOWNLOAD";
+type LogLevel = "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL" | "DOWNLOAD";
 
 export type UiCategory =
   | "session"
@@ -45,7 +45,7 @@ function safeText(value: unknown, max = 300): string {
     }
   }
   s = s.replace(PATH_RE, "[path]").replace(SECRET_RE, "[redacted]").replace(LONGHEX_RE, "[hash]");
-  return s.length > max ? `${s.slice(0, max)}…` : s;
+  return s.length > max ? `${s.slice(0, max)}...` : s;
 }
 
 export function emitUi(

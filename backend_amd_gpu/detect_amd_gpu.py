@@ -1,7 +1,12 @@
 import csv
+import os
 import re
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from amd_gfx import gfx_override_value  # noqa: E402
 
 PCI_DEV_TO_GFX: dict[str, tuple[str, str, bool]] = {
     "7590": ("gfx1200", "Navi 44 (RX 9060 XT)", True),
@@ -311,18 +316,6 @@ def _match_vram(gpu: dict[str, str]) -> int:
             if pat in name_lower:
                 return vram
     return 0
-
-
-def gfx_override_value(gfx: str | None) -> str | None:
-    if not gfx:
-        return None
-    if gfx.startswith("gfx101"):
-        return "10.1.0"
-    if gfx.startswith("gfx103"):
-        return "10.3.0"
-    if gfx.startswith("gfx110"):
-        return "11.0.0"
-    return None
 
 
 def detect_amd_gpu() -> tuple[str | None, int]:

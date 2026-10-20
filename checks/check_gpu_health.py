@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import io
 import logging
 import os
 import sys
@@ -83,7 +82,7 @@ def main() -> int:
     _log = logging.getLogger("health")
 
     print("=" * 62)
-    print(f"Spectra Segment health check — fork: {args.fork}")
+    print(f"Spectra Segment health check - fork: {args.fork}")
     print(f"python : {sys.version.split()[0]}  ({sys.executable})")
     print(f"mode   : NO downloads unless --download is passed")
     print("=" * 62)
@@ -127,7 +126,7 @@ def main() -> int:
             status = "FAIL"
         else:
             status = "SKIP"
-        line = f"[{status}] {name}" + (f" — {detail}" if detail else "")
+        line = f"[{status}] {name}" + (f" - {detail}" if detail else "")
         print(line)
         results.append((name, status, detail))
         return ok
@@ -154,7 +153,7 @@ def main() -> int:
         props = __import__("torch").cuda.get_device_properties(0)
         vram_total_mb = int(props.total_memory / 2**20)
         arch = getattr(props, "gcnArchName", "") or getattr(props, "name", "")
-        print(f"gpu    : {props.name} · {vram_total_mb} MB · {arch}")
+        print(f"gpu    : {props.name} - {vram_total_mb} MB - {arch}")
     except Exception:
         vram_total_mb = 0
         arch = ""
@@ -177,7 +176,7 @@ def main() -> int:
     if model_file.exists():
         record("model available locally", True, model_name)
     elif args.download:
-        record("model available locally", None, f"{model_name} missing — --download set, load will fetch it")
+        record("model available locally", None, f"{model_name} missing - --download set, load will fetch it")
     else:
         record("model available locally", False,
                f"{model_name} not in {weights_dir.name} (use --download to allow fetching)")
@@ -220,7 +219,7 @@ def main() -> int:
     tensors = [t for t in (feats or {}).values() if isinstance(t, torch.Tensor)]
     all_inference = bool(tensors) and all(t.is_inference() for t in tensors)
     record("encode runs under inference_mode", all_inference,
-           "" if all_inference else "features are NOT inference tensors — inference_mode guard was removed?")
+           "" if all_inference else "features are NOT inference tensors - inference_mode guard was removed?")
 
     alloc_mb = int(torch.cuda.memory_allocated() / 2**20) if is_gpu and torch.cuda.is_available() \
         else int(torch.cuda.memory_allocated() / 2**20)
@@ -258,7 +257,7 @@ def main() -> int:
     record("predict returns masks", masks_ok, last_err)
     if times:
         avg = sum(times) / len(times)
-        print(f"[info] predict over {len(times)} runs: avg {avg:.1f} ms · min {min(times):.1f} ms")
+        print(f"[info] predict over {len(times)} runs: avg {avg:.1f} ms - min {min(times):.1f} ms")
 
     be.unload_model()
 

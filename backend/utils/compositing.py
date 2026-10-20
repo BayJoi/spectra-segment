@@ -16,8 +16,12 @@ def mask_to_png_b64(mask: np.ndarray) -> str:
 
 
 def _is_unit_scale(arr: np.ndarray) -> bool:
-    finite = np.nan_to_num(np.asarray(arr, dtype=np.float64), nan=0.0, posinf=1.0, neginf=0.0)
-    return float(finite.min()) >= 0.0 and float(finite.max()) <= 1.0
+    values = np.asarray(arr)
+    if not bool(np.all(np.isfinite(values))):
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            return True
+    return float(values.min()) >= 0.0 and float(values.max()) <= 1.0
 
 
 def _to_mask_f32(mask: np.ndarray) -> np.ndarray:
@@ -28,11 +32,14 @@ def _to_mask_f32(mask: np.ndarray) -> np.ndarray:
         if _is_unit_scale(arr):
             return arr.astype(np.float32)
         return (np.clip(np.nan_to_num(arr, nan=0.0, posinf=255.0, neginf=0.0), 0.0, 255.0) / 255.0).astype(np.float32)
-    return (np.clip(arr.astype(np.float64), 0.0, 255.0) / 255.0).astype(np.float32)
+    return np.clip(arr, 0, 255).astype(np.float32) / 255.0
 
 
 def _to_mask_u8(mask: np.ndarray) -> np.ndarray:
-    return np.clip(_to_mask_f32(mask) * 255.0, 0, 255).astype(np.uint8)
+    arr = np.asarray(mask)
+    if arr.dtype == np.bool_:
+        return arr.astype(np.uint8) * 255
+    return np.clip(_to_mask_f32(arr) * 255.0, 0, 255).astype(np.uint8)
 
 
 def feather_mask_edge(mask: np.ndarray, radius: int = 3) -> np.ndarray:
@@ -77,7 +84,7 @@ def composite_and_encode(
     soft = feather_mask_edge(mask, feather_radius)
     buf = io.BytesIO()
 
-    if background_color is not None:
+    if background_color is not None or bg_image is not None:
         result = composite_background(image_rgb, soft, background_color=background_color, bg_image=bg_image)
         pil_img = Image.fromarray(result, "RGB")
         if output_format in ("jpg", "jpeg"):
