@@ -4,18 +4,24 @@ setlocal enabledelayedexpansion
 title Spectra Segment - Installer (CPU)
 
 set "ROOT=%~dp0"
-set "TEMP=%ROOT%\.tmp"
-set "TMP=%ROOT%\.tmp"
-if not exist "%ROOT%\.tmp" mkdir "%ROOT%\.tmp" 2>nul
 set "TOOLS_DIR=%ROOT%tools"
 set "UV_DIR=%TOOLS_DIR%\uv-cpu"
 set "UV_EXE=%UV_DIR%\uv.exe"
-set "UV_CACHE=%ROOT%backend\.uv\cache"
 set "UV_PYTHON=%ROOT%tools\python"
 set "VENV_DIR=%ROOT%backend\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 set "MODELS_DIR=%ROOT%backend\model_weights"
 set "PY_VERSION=3.13.14"
+
+set "TEMP=%ROOT%\.tmp"
+set "TMP=%ROOT%\.tmp"
+if not exist "%TEMP%" mkdir "%TEMP%" 2>nul
+
+set "ROOT_LEN=0"
+for /f "usebackq delims=" %%L in (`powershell -NoProfile -Command "$env:ROOT.Length"`) do set "ROOT_LEN=%%L"
+set "UV_CACHE=%ROOT%backend\.uv\cache"
+if !ROOT_LEN! gtr 50 set "UV_CACHE=%ROOT%.uv-cpu"
+if not exist "%UV_CACHE%" mkdir "%UV_CACHE%" 2>nul
 
 echo(
 echo  +------------------------------------------------------------+
@@ -87,7 +93,7 @@ if exist "%VENV_PYTHON%" (
     goto :skip_venv
 )
 echo   [INFO]  Creating virtual environment with Python %PY_VERSION%...
-"%UV_EXE%" venv --python %PY_VERSION% --seed "%VENV_DIR%"
+"%UV_EXE%" venv --clear --python %PY_VERSION% --seed "%VENV_DIR%"
 if !errorlevel! neq 0 (
     echo   [FAIL]  Failed to create virtual environment.
     pause
@@ -144,7 +150,10 @@ if exist "%CLIP_SRC%" for /d %%d in ("%CLIP_SRC%\*") do set "CLIP_DIR=%%d"
 if "!CLIP_DL_ERR!"=="0" if defined CLIP_DIR (
     "%UV_EXE%" pip install --python "%VENV_PYTHON%" "!CLIP_DIR!" --cache-dir "%UV_CACHE%"
     if !errorlevel! neq 0 (
-        echo   [WARN]  Failed to install CLIP - SAM 3 mode will be unavailable.
+        "%VENV_PYTHON%" -m pip install --no-cache-dir "!CLIP_DIR!" 2>&1
+        if !errorlevel! neq 0 (
+            echo   [WARN]  Failed to install CLIP - SAM 3 mode will be unavailable.
+        )
     )
 ) else (
     echo   [WARN]  Failed to download CLIP - SAM 3 mode will be unavailable.

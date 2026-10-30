@@ -4,16 +4,22 @@ setlocal enabledelayedexpansion
 title Spectra Segment - AMD ROCm Installer
 
 set "ROOT=%~dp0"
-set "TEMP=%ROOT%\.tmp"
-set "TMP=%ROOT%\.tmp"
-if not exist "%ROOT%\.tmp" mkdir "%ROOT%\.tmp" 2>nul
 set "AMD_DIR=%ROOT%backend_amd_gpu"
 set "VENV_DIR=%AMD_DIR%\.venv"
-set "UV_CACHE=%AMD_DIR%\.uv_cache_amd"
-set "UV_CACHE_DIR=%UV_CACHE%"
-set "UV_PYTHON_CACHE_DIR=%UV_CACHE%"
 set "UV_NO_CONFIG=1"
 set "UV_EXE=%ROOT%tools\uv-amd\uv.exe"
+
+set "TEMP=%ROOT%\.tmp"
+set "TMP=%ROOT%\.tmp"
+if not exist "%TEMP%" mkdir "%TEMP%" 2>nul
+
+set "ROOT_LEN=0"
+for /f "usebackq delims=" %%L in (`powershell -NoProfile -Command "$env:ROOT.Length"`) do set "ROOT_LEN=%%L"
+set "UV_CACHE=%AMD_DIR%\.uv_cache_amd"
+if !ROOT_LEN! gtr 50 set "UV_CACHE=%ROOT%.uv-amd"
+if not exist "%UV_CACHE%" mkdir "%UV_CACHE%" 2>nul
+set "UV_CACHE_DIR=%UV_CACHE%"
+set "UV_PYTHON_CACHE_DIR=%UV_CACHE%"
 
 echo(
 echo  +------------------------------------------------------------+
@@ -24,6 +30,10 @@ echo  +------------------------------------------------------------+
 echo(
 
 call :section "[ 1 / 8 ]  Preflight"
+if !ROOT_LEN! gtr 50 (
+    echo   [INFO]  Long project path - using the short project cache:
+    echo           %UV_CACHE%
+)
 set "WEB_DIR=%AMD_DIR%\web"
 if exist "%VENV_DIR%\Scripts\python.exe" (
     echo   [INFO]  AMD venv already exists at %VENV_DIR%
@@ -70,6 +80,10 @@ if exist "%UV_EXE%" (
 )
 
 call :section "[ 3 / 8 ]  Virtual environment"
+if exist "%VENV_DIR%\Scripts\python.exe" (
+    echo   [INFO]  Virtual environment already exists - keeping it.
+    goto :venv_ready
+)
 echo   [INFO]  Creating Python 3.12.13 virtual environment...
 "%UV_EXE%" python install 3.12.13 --cache-dir "%UV_CACHE%" 2>&1
 if errorlevel 1 (
@@ -78,13 +92,15 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-"%UV_EXE%" venv --python 3.12.13 --seed "%VENV_DIR%" --cache-dir "%UV_CACHE%" 2>&1
+"%UV_EXE%" venv --clear --python 3.12.13 --seed "%VENV_DIR%" --cache-dir "%UV_CACHE%" 2>&1
 if errorlevel 1 (
     echo   [FAIL]  uv venv creation failed
     pause
     exit /b 1
 )
 echo   [ OK ]  venv created at %VENV_DIR%
+
+:venv_ready
 
 call :section "[ 4 / 8 ]  GPU detection"
 set "AMD_GFX="
@@ -140,10 +156,26 @@ echo   [INFO]  Installing ROCm PyTorch (this may take a while)...
     --cache-dir "%UV_CACHE%" ^
     2>&1
 if errorlevel 1 (
-    echo   [FAIL]  ROCm PyTorch installation failed
-    echo           Try: %VENV_DIR%\Scripts\python.exe -m pip install "!TORCH_PKG!" --index-url %TORCH_INDEX_URL%
-    pause
-    exit /b 1
+    echo   [WARN]  uv could not install ROCm PyTorch - retrying with pip...
+    "%VENV_DIR%\Scripts\python.exe" -m pip --version >nul 2>&1
+    if errorlevel 1 "%VENV_DIR%\Scripts\python.exe" -m ensurepip --upgrade >nul 2>&1
+    if not exist "%AMD_DIR%\pip_cache" mkdir "%AMD_DIR%\pip_cache" 2>nul
+    "%VENV_DIR%\Scripts\python.exe" -m pip install ^
+        "!TORCH_PKG!" ^
+        "!TORCHVISION_PKG!" ^
+        "!TORCHAUDIO_PKG!" ^
+        --index-url "%TORCH_INDEX_URL%" ^
+        --cache-dir "%AMD_DIR%\pip_cache" ^
+        --disable-pip-version-check ^
+        2>&1
+    if errorlevel 1 (
+        echo   [FAIL]  ROCm PyTorch installation failed
+        echo           Try: %VENV_DIR%\Scripts\python.exe -m pip install "!TORCH_PKG!" --index-url %TORCH_INDEX_URL%
+        echo           If both attempts fail with a long-path error ^(WinError 206^), move this
+        echo           folder somewhere shorter, e.g. C:\spectra-segment, and run the installer again.
+        pause
+        exit /b 1
+    )
 )
 echo   [ OK ]  ROCm PyTorch installed
 
@@ -165,7 +197,11 @@ if exist "%CLIP_SRC%" for /d %%d in ("%CLIP_SRC%\*") do set "CLIP_DIR=%%d"
 if "!CLIP_DL_ERR!"=="0" if defined CLIP_DIR (
     "%UV_EXE%" pip install --python "%VENV_DIR%" "!CLIP_DIR!" --cache-dir "%UV_CACHE%"
     if !errorlevel! neq 0 (
-        echo   [WARN]  Failed to install CLIP - SAM 3 mode will be unavailable.
+        if not exist "%AMD_DIR%\pip_cache" mkdir "%AMD_DIR%\pip_cache" 2>nul
+        "%VENV_DIR%\Scripts\python.exe" -m pip install --cache-dir "%AMD_DIR%\pip_cache" "!CLIP_DIR!" 2>&1
+        if !errorlevel! neq 0 (
+            echo   [WARN]  Failed to install CLIP - SAM 3 mode will be unavailable.
+        )
     )
 ) else (
     echo   [WARN]  Failed to download CLIP - SAM 3 mode will be unavailable.

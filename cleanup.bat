@@ -57,6 +57,10 @@ if exist "%ROOT%backend\.uv" (
     echo    [DIR]  backend\.uv\  ^(package cache^)
     set "HAS_ITEMS=1"
 )
+if exist "%ROOT%.uv-cpu" (
+    echo    [DIR]  .uv-cpu\  ^(short uv cache^)
+    set "HAS_ITEMS=1"
+)
 if exist "%ROOT%backend\model_weights" (
     echo    [DIR]  backend\model_weights\  ^(downloaded models^)
     set "HAS_ITEMS=1"
@@ -93,6 +97,7 @@ if exist "%ROOT%\.tmp" (
     echo    [DIR]  .tmp\  ^(installer temp files^)
     set "HAS_ITEMS=1"
 )
+
 
 if exist "%ROOT%backend\model_weights\hf_cache" (
     echo    [DIR]  backend\model_weights\hf_cache\  ^(HuggingFace cache^)
@@ -279,6 +284,16 @@ if exist "%ROOT%backend\.uv" (
     )
 )
 
+if exist "%ROOT%.uv-cpu" (
+    echo Removing .uv-cpu\...
+    rmdir /s /q "%ROOT%.uv-cpu"
+    if exist "%ROOT%.uv-cpu" (
+        echo   [WARN]  Failed to remove .uv-cpu\ ^(files may be in use^)
+    ) else (
+        echo   Done.
+    )
+)
+
 if exist "%ROOT%backend\.local_token" (
     echo Removing backend\.local_token...
     del /q "%ROOT%backend\.local_token"
@@ -327,6 +342,7 @@ if exist "%ROOT%\.tmp" (
     rmdir /s /q "%ROOT%\.tmp"
     echo   Done.
 )
+
 
 if exist "%ROOT%backend\logs" (
     echo Removing backend\logs\...

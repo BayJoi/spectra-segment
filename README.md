@@ -79,7 +79,12 @@ Bun), the installer provisions the virtual environment inside the repo folder, a
 model weights and runtime caches stay under `model_weights\`. The package cache
 lives in the backend folder (`backend\.uv\` or `backend_amd_gpu\.uv_cache_amd\`),
 and the installers and launchers redirect temp and cache paths into the project
-folder so no system-wide install is needed.
+folder so no system-wide install is needed. On a long project path, the installers
+keep the uv cache in a short root-level folder (`.uv-amd` or `.uv-cpu`) and temp
+files in `.tmp`, so uv's source builds stay under the Windows 260-character limit.
+If the ROCm source package still cannot be built, the installer retries that step
+with pip using the same project-local temp and cache. Nothing is written outside
+the app folder.
 
 ### CPU / NVIDIA GPU
 

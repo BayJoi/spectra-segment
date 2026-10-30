@@ -35,6 +35,10 @@ if exist "%UV_CACHE%" (
     echo    [DIR]  backend_amd_gpu\.uv_cache_amd\  ^(uv package cache^)
     set "HAS_ITEMS=1"
 )
+if exist "%ROOT%.uv-amd" (
+    echo    [DIR]  .uv-amd\  ^(short uv cache^)
+    set "HAS_ITEMS=1"
+)
 if exist "%AMD_DIR%\pip_cache" (
     echo    [DIR]  backend_amd_gpu\pip_cache\  ^(pip cache^)
     set "HAS_ITEMS=1"
@@ -137,6 +141,7 @@ if exist "%ROOT%\.tmp" (
     set "HAS_ITEMS=1"
 )
 
+
 set "PYCACHE_COUNT=0"
 for /d /r "%AMD_DIR%" %%d in (__pycache__) do (
     if exist "%%d" set /a PYCACHE_COUNT+=1
@@ -202,6 +207,11 @@ if exist "%VENV_DIR%" (
 if exist "%UV_CACHE%" (
     echo Removing .uv_cache_amd...
     rmdir /s /q "%UV_CACHE%" 2>nul && echo  Done.
+)
+
+if exist "%ROOT%.uv-amd" (
+    echo Removing .uv-amd...
+    rmdir /s /q "%ROOT%.uv-amd" 2>nul && echo  Done.
 )
 
 if exist "%AMD_DIR%\pip_cache" (
@@ -271,6 +281,7 @@ call :remove_own_web_link "%ROOT%frontend\dist" "%AMD_DIR%\web\dist"
 if exist "%ROOT%\.tmp" (
     rmdir /s /q "%ROOT%\.tmp" >nul 2>&1
 )
+
 
 if exist "%ROOT%tools" (
     dir /b "%ROOT%tools" 2>nul | findstr "." >nul 2>&1

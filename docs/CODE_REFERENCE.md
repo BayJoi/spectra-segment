@@ -1097,8 +1097,10 @@ when a target was found, 1 otherwise.
 ### `install.bat`
 
 `PY_VERSION=3.13.14`. It redirects `UV_CACHE_DIR`, `UV_PYTHON_CACHE_DIR`,
-`UV_PYTHON_INSTALL_DIR`, `TEMP`/`TMP` and `UV_NO_CONFIG=1` into the repo, then resolves
-the latest stable uv through the GitHub API, downloads
+`UV_PYTHON_INSTALL_DIR`, `TEMP`/`TMP` and `UV_NO_CONFIG=1` into the repo; when the repo
+path exceeds 50 characters, the uv cache moves to `.uv-cpu` at the project root so
+sdist builds stay under the Windows path limit. It then resolves the latest stable uv
+through the GitHub API, downloads
 `uv-x86_64-pc-windows-msvc.zip` plus its `.sha256`, recomputes the hash and fails on a
 mismatch. It installs Python, creates the venv with `--seed`, installs torch and
 torchvision from `https://download.pytorch.org/whl/cu130` (falling back to the default
@@ -1108,9 +1110,13 @@ checksum), then fetches Bun and runs `bun install`.
 
 ### `install_amd.bat`
 
-Same uv handling, Python `3.12.13`, and torch from
-`https://rocm.nightlies.amd.com/whl-multi-arch/` as `torch[device-<gfx>]`, where the gfx
-target comes from `detect_amd_gpu.py` (`.gpu_arch.txt`). The extra pulls
+Same uv handling plus the `.uv-amd` root-level cache fallback, Python `3.12.13`, and
+torch from `https://rocm.nightlies.amd.com/whl-multi-arch/` as
+`torch[device-<gfx>]`, where the gfx target comes from `detect_amd_gpu.py`
+(`.gpu_arch.txt`). TheRock ships the `rocm` meta package as an sdist, so uv builds it
+under the cache directory; the short fallback keeps that build below MAX_PATH. If uv
+still fails, the torch and CLIP installs are retried with pip using the project
+`.tmp` and `backend_amd_gpu/pip_cache`, so no cache leaves the app folder. The extra pulls
 `rocm-sdk-core` and `rocm-sdk-libraries`; `rocm-sdk-devel` is deliberately skipped - it
 is only needed to compile HIP code. Then `requirements.txt`, the same CLIP fork, Bun,
 `bun install` and `bun run build`.
@@ -1219,7 +1225,8 @@ the junction target against `backend_amd_gpu/web/node_modules`. Because `start.b
 ### `cleanup.bat`, `cleanup_amd.bat`
 
 Remove the toolchain (`tools/uv*`, `tools/python`, `tools/bun*`, `tools/clip_src`), the
-venv and uv cache, `.embedded_python`, `.local_token`, `.backend_pid`,
+venv, uv cache (including the root-level `.uv-cpu` / `.uv-amd` long-path fallback),
+`backend_amd_gpu/pip_cache`, `.embedded_python`, `.local_token`, `.backend_pid`,
 `backend_launch.log`, `spectra_launcher.cfg[.env]`, the web workspace, `frontend/bun.lock`,
 `.tmp`, the logs and bytecode caches. Model weights are deleted only after a separate
 confirmation. The last step verifies that `.gitignore`, `README.md`,

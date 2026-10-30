@@ -19,8 +19,12 @@ backend_amd_gpu/model_weights/
 # Package caches
 backend/.uv/
 backend_amd_gpu/.uv_cache_amd/
+.uv-cpu/
+.uv-amd/
 backend/.pip/
 backend_amd_gpu/.pip/
+backend/pip_cache/
+backend_amd_gpu/pip_cache/
 
 # Logs
 backend/logs/

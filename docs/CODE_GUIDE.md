@@ -65,13 +65,19 @@ tools\                          portable uv / Python / Bun, installed by the ins
 `install.bat` and `install_amd.bat` both:
 
 1. Point `UV_CACHE_DIR`, `UV_PYTHON_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` inside
-   the repo, set `UV_NO_CONFIG=1`, and redirect `TEMP`/`TMP` into the repo.
+   the repo, set `UV_NO_CONFIG=1`, and redirect `TEMP`/`TMP` into the repo. On a
+   project root longer than 50 characters the uv cache moves from the backend folder
+   to a short root-level folder (`.uv-amd` / `.uv-cpu`), keeping uv's sdist build
+   directories under Windows' 260-character path limit without leaving the app
+   folder. If the ROCm source package still fails to build, the installer retries
+   with pip using the project's `.tmp` and a project-local pip cache.
 2. Resolve **uv** through the GitHub API (latest stable release), download the zip
    plus its `.sha256`, recompute the hash, and fail on mismatch.
    `install.bat` pins Python `3.13.14`. `install_amd.bat` runs
    `uv python install 3.12.13`.
-3. Create the virtualenv with `uv venv --python <ver> --seed`, install torch, then
-   install `requirements.txt`.
+3. Create the virtualenv with `uv venv --python <ver> --seed` (skipped when the venv
+   already has a `python.exe`, and `--clear` replaces a partial one), install torch,
+   then install `requirements.txt`.
 
 AMD only: torch comes from TheRock's **nightly** multi-arch index,
 `https://rocm.nightlies.amd.com/whl-multi-arch/`, with the `torch[device-gfxNNNN]`
