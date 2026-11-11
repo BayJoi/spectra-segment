@@ -1,22 +1,25 @@
 import { useState } from "react";
 import { useAtom } from "jotai";
-import { modeSwitchTargetAtom } from "@/store/ui";
+import { modeLockAtom, modeSwitchTargetAtom } from "@/store/ui";
 import { sam3ModeAtom } from "@/store/sam3";
 import { sessionIdAtom } from "@/store/session";
 import { useSession } from "@/hooks/useSession";
+import { useSessionBusy } from "@/hooks/useSessionBusy";
 import { DialogFooter } from "@/components/ui/DialogFooter";
 
 export function ModeSwitchDialog() {
   const [target, setTarget] = useAtom(modeSwitchTargetAtom);
   const [sam3Mode, setSam3Mode] = useAtom(sam3ModeAtom);
+  const [modeLock, setModeLock] = useAtom(modeLockAtom);
   const [sessionId] = useAtom(sessionIdAtom);
   const { endSession } = useSession();
+  const { running, tasks } = useSessionBusy();
   const [busy, setBusy] = useState(false);
 
   if (!target) return null;
 
-  const current = sam3Mode ? "SAM 3" : "Brush / Detect";
-  const next = target === "sam3" ? "SAM 3" : "Brush / Detect";
+  const current = sam3Mode ? "SAM 3" : modeLock === "matte" ? "Matte" : "Brush / Detect";
+  const next = target === "sam3" ? "SAM 3" : target === "matte" ? "Matte" : "Brush / Detect";
 
   const handleCancel = () => {
     if (!busy) setTarget(null);
@@ -29,6 +32,7 @@ export function ModeSwitchDialog() {
         await endSession();
       }
       setSam3Mode(target === "sam3");
+      setModeLock(target === "matte" ? "matte" : null);
     } finally {
       setBusy(false);
       setTarget(null);
@@ -76,6 +80,18 @@ export function ModeSwitchDialog() {
                   ? "Switching modes will end the current session and unload the loaded model to free memory. Any unsaved work in this session will be lost."
                   : "Nothing is loaded yet, so switching is instant and safe."}
               </p>
+              {running && (
+                <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="shrink-0 mt-0.5 text-amber-400">
+                    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+                    <path d="M12 9v4" />
+                    <path d="M12 17h.01" />
+                  </svg>
+                  <p className="text-[11px] text-amber-200/90 font-sans leading-relaxed">
+                    Session is still running: {tasks.join(", ")}. Wait for it to finish before switching modes.
+                  </p>
+                </div>
+              )}
             </div>
 
             <DialogFooter

@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from .base import SegmentationBackend
-from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
+from ..utils.device import MODEL_WEIGHTS_DIR, cpu_fallback_enabled, release_gpu_memory
 from ..utils.model_integrity import ensure_model_file
 from ..utils.stderr_progress import StderrInterceptor as _StderrInterceptor
 from ..utils.torch_threads import cpu_threads, resolve_threads, cudnn_disabled
@@ -49,9 +49,6 @@ MODEL_METADATA: dict[str, dict[str, str]] = {
     "sam2_l.pt":          {"tier": "large", "perf": "Best accuracy - SAM2 large"},
 }
 
-DENYLIST = {"FastSAM-s.pt", "FastSAM-x.pt", "sam3_b.pt", "sam3_l.pt"}
-
-
 class UltralyticsBackend(SegmentationBackend):
     def __init__(self, device: str = "cpu") -> None:
         self._device = device
@@ -64,8 +61,6 @@ class UltralyticsBackend(SegmentationBackend):
         self._encoder_on_cpu: bool = False
 
     def load_model(self, model_path: str) -> None:
-        if model_path in DENYLIST:
-            raise ValueError(f"Model '{model_path}' is explicitly blocked.")
         if model_path not in ULTRALYTICS_MODELS:
             raise ValueError(f"Unknown Ultralytics model '{model_path}'.")
 
@@ -93,7 +88,7 @@ class UltralyticsBackend(SegmentationBackend):
                     self._predictor = SAM2Predictor(overrides={"model": abs_model, "imgsz": 1024, "device": self._device, "quantize": int(os.environ.get("SAM2_QUANTIZE", "32" if self._device == "cpu" else "16"))})
                     self._predictor.setup_model()
                 except Exception as e:
-                    if self._device != "cpu":
+                    if self._device != "cpu" and cpu_fallback_enabled():
                         LOGGER.warning("Device %s failed (%s), falling back to CPU", self._device, e)
                         self._device = "cpu"
                         self._predictor = SAM2Predictor(overrides={"model": abs_model, "imgsz": 1024, "device": "cpu", "quantize": int(os.environ.get("SAM2_QUANTIZE", "32"))})
@@ -142,11 +137,11 @@ class UltralyticsBackend(SegmentationBackend):
         try:
             self._encode_image(image)
         except torch.OutOfMemoryError:
-            if self._device == "cpu":
+            if self._device == "cpu" or not cpu_fallback_enabled():
                 raise
             self._fallback_cpu_encoder_reencode(image)
         except RuntimeError as e:
-            if self._device != "cpu" and "out of memory" in str(e).lower():
+            if self._device != "cpu" and cpu_fallback_enabled() and "out of memory" in str(e).lower():
                 self._fallback_cpu_encoder_reencode(image)
             else:
                 raise
@@ -309,17 +304,6 @@ class UltralyticsBackend(SegmentationBackend):
             LOGGER.debug("SAM2 image encoder offloaded to CPU")
         except Exception as e:
             LOGGER.warning("Could not offload SAM2 image encoder: %s", e)
-
-    def _features(self) -> Any:
-        with self._infer_lock:
-            if self._predictor is None:
-                raise RuntimeError("Model not loaded.")
-            if not self._image_set:
-                raise RuntimeError("No image set.")
-            features = self._predictor.features
-        if features is None:
-            raise RuntimeError("No cached features. Call set_image() first.")
-        return features
 
     def predict(self, points=None, labels=None, bboxes=None, mask_input=None, multimask_output=False):
         if not self._image_set:

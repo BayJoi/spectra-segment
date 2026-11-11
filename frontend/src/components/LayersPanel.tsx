@@ -57,7 +57,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
       <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-2">
       <div className="flex items-center justify-between px-1 mb-1.5">
         <span className="text-[11px] text-neutral-500 uppercase tracking-wider font-sans">Detections</span>
-        <span className="text-[10px] text-neutral-600 font-mono">
+        <span className="text-[10px] text-neutral-600 font-sans tabular-nums">
           {detections.length} found - {Object.keys(perDetectionMasks).length} masked
         </span>
       </div>
@@ -66,7 +66,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
         <div key={groupLabel}>
           <div className="flex items-center gap-1.5 px-1 mt-2 mb-1">
             <span className="text-[10px] text-neutral-500 uppercase tracking-wider font-sans font-semibold">{groupLabel}</span>
-            <span className="text-[9px] text-neutral-600 font-mono">{groupLayers.length}</span>
+            <span className="text-[9px] text-neutral-600 font-sans tabular-nums">{groupLayers.length}</span>
             <div className="flex-1 h-px bg-neutral-800/60" />
           </div>
           {groupLayers.map((layer) => {
@@ -80,7 +80,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
                 className={cn(
                   "reveal flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-all duration-150 select-none group",
                   isSelected
-                    ? "bg-green-500/10 border border-green-500/20 shadow-[0_0_8px_rgba(0,255,136,0.08)]"
+                    ? "bg-orange-500/10 border border-orange-500/25 shadow-[0_0_8px_rgba(184,92,42,0.10)]"
                     : "border border-transparent hover:bg-neutral-800/50 hover:border-neutral-700/30"
                 )}
                 onClick={(e) => {
@@ -113,7 +113,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
                 </span>
                 <span className={cn(
                   "w-1.5 h-1.5 rounded-full flex-shrink-0",
-                  hasMask ? "bg-green-400" : "bg-neutral-600"
+                  hasMask ? "bg-orange-400" : "bg-neutral-600"
                 )} />
                 <button
                   onClick={(e) => {
@@ -135,7 +135,7 @@ export function LayersPanel({ open, onClose, ignoredRef, onRemoveSam3Instance }:
         <div>
           <div className="flex items-center gap-1.5 px-1 mt-2 mb-1">
             <span className="text-[10px] text-orange-400/90 uppercase tracking-wider font-sans font-semibold">SAM3 Segments</span>
-            <span className="text-[9px] text-neutral-600 font-mono">{sam3Layers.length}</span>
+            <span className="text-[9px] text-neutral-600 font-sans tabular-nums">{sam3Layers.length}</span>
             <div className="flex-1 h-px bg-neutral-800/60" />
           </div>
           {sam3Layers.map((layer) => {

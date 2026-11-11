@@ -8,11 +8,11 @@ set "ROOT=%~dp0"
 echo(
 echo  +------------------------------------------------------------+
 echo  ^|                      SPECTRA SEGMENT                       ^|
-echo  ^|                         Cleanup  (CPU)                     ^|
+echo  ^|                    Cleanup  (CPU / NVIDIA)                 ^|
 echo  ^|  Portable, self-contained. Everything stays in this folder ^|
 echo  +------------------------------------------------------------+
 echo( 
-echo    Protected: docs\ folder and checks\ folder are never removed.
+echo    Protected: docs\, checks\, and source files are never removed.
 
 call :section "[ 1 / 3 ]  Reviewing items to remove"
 echo   The following will be permanently removed:
@@ -29,8 +29,9 @@ if exist "%ROOT%tools\uv" (
     echo    [DIR]  tools\uv\  ^(legacy shared uv from older installs^)
     set "HAS_ITEMS=1"
 )
-if exist "%ROOT%tools\python\cpython-*" (
-    echo    [DIR]  tools\python\cpython-*\  ^(portable Python - CPU^)
+dir /b /ad "%ROOT%tools\python\cpython-3.13*" >nul 2>&1
+if not errorlevel 1 (
+    echo    [DIR]  tools\python\cpython-3.13*\  ^(portable Python - CPU^)
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%tools\bun-cpu" (
@@ -90,7 +91,7 @@ if exist "%ROOT%backend\web" (
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%frontend\bun.lock" (
-    echo    [FILE] frontend\bun.lock  ^(bun dependency lockfile^)
+    echo    [FILE] frontend\bun.lock  ^(frontend lockfile^)
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%\.tmp" (
@@ -157,11 +158,19 @@ echo(
 echo   [WARN]  This cleanup cannot be undone.
 echo(
 
+set /p "CONFIRM=Proceed with cleanup? (Y/N): "
+if /i not "%CONFIRM%"=="Y" (
+    echo   [INFO]  Cleanup cancelled.
+    exit /b 0
+)
+
+echo(
+
 call :section "[ 2 / 3 ]  Stopping running processes"
 for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); if ($c.CommandLine -like '*main:app*') { exit 0 } } catch {}; exit 1" >nul 2>&1
+    powershell -NoProfile -Command "try { $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + %%p); $r='%ROOT%'; if ($c.CommandLine -like '*backend.main:app*' -and $c.CommandLine -like ($r + '*')) { exit 0 } } catch {}; exit 1" >nul 2>&1
     if not errorlevel 1 (
-        taskkill /F /PID %%p >nul 2>&1
+        taskkill /F /T /PID %%p >nul 2>&1
     )
 )
 call :is_own_web "%ROOT%frontend\node_modules" "%ROOT%backend\web\node_modules"
@@ -175,14 +184,6 @@ if not errorlevel 1 (
 )
 timeout /t 2 /nobreak >nul
 echo   [ OK ]  Processes stopped.
-
-echo(
-
-set /p "CONFIRM=Proceed with cleanup? (Y/N): "
-if /i not "%CONFIRM%"=="Y" (
-    echo   [INFO]  Cleanup cancelled.
-    exit /b 0
-)
 
 echo(
 
@@ -208,8 +209,8 @@ if exist "%ROOT%tools\uv" (
     )
 )
 
-echo Removing tools\python\cpython-*\ (portable Python - CPU)...
-for /d %%d in ("%ROOT%tools\python\cpython-*") do (
+echo Removing tools\python\cpython-3.13*\ (portable Python - CPU)...
+for /d %%d in ("%ROOT%tools\python\cpython-3.13*") do (
     rmdir /s /q "%%~d"
     if exist "%%~d" (
         echo   [WARN]  Failed to remove %%~nxd\ ^(files may be in use^)
@@ -320,6 +321,9 @@ if exist "%ROOT%backend\spectra_launcher.cfg.env" (
     echo   Done.
 )
 
+call :remove_own_web_link "%ROOT%frontend\node_modules" "%ROOT%backend\web\node_modules"
+call :remove_own_web_link "%ROOT%frontend\dist" "%ROOT%backend\web\dist"
+
 if exist "%ROOT%backend\web" (
     echo Removing backend\web\ ^(frontend workspace^)...
     rmdir /s /q "%ROOT%backend\web"
@@ -329,13 +333,16 @@ if exist "%ROOT%backend\web" (
         echo   Done.
     )
 )
+
 if exist "%ROOT%frontend\bun.lock" (
     echo Removing frontend\bun.lock...
     del /q "%ROOT%frontend\bun.lock"
-    echo   Done.
+    if exist "%ROOT%frontend\bun.lock" (
+        echo   [WARN]  Failed to remove frontend\bun.lock ^(file may be in use^)
+    ) else (
+        echo   Done.
+    )
 )
-call :remove_own_web_link "%ROOT%frontend\node_modules" "%ROOT%backend\web\node_modules"
-call :remove_own_web_link "%ROOT%frontend\dist" "%ROOT%backend\web\dist"
 
 if exist "%ROOT%\.tmp" (
     echo Removing .tmp\...
@@ -352,14 +359,10 @@ if exist "%ROOT%backend\logs" (
 
 echo Removing __pycache__\ directories in backend\...
 for /d /r "%ROOT%backend" %%d in (__pycache__) do (
-    if exist "%%d" (
-        rmdir /s /q "%%d" >nul 2>&1
-    )
-
+    if exist "%%d" rmdir /s /q "%%d" >nul 2>&1
+)
 if exist "%ROOT%backend\model_weights\pycache" (
     rmdir /s /q "%ROOT%backend\model_weights\pycache" >nul 2>&1
-)
-
 )
 echo   Done.
 
@@ -414,11 +417,13 @@ if exist "%ROOT%docs\*.md" (
     echo   [FAIL]  docs\ is MISSING or empty!
     set "PROTECTED_FAIL=1"
 )
-if exist "%ROOT%checks\check_gpu_health.py" (
-    echo   [ OK ]  checks\check_gpu_health.py
-) else (
-    echo   [FAIL]  checks\check_gpu_health.py is MISSING!
-    set "PROTECTED_FAIL=1"
+for %%f in (backend\main.py backend\models\manager.py backend_amd_gpu\main.py checks\check_gpu_health.py checks\check_gpu.bat checks\check_gpu_amd.bat checks\check_gpu_nvidia.bat frontend\src\App.tsx) do (
+    if exist "%ROOT%%%f" (
+        echo   [ OK ]  %%f
+    ) else (
+        echo   [FAIL]  %%f is MISSING!
+        set "PROTECTED_FAIL=1"
+    )
 )
 if exist "%ROOT%.git" (
     echo   [ OK ]  .git\
@@ -444,17 +449,14 @@ exit /b 0
 
 :remove_own_web_link
 set "CUR="
-if exist "%~1" (
-    fsutil reparsepoint query "%~1" >nul 2>&1
-    if not errorlevel 1 (
-        for /f "delims=" %%t in ('powershell -NoProfile -Command "(Get-Item -LiteralPath '%~1').Target" 2^>nul') do set "CUR=%%t"
-        if /i "!CUR!"=="%~2" (
-            echo Removing %~1 ^(junction^)...
-            rd "%~1" >nul 2>&1
-            if not exist "%~1" echo   Done.
-        )
-    )
-)
+fsutil reparsepoint query "%~1" >nul 2>&1
+if errorlevel 1 exit /b 0
+for /f "delims=" %%t in ('powershell -NoProfile -Command "(Get-Item -LiteralPath '%~1').Target" 2^>nul') do set "CUR=%%t"
+if /i not "!CUR!"=="%~2" exit /b 0
+echo Removing %~1 ^(junction^)...
+rd "%~1" >nul 2>&1
+fsutil reparsepoint query "%~1" >nul 2>&1
+if errorlevel 1 (echo   Done.) else (echo   [WARN]  Could not remove junction ^(in use^))
 exit /b 0
 
 :is_own_web

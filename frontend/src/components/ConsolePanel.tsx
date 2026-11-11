@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAtom } from "jotai";
-import { api, BASE } from "@/lib/api";
+import { api, BASE, getFreshToken } from "@/lib/api";
 import { connectSse } from "@/lib/sse";
 import { cn } from "@/lib/utils";
 import {
@@ -9,11 +9,15 @@ import {
   consoleSourceAtom,
   consoleCategoryAtom,
   consoleShowTimeAtom,
+  consoleSimpleAtom,
   type ConsoleFilterKey,
   type ConsoleSourceKey,
 } from "@/store/ui";
 import { modelsAtom } from "@/store/session";
+import { matteModelsAtom } from "@/store/matte";
 import {
+  requestSummary,
+  safeText,
   subscribeLogs,
   uiCategoryLabels,
   type UiCategory,
@@ -38,6 +42,14 @@ interface LogEntry {
   done_bytes?: number;
   total_bytes?: number;
   eta?: string;
+  at: number;
+  repeat?: number;
+  groupKey?: string;
+  groupLabel?: string;
+  simple?: string | null;
+  rid?: string;
+  sid?: string;
+  key: string;
 }
 
 const LEVEL_RANK: Record<string, number> = {
@@ -73,24 +85,54 @@ const MAX_LOG_ENTRIES = 500;
 const MIN_UI_ENTRIES = 150;
 const MAX_MESSAGE = 400;
 const RENDER_LIMIT = 120;
+const GROUP_WINDOW_MS = 30_000;
 
 let localSeq = 0;
 
 const nextId = () => `e${++localSeq}`;
 
 const normalise = (raw: Partial<LogEntry>): LogEntry => {
-  const message = String(raw.message ?? "").slice(0, MAX_MESSAGE);
+  const source = raw.source ?? "backend";
+  const message = safeText(String(raw.message ?? ""), MAX_MESSAGE);
   const seq = ++localSeq;
+  const id = nextId();
   const entry: LogEntry = {
     seq,
-    id: nextId(),
-    source: raw.source ?? "backend",
+    id,
+    source,
     level: raw.level ?? "INFO",
     message,
-    hay: `${message} ${raw.level ?? ""} ${raw.category ?? ""} ${raw.source ?? "backend"} ${raw.name ?? ""}`.toLowerCase(),
+    at: Date.now(),
+    key:
+      source === "ui"
+        ? `ui|${id}`
+        : `srv|${raw.rid ?? "-"}|${raw.sid ?? "-"}|${raw.ts ?? ""}|${raw.level ?? "INFO"}|${message}`,
+    hay: `${message} ${raw.level ?? ""} ${raw.category ?? ""} ${source} ${raw.name ?? ""}`.toLowerCase(),
   };
+  const request = source === "backend" ? requestSummary(message) : null;
+  const brushUpdate =
+    source === "ui" &&
+    raw.category === "brush" &&
+    /^Stroke submitted\b/.test(message);
+  if (request) {
+    entry.groupKey = request.key;
+    entry.groupLabel = request.label;
+  } else if (brushUpdate) {
+    entry.groupKey = "ui:brush-stroke";
+    entry.groupLabel = "Brush strokes applied";
+  }
+
+  entry.simple =
+    source === "ui"
+      ? entry.level === "DEBUG"
+        ? entry.groupLabel ?? null
+        : message
+      : entry.groupLabel ?? friendlyBackend(message, entry.level);
+  if (raw.repeat !== undefined) entry.repeat = raw.repeat;
   if (raw.ts !== undefined) entry.ts = raw.ts;
   if (raw.category) entry.category = raw.category;
+  if (raw.rid !== undefined) entry.rid = raw.rid;
+  if (raw.sid !== undefined) entry.sid = raw.sid;
   for (const k of [
     "name", "pct", "file", "files_done", "files_total",
     "phase", "done_bytes", "total_bytes", "eta",
@@ -109,13 +151,54 @@ const toLogEntry = (u: UiLogEntry): LogEntry =>
     ts: u.ts,
   });
 
+function friendlyBackend(message: string, level: string): string | null {
+  if (level === "DOWNLOAD") return null;
+  if (level === "ERROR" || level === "CRITICAL") {
+    return "Something went wrong on the server - switch to Developer for details";
+  }
+  if (level === "WARNING") {
+    if (/CPU|fallback/i.test(message)) return "The GPU was unavailable, so the server is using the CPU";
+    if (/Rejected image|hard pixel|decode/i.test(message)) return "The image could not be accepted - try a smaller JPEG or PNG";
+    return "The server reported a warning - switch to Developer for details";
+  }
+  const text = message.trim();
+  if (!text) return null;
+  if (/^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s/i.test(text)) return null;
+  if (/^(GPU mem|VRAM|RAM:|Request |Using |Loading .*tokenizer|Tokenizer)/i.test(text)) return null;
+  const patterns: [RegExp, string][] = [
+    [/^Server ready\.?$/i, "Ready"],
+    [/^Running on CPU$/i, "Starting without GPU acceleration"],
+    [/^Downloading (.+)$/i, "Downloading $1 for the first time"],
+    [/^(.+?) not cached - downloading$/i, "Downloading $1 for the first time"],
+    [/^(.+?) ready \(cached\)$/i, "$1 is ready"],
+    [/^(.+?) ready in (.+)$/i, "$1 is ready"],
+    [/^Loading matte model (.+)$/i, "Preparing $1"],
+    [/^Matte model (.+?) is ready on (.+)$/i, "$1 is ready"],
+    [/^Matte model (.+?) ready in (.+)$/i, "$1 is ready in $2"],
+    [/^Matte model (.+?) loaded on (.+)$/i, "Matte model $1 is ready"],
+    [/^Encoded \d+x\d+ image in .+$/i, "Image prepared for editing"],
+    [/^Matte ready via .+ in (.+?) \(.*$/i, "Cutout ready in $1"],
+    [/^Matte .+ ready/i, "Cutout ready"],
+    [/^Session .+ created/i, "Session started"],
+    [/^Upload accepted.*/i, "Image uploaded"],
+    [/^Detection finished.*/i, "Objects found"],
+    [/^\[?(NVIDIA|AMD|GPU).*/i, "GPU acceleration ready"],
+  ];
+  for (const [pattern, replacement] of patterns) {
+    if (pattern.test(text)) return text.replace(pattern, replacement);
+  }
+  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
 export function ConsolePanel({ encoding }: { encoding?: boolean }) {
   const [open, setOpen] = useAtom(consoleOpenAtom);
   const [filter, setFilter] = useAtom(consoleFilterAtom);
   const [sourceFilter, setSourceFilter] = useAtom(consoleSourceAtom);
   const [categoryFilter, setCategoryFilter] = useAtom(consoleCategoryAtom);
   const [showTime, setShowTime] = useAtom(consoleShowTimeAtom);
-  const [models] = useAtom(modelsAtom);
+  const [simple, setSimple] = useAtom(consoleSimpleAtom);
+  const [models, setModels] = useAtom(modelsAtom);
+  const [matteModels, setMatteModels] = useAtom(matteModelsAtom);
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [search, setSearch] = useState("");
@@ -152,12 +235,78 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
     return [...rest, ...uiTail].sort((a, b) => a.seq - b.seq).slice(-MAX_LOG_ENTRIES);
   }, []);
 
+  const mergeEntries = useCallback((arr: LogEntry[]): LogEntry[] => {
+    const seen = new Set<string>();
+    const groups = new Map<string, number>();
+    const unique: LogEntry[] = [];
+    for (const item of arr) {
+      if (seen.has(item.key)) continue;
+      seen.add(item.key);
+      if (item.groupKey) {
+        const index = groups.get(item.groupKey);
+        if (index !== undefined) {
+          const prior = unique[index];
+          unique[index] = {
+            ...prior,
+            at: Math.max(prior.at, item.at),
+            ts: item.ts ?? prior.ts,
+            message: item.message,
+            simple: item.simple ?? prior.simple,
+            key: item.key,
+            repeat: (prior.repeat ?? 1) + 1,
+          };
+          continue;
+        }
+        groups.set(item.groupKey, unique.length);
+      }
+      unique.push(item);
+    }
+    return trim(unique);
+  }, [trim]);
+
   const appendEntry = useCallback((entry: LogEntry) => {
     if (!readyRef.current) {
       pendingRef.current.push(entry);
       return;
     }
-    setLogs((prev) => trim([...prev, entry]));
+    setLogs((prev) => {
+      if (prev.some((item) => item.key === entry.key)) return prev;
+      if (entry.groupKey) {
+        const index = prev.findIndex(
+          (item) =>
+            item.groupKey === entry.groupKey &&
+            entry.at - item.at < GROUP_WINDOW_MS
+        );
+        if (index >= 0) {
+          const prior = prev[index];
+          const merged: LogEntry = {
+            ...prior,
+            seq: entry.seq,
+            key: entry.key,
+            at: entry.at,
+            ts: entry.ts ?? prior.ts,
+            message: entry.message,
+            simple: entry.simple ?? prior.simple,
+            repeat: (prior.repeat ?? 1) + 1,
+          };
+          const next = prev.filter((_, i) => i !== index);
+          next.push(merged);
+          return trim(next);
+        }
+      }
+      const last = prev[prev.length - 1];
+      if (
+        last &&
+        last.source === entry.source &&
+        last.level === entry.level &&
+        last.message === entry.message &&
+        entry.at - last.at < 5000
+      ) {
+        const merged = { ...last, at: entry.at, repeat: (last.repeat ?? 1) + 1 };
+        return [...prev.slice(0, -1), merged];
+      }
+      return trim([...prev, { ...entry, repeat: 1 }]);
+    });
     if (entry.level === "ERROR") setBadge("error");
     else if (entry.level === "WARNING" && badgeRef.current !== "error") setBadge("warn");
     else if (entry.level === "CRITICAL") setBadge("error");
@@ -166,37 +315,51 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
     }
   }, [trim]);
 
+  const refreshHistory = useCallback(() => {
+    api.getLogs(MAX_LOG_ENTRIES).then((res) => {
+      const entries = (res.entries as LogEntry[]).map(normalise);
+      setLogs((prev) => mergeEntries([...entries, ...prev, ...pendingRef.current]));
+      pendingRef.current = [];
+      readyRef.current = true;
+    }).catch(() => {});
+  }, [mergeEntries]);
+
   useEffect(() => {
     let cancelled = false;
 
     api.getLogs(MAX_LOG_ENTRIES).then((res) => {
       if (cancelled) return;
       const entries = (res.entries as LogEntry[]).map(normalise);
-      setLogs(() => trim([...entries, ...pendingRef.current]));
+      setLogs((prev) => mergeEntries([...entries, ...prev, ...pendingRef.current]));
       pendingRef.current = [];
       readyRef.current = true;
     }).catch(() => {
       if (cancelled) return;
       readyRef.current = true;
-      setLogs((prev) => trim([...prev, ...pendingRef.current]));
+      setLogs((prev) => mergeEntries([...prev, ...pendingRef.current]));
       pendingRef.current = [];
     });
 
     const unsubUi = subscribeLogs((e) => appendEntry(toLogEntry(e)));
 
-    const handle = connectSse(`${BASE}/api/logs/stream`, (data) => {
-      try {
-        appendEntry(normalise(JSON.parse(data)));
-      } catch {
-      }
-    }, setConnected);
+    const handle = connectSse(
+      async () => `${BASE}/api/logs/stream?token=${encodeURIComponent(await getFreshToken())}`,
+      (data) => {
+        try {
+          appendEntry(normalise(JSON.parse(data)));
+        } catch {
+        }
+      },
+      setConnected,
+      refreshHistory
+    );
 
     return () => {
       cancelled = true;
       unsubUi();
       handle.close();
     };
-  }, [appendEntry, trim]);
+  }, [appendEntry, mergeEntries, refreshHistory]);
 
   useEffect(() => {
     if (!open) return;
@@ -227,7 +390,6 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       const t = e.target as Node;
-      if (dropdownRef.current && !dropdownRef.current.contains(t)) setFilterOpen(false);
       if (dropdownRef.current && !dropdownRef.current.contains(t)) setFilterOpen(false);
     };
     document.addEventListener("mousedown", handler);
@@ -289,6 +451,11 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
     const q = search.trim().toLowerCase();
     return logs.filter((e) => {
       if (e.level === "DOWNLOAD") return false;
+      if (simple) {
+        if (!e.simple) return false;
+        if (q && !(e.simple.toLowerCase().includes(q) || (e.hay ?? "").includes(q))) return false;
+        return true;
+      }
       if (sourceFilter !== "all" && e.source !== sourceFilter) return false;
       if (categoryFilter !== "all") {
         const cat = e.source === "ui" ? e.category ?? "app" : "backend";
@@ -298,7 +465,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
       if (q && !(e.hay ?? e.message.toLowerCase()).includes(q)) return false;
       return true;
     });
-  }, [logs, filter, search, sourceFilter, categoryFilter]);
+  }, [logs, filter, search, sourceFilter, categoryFilter, simple]);
 
   const visibleLogs = useMemo(
     () => (filteredLogs.length > renderLimit ? filteredLogs.slice(-renderLimit) : filteredLogs),
@@ -350,7 +517,9 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
   const handleCopy = useCallback(async () => {
     const lines = filteredLogs.map((l) => {
       const src = l.source === "ui" ? `[${l.category ?? "app"}]` : "[server]";
-      return `[${l.ts ?? "--:--:--"}] [${l.level}] ${src} ${l.message}`;
+      const text = simple ? l.simple ?? l.message : l.message;
+      const repeat = l.repeat && l.repeat > 1 ? ` (x${l.repeat})` : "";
+      return simple ? `[${l.ts ?? "--:--:--"}] ${text}${repeat}` : `[${l.ts ?? "--:--:--"}] [${l.level}] ${src} ${text}${repeat}`;
     });
     if (progressRows.length > 0) {
       lines.push("", "[downloads]");
@@ -390,9 +559,17 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
     setCopied(ok);
     if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
     copiedTimerRef.current = setTimeout(() => setCopied(false), 1500);
-  }, [filteredLogs, progressRows]);
+  }, [filteredLogs, progressRows, simple]);
 
-  const downloadedModels = models.filter((m) => m.downloaded).length;
+  useEffect(() => {
+    if (!open) return;
+    api.getModels().then((res) => setModels(res.models)).catch(() => {});
+    api.listMatteModels().then((res) => setMatteModels(res.models)).catch(() => {});
+  }, [open, setModels, setMatteModels]);
+
+  const totalModels = models.length + matteModels.length;
+  const downloadedModels =
+    models.filter((m) => m.downloaded).length + matteModels.filter((m) => m.downloaded).length;
 
   return (
     <div ref={panelRef} className="relative z-[85]">
@@ -443,22 +620,38 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
           id="console-panel"
           role="region"
           aria-label="Console output"
-          className="absolute top-full right-0 mt-3 w-[380px] bg-[#0a0a0a]/95 border border-neutral-800/80 rounded-xl shadow-2xl shadow-black/60 backdrop-blur-xl overflow-hidden animate-drop-in z-50 grain-bg"
+          className="absolute top-full right-0 mt-3 w-[380px] bg-[#0a0a0a]/95 border border-neutral-800/80 rounded-2xl shadow-2xl shadow-black/60 backdrop-blur-xl overflow-hidden animate-drop-in z-50 grain-bg"
         >
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-neutral-800/60">
             <span className="text-[10px] text-neutral-500 uppercase tracking-wider font-sans">
-              Console
+              {simple ? "Activity" : "Console"}
               <span className={cn("inline-block w-1.5 h-1.5 rounded-full ml-1.5 align-middle", connected ? "bg-green-400/70" : "bg-neutral-600")} />
             </span>
             <div className="flex items-center gap-1">
+              <button
+                onClick={() => setSimple(!simple)}
+                title={simple ? "Show developer details" : "Show a simple activity feed"}
+                aria-pressed={simple}
+                className={cn(
+                  "h-5 px-1.5 rounded text-[9px] font-medium font-sans border transition-colors cursor-pointer",
+                  simple
+                    ? "border-orange-500/30 bg-orange-500/10 text-orange-300"
+                    : "border-neutral-700 bg-neutral-800/60 text-neutral-300"
+                )}
+              >
+                {simple ? "Simple" : "Developer"}
+              </button>
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search..."
+                placeholder={simple ? "Search activity" : "Search logs"}
                 aria-label="Search logs"
-                className="w-[92px] h-5 px-1.5 bg-neutral-900/70 border border-neutral-800/60 rounded text-[10px] font-mono text-neutral-300 placeholder:text-neutral-600 outline-none focus:border-neutral-600 transition-colors"
+                className={cn(
+                  "w-[92px] h-5 px-1.5 bg-neutral-900/70 border border-neutral-800/60 rounded text-[10px] text-neutral-300 placeholder:text-neutral-600 outline-none focus:border-orange-500/40 transition-colors",
+                  simple ? "font-sans" : "font-mono"
+                )}
               />
-              <div ref={dropdownRef} className="relative">
+              <div ref={dropdownRef} className={cn("relative", simple && "hidden")}>
                 <button
                   onClick={() => setFilterOpen(!filterOpen)}
                   aria-label="Filter logs"
@@ -547,7 +740,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                 aria-label="Toggle timestamps"
                 aria-pressed={showTime}
                 className={cn(
-                  "flex items-center text-[10px] font-mono px-1.5 py-0.5 rounded border transition-all duration-150 cursor-pointer hover:scale-105 active:scale-95",
+                  "flex items-center text-[10px] font-sans px-1.5 py-0.5 rounded border transition-all duration-150 cursor-pointer hover:scale-105 active:scale-95",
                   showTime
                     ? "text-orange-400 border-orange-500/30 bg-orange-500/10"
                     : "text-neutral-500 border-transparent hover:text-neutral-300"
@@ -561,7 +754,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                 onClick={clearLogs}
                 title="Clear the console"
                 aria-label="Clear console"
-                className="flex items-center text-[10px] font-mono px-1.5 py-0.5 rounded border border-transparent text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-all duration-150 cursor-pointer"
+                className="flex items-center text-[10px] font-sans px-1.5 py-0.5 rounded border border-transparent text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-all duration-150 cursor-pointer"
               >
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <path d="M18 6 6 18" /><path d="m6 6 12 12" />
@@ -571,7 +764,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                 onClick={handleCopy}
                 aria-label="Copy logs"
                 className={cn(
-                  "text-[10px] font-mono px-1.5 py-0.5 rounded transition-all duration-150 cursor-pointer hover:scale-105 active:scale-95",
+                  "text-[10px] font-sans px-1.5 py-0.5 rounded transition-all duration-150 cursor-pointer hover:scale-105 active:scale-95",
                   copied
                     ? "text-green-400 bg-green-400/10"
                     : "text-neutral-500 hover:text-neutral-300 hover:bg-neutral-800/60"
@@ -583,7 +776,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 px-3 py-[3px] border-b border-neutral-800/60 text-[9px] font-mono text-neutral-600">
+          <div className={cn("flex items-center gap-2 px-3 py-[3px] border-b border-neutral-800/60 text-[9px] text-neutral-600", simple ? "font-sans" : "font-mono", simple && "hidden")}>
             <span className="tabular-nums">
               {visibleLogs.length}{filteredLogs.length > visibleLogs.length ? ` +${hiddenCount}` : ""} shown
             </span>
@@ -605,16 +798,15 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                 {sourceFilter === "ui" ? "App" : "Server"} x
               </button>
             )}
-          </div>
-
-          {models.length > 0 && (
+          </div>          {totalModels > 0 && (
             <div className="border-b border-neutral-800/60">
               <button
                 onClick={() => setModelsOpen(!modelsOpen)}
-                className="flex items-center gap-1.5 w-full px-3 py-1.5 text-[10px] font-mono cursor-pointer hover:bg-neutral-900/40 transition-colors"
+                className="flex items-center gap-1.5 w-full px-3 py-1.5 text-[10px] font-sans cursor-pointer hover:bg-neutral-900/40 transition-colors"
               >
                 <svg
-                  width="8" height="8" viewBox="0 0 24 24"
+                  width="8"
+                  height="8" viewBox="0 0 24 24"
                   fill="none" stroke="currentColor" strokeWidth="2"
                   strokeLinecap="round" strokeLinejoin="round"
                   className={cn("transition-transform text-neutral-500", modelsOpen && "rotate-90")}
@@ -623,27 +815,64 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                 </svg>
                 <span className="text-neutral-600 tracking-wider uppercase font-sans">Models</span>
                 <span className="ml-auto text-neutral-600">
-                  {downloadedModels} of {models.length} downloaded
+                  {downloadedModels} of {totalModels} downloaded
                 </span>
               </button>
               {modelsOpen && (
-                <div className="px-3 pb-2 space-y-1">
-                  {models.map((m) => (
-                    <div key={m.name} className="flex items-center gap-2 text-[10px] font-mono">
-                      <span className={cn(
-                        "w-1.5 h-1.5 rounded-full shrink-0",
-                        m.loaded ? "bg-orange-400" : m.downloaded ? "bg-green-400" : "bg-neutral-600"
-                      )} />
-                      <span className={cn(
-                        m.loaded ? "text-orange-300" : m.downloaded ? "text-green-400/80" : "text-neutral-500"
-                      )}>
-                        {m.display_name}
-                      </span>
-                      {m.loaded && (
-                        <span className="text-[8px] text-orange-400/60 uppercase tracking-wider ml-auto">Active</span>
-                      )}
-                    </div>
-                  ))}
+                <div className="max-h-56 overflow-y-auto custom-scrollbar px-3 pb-2">
+                  <p className="pt-1 pb-1 text-[9px] uppercase tracking-widest text-neutral-600 font-sans">
+                    Segmentation & detectors
+                  </p>
+                  <div className="space-y-1">
+                    {models.map((m) => (
+                      <div key={m.name} className="flex items-center gap-2 text-[10px] font-sans">
+                        <span className={cn(
+                          "w-1.5 h-1.5 rounded-full shrink-0",
+                          m.loaded ? "bg-orange-400" : m.downloaded ? "bg-green-400" : "bg-neutral-600"
+                        )} />
+                        <span className={cn(
+                          m.loaded ? "text-orange-300" : m.downloaded ? "text-green-400/80" : "text-neutral-500"
+                        )}>
+                          {m.display_name}
+                        </span>
+                        {m.loaded && (
+                          <span className="text-[8px] text-orange-400/60 uppercase tracking-wider ml-auto">Active</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="pt-2 pb-1 text-[9px] uppercase tracking-widest text-neutral-600 font-sans">
+                    Matte
+                  </p>
+                  <div className="space-y-1">
+                    {matteModels.length === 0 && (
+                      <p className="text-[10px] font-sans text-neutral-600">No matte models reported</p>
+                    )}
+                    {matteModels.map((m) => {
+                      return (
+                        <div key={m.name} className="flex items-center gap-2 text-[10px] font-sans">
+                          <span className={cn(
+                            "w-1.5 h-1.5 rounded-full shrink-0",
+                            m.loaded ? "bg-orange-400" : m.downloaded ? "bg-green-400" : "bg-neutral-600"
+                          )} />
+                          <span className={cn(
+                            m.loaded
+                              ? "text-orange-300"
+                              : m.downloaded
+                                ? "text-green-400/80"
+                                : "text-neutral-500"
+                          )}>
+                            {m.display_name}
+                          </span>
+                          {m.loaded ? (
+                            <span className="text-[8px] text-orange-400/60 uppercase tracking-wider ml-auto">Active</span>
+                          ) : m.tier === "large" ? (
+                            <span className="ml-auto text-[8px] text-neutral-500">Heavy</span>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
@@ -664,7 +893,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                 const files = p.files_total && p.files_total > 1 ? `${p.files_done ?? 0}/${p.files_total}` : null;
                 return (
                   <div key={name}>
-                    <div className="flex items-center justify-between text-[9px] font-mono text-orange-300/80 mb-0.5">
+                    <div className="flex items-center justify-between text-[9px] font-sans text-orange-300/80 mb-0.5">
                       <span className="truncate mr-2">{name}</span>
                       <span className="flex items-center gap-1.5 shrink-0">
                         <span className="text-orange-400">{chip}</span>
@@ -681,7 +910,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                       />
                     </div>
                     {(files || sizeText || p.eta) && (
-                      <div className="flex items-center justify-between text-[8px] font-mono text-neutral-500 mt-0.5">
+                      <div className="flex items-center justify-between text-[8px] font-sans text-neutral-500 mt-0.5">
                         <span className="truncate">{[sizeText, p.file].filter(Boolean).join(" - ")}</span>
                         <span className="shrink-0 ml-2 flex items-center gap-1.5">
                           {files && <span>{files}</span>}
@@ -708,14 +937,21 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
               onScroll={handleScroll}
               onMouseEnter={() => { hoverRef.current = true; }}
               onMouseLeave={() => { hoverRef.current = false; }}
-              className="overflow-y-auto custom-scrollbar px-3 py-2 h-64 font-mono text-[11px] leading-relaxed"
+              className={cn(
+                "overflow-y-auto custom-scrollbar px-3 py-2 h-64 text-[11px] leading-relaxed",
+                simple ? "font-sans" : "font-mono"
+              )}
               role="log"
               aria-live="polite"
               aria-relevant="additions"
             >
               {filteredLogs.length === 0 ? (
                 <p className="text-neutral-600 text-center py-4">
-                  {logs.length === 0 ? "No logs yet" : "No matches - clear the search or filters"}
+                  {logs.length === 0
+                    ? "No logs yet"
+                    : simple && connected
+                      ? "Connected - no activity to summarize yet"
+                      : "No matches - clear the search or filters"}
                 </p>
               ) : (
                 visibleLogs.map((entry) => (
@@ -737,7 +973,7 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                       aria-hidden
                     />
                     <span className={cn(
-                      "break-all",
+                      "break-words",
                       entry.level === "ERROR" || entry.level === "CRITICAL"
                         ? "text-red-300/90"
                         : entry.level === "WARNING"
@@ -746,10 +982,13 @@ export function ConsolePanel({ encoding }: { encoding?: boolean }) {
                             ? "text-neutral-200"
                             : "text-neutral-400"
                     )}>
-                      {entry.source === "ui" && entry.category && (
+                      {!simple && entry.source === "ui" && entry.category && (
                         <span className="text-neutral-600">{uiCategoryLabels[entry.category as UiCategory] ?? entry.category} - </span>
                       )}
-                      {entry.message}
+                      {simple ? entry.simple ?? entry.message : entry.message}
+                      {entry.repeat && entry.repeat > 1 && (
+                        <span className="ml-1.5 text-[9px] text-neutral-600 tabular-nums">x{entry.repeat}</span>
+                      )}
                     </span>
                   </div>
                 ))

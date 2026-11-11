@@ -9,11 +9,12 @@ export const hideBboxesAtom = atom(false);
 export const endSessionOpenAtom = atom(false);
 
 export const unsupportedFileAtom = atom<{ name: string; extension: string } | null>(null);
+export const replaceImageFileAtom = atom<File | null>(null);
 
-export const modeLockAtom = atom<"brush" | "detect" | null>(null);
+export const modeLockAtom = atom<"brush" | "detect" | "matte" | null>(null);
 export const modeDialogOpenAtom = atom(false);
 
-export const modeSwitchTargetAtom = atom<"sam3" | "brush" | null>(null);
+export const modeSwitchTargetAtom = atom<"sam3" | "brush" | "matte" | null>(null);
 
 export const isExportingAtom = atom(false);
 
@@ -33,6 +34,7 @@ export type ConsoleSourceKey = "all" | "ui" | "backend";
 export const consoleSourceAtom = atomWithStorage<ConsoleSourceKey>("consoleSource", "all");
 export const consoleCategoryAtom = atomWithStorage<string>("consoleCategory", "all");
 export const consoleShowTimeAtom = atomWithStorage("consoleShowTime", false);
+export const consoleSimpleAtom = atomWithStorage("consoleSimple", true);
 
 export interface ToastMessage {
   id: number;

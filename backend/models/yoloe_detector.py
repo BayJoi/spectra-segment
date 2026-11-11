@@ -8,7 +8,7 @@ import numpy as np
 import cv2
 
 from .detector_base import Detection, DetectorBackend
-from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
+from ..utils.device import MODEL_WEIGHTS_DIR, cpu_fallback_enabled, release_gpu_memory
 from ..utils.stderr_progress import StderrInterceptor as _StderrInterceptor
 
 LOGGER = logging.getLogger(__name__)
@@ -165,13 +165,36 @@ class YOLEDetector(DetectorBackend):
         self._model.set_classes(labels)
         self._current_classes = labels
 
-        predict_kwargs: dict[str, Any] = {"conf": confidence if confidence is not None else 0.05}
-        LOGGER.debug("YOLOE detect: labels=%s, conf=%s", labels, predict_kwargs["conf"])
+        predict_kwargs: dict[str, Any] = {
+            "conf": confidence if confidence is not None else 0.05,
+            "device": self._device,
+        }
+        LOGGER.debug(
+            "YOLOE detect: labels=%s, conf=%s, device=%s",
+            labels, predict_kwargs["conf"], self._device,
+        )
 
         old_stderr = sys.stderr
         sys.stderr = _StderrInterceptor("YOLOE")
         try:
-            results = self._model.predict(image, **predict_kwargs)
+            try:
+                results = self._model.predict(image, **predict_kwargs)
+            except Exception as exc:
+                if self._device == "cpu" or not cpu_fallback_enabled() or "out of memory" not in str(exc).lower():
+                    raise
+                LOGGER.warning(
+                    "YOLOE exhausted VRAM on %s; falling back to CPU",
+                    self._device,
+                    extra={"phase": "vram", "reason": "oom"},
+                )
+                self._device = "cpu"
+                predict_kwargs["device"] = "cpu"
+                try:
+                    self._model.to("cpu")
+                except Exception as move_exc:
+                    LOGGER.warning("YOLOE could not move weights to CPU: %s", move_exc)
+                release_gpu_memory()
+                results = self._model.predict(image, **predict_kwargs)
         finally:
             sys.stderr = old_stderr
 

@@ -11,7 +11,7 @@ import cv2
 import torch
 
 from .base import SegmentationBackend
-from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
+from ..utils.device import MODEL_WEIGHTS_DIR, cpu_fallback_enabled, release_gpu_memory
 from ..utils.model_integrity import ensure_model_file
 from ..utils.stderr_progress import StderrInterceptor as _StderrInterceptor
 from ..utils.torch_threads import cpu_threads, cudnn_disabled, resolve_threads
@@ -65,8 +65,9 @@ class SAM3Backend(SegmentationBackend):
         os.environ["ULTRALYTICS_HOME"] = str(model_dir)
         os.environ["YOLO_CONFIG_DIR"] = str(model_dir)
 
+        from importlib import import_module
         try:
-            import clip
+            import_module("clip")
         except ImportError:
             raise RuntimeError(
                 "SAM 3 requires the 'clip' text-encoder package, which is missing.\n"
@@ -94,7 +95,9 @@ class SAM3Backend(SegmentationBackend):
                         self._predictor = self._build_predictor(abs_model)
                 except Exception as e:
                     if self._device != "cpu" and not (isinstance(e, ModuleNotFoundError) or "clip" in str(e).lower()):
-                        LOGGER.warning("Device %s failed (%s), falling back to CPU", self._device, e)
+                        if not cpu_fallback_enabled():
+                            raise RuntimeError(f"Could not load SAM3 on {self._device}: {e}") from e
+                        LOGGER.warning("Device %s failed (%s), explicit CPU fallback", self._device, e)
                         self._device = "cpu"
                         with cpu_threads(_DEFAULT_THREADS):
                             self._predictor = self._build_predictor(abs_model)
@@ -202,14 +205,43 @@ class SAM3Backend(SegmentationBackend):
         try:
             self._encode_image(image)
         except torch.OutOfMemoryError:
-            if self._device == "cpu":
+            if self._device == "cpu" or not cpu_fallback_enabled():
                 raise
-            self._fallback_cpu_and_reencode(image)
+            if not self._retry_lower_encode_dim(image):
+                self._fallback_cpu_and_reencode(image)
         except RuntimeError as e:
             if self._device != "cpu" and "out of memory" in str(e).lower():
-                self._fallback_cpu_and_reencode(image)
+                if not cpu_fallback_enabled():
+                    raise
+                if not self._retry_lower_encode_dim(image):
+                    self._fallback_cpu_and_reencode(image)
             else:
                 raise
+
+    def _retry_lower_encode_dim(self, image: np.ndarray) -> bool:
+        current = self._encode_dim
+        for dim in (1024, 768, 512):
+            if dim >= current:
+                continue
+            LOGGER.warning(
+                "set_image: VRAM out of memory at %d px; retrying at %d px on %s",
+                current,
+                dim,
+                self._device,
+                extra={"phase": "vram", "reason": "oom-retry", "encode_dim": dim},
+            )
+            release_gpu_memory()
+            try:
+                self.set_encoding_resolution(dim)
+                self._encode_image(image)
+            except Exception as exc:
+                if not (isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower()):
+                    raise
+                current = dim
+                release_gpu_memory()
+                continue
+            return True
+        return False
 
     def _fallback_cpu_and_reencode(self, image: np.ndarray) -> None:
         LOGGER.warning(

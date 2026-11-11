@@ -75,7 +75,7 @@ export function SubjectsPanel({ open, onClose, ignoredRef }: SubjectsPanelProps)
       <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-2">
       <div className="flex items-center justify-between px-1 mb-1.5">
         <span className="text-[11px] text-neutral-500 uppercase tracking-wider font-sans">Subjects</span>
-        <span className="text-[10px] text-neutral-600 font-mono">{brushObjects.length}</span>
+        <span className="text-[10px] text-neutral-600 font-sans tabular-nums">{brushObjects.length}</span>
       </div>
 
       <div className="flex flex-col gap-1">
@@ -114,7 +114,7 @@ export function SubjectsPanel({ open, onClose, ignoredRef }: SubjectsPanelProps)
               <span className="text-[11px] text-neutral-300 font-sans truncate flex-1">
                 {meta?.name ?? `Subject ${oid + 1}`}
               </span>
-              <span className="text-[10px] text-neutral-600 font-mono tabular-nums">{strokes}</span>
+              <span className="text-[10px] text-neutral-600 font-sans tabular-nums tabular-nums">{strokes}</span>
               <span className={cn(
                 "w-1.5 h-1.5 rounded-full flex-shrink-0",
                 hasMask ? "bg-orange-400" : "bg-neutral-600"

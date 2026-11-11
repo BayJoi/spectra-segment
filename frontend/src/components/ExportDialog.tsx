@@ -7,7 +7,9 @@ import { layersAtom } from "@/store/layers";
 import { sam3ModeAtom, sam3InstancesAtom } from "@/store/sam3";
 import { featherRadiusAtom } from "@/store/detection";
 import { api, encodeMaskPng } from "@/lib/api";
+import { hexToRgb, saveBlob, slugify } from "@/lib/fileExport";
 import { cn } from "@/lib/utils";
+import { NumberInput } from "@/components/ui/NumberInput";
 
 type ExportMode = "everything" | "layer" | "sublayers";
 
@@ -36,10 +38,7 @@ interface FileEntry {
   maskIndex?: number;
 }
 
-function slugify(s: string): string {
-  const clean = s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-  return clean || "layer";
-}
+type ExportDelivery = "zip" | "single" | "separate";
 
 function safeFolder(s: string): string {
   const clean = s
@@ -54,11 +53,6 @@ function base64ToBlob(base64: string, type: string): Blob {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return new Blob([bytes], { type });
-}
-
-function hexToRgb(hex: string): number[] {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result ? [parseInt(result[1], 16), parseInt(result[2], 16), parseInt(result[3], 16)] : [255, 255, 255];
 }
 
 export function ExportDialog() {
@@ -80,6 +74,7 @@ export function ExportDialog() {
   const [format, setFormat] = useState<"png" | "jpg">("png");
   const [bgMode, setBgMode] = useState<"transparent" | "solid">("transparent");
   const [bgColor, setBgColor] = useState("#ffffff");
+  const [delivery, setDelivery] = useState<ExportDelivery>("zip");
   const [exported, setExported] = useState(false);
   const exportedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -172,19 +167,19 @@ export function ExportDialog() {
         if (pick(s)) {
           if (s.kind === "brush") {
             files.push({
-              path: `${rootName}_subj${s.brushOid! + 1}.png`,
+              path: `${rootName}_subj${s.brushOid! + 1}.${format}`,
               kind: "brush",
               brushOid: s.brushOid,
             });
           } else if (s.kind === "sam3") {
             files.push({
-              path: `${safeFolder(g.name)}/${slugify(s.name)}_${i + 1}.png`,
+              path: `${safeFolder(g.name)}/${slugify(s.name)}_${i + 1}.${format}`,
               kind: "sam3",
               maskIndex: s.maskIndex,
             });
           } else {
             files.push({
-              path: `${safeFolder(g.name)}/${slugify(s.name)}_${i + 1}.png`,
+              path: `${safeFolder(g.name)}/${slugify(s.name)}_${i + 1}.${format}`,
               kind: "detection",
               detectionIndex: s.detectionIndex,
             });
@@ -205,7 +200,7 @@ export function ExportDialog() {
       if (f.kind === "sam3") return f.maskIndex !== undefined && f.maskIndex < masks.length;
       return true;
     });
-  }, [mode, groups, effectiveGroup, selectedSubs, perDetectionMasks, masks, rootName]);
+  }, [mode, groups, effectiveGroup, selectedSubs, perDetectionMasks, masks, rootName, format]);
 
   const includeWhole = mode === "everything";
 
@@ -239,31 +234,60 @@ export function ExportDialog() {
         pushToast("Nothing to export - segment something first");
         return;
       }
-      const res = await api.exportZip(sessionId, {
-        root: isBrush ? "" : rootName,
-        files: encoded,
-        include_whole: includeWhole,
-        format,
-        background_color: bgMode === "solid" ? hexToRgb(bgColor) : undefined,
-        feather_radius: feather,
-      });
-      const blob = base64ToBlob(res.data, "application/zip");
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${rootName}.zip`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      const background = bgMode === "solid" ? hexToRgb(bgColor) : undefined;
+      if (delivery === "zip") {
+        const res = await api.exportZip(sessionId, {
+          root: isBrush ? "" : rootName,
+          files: encoded,
+          include_whole: includeWhole,
+          format,
+          background_color: background,
+          feather_radius: feather,
+        });
+        saveBlob(base64ToBlob(res.data, "application/zip"), `${rootName}.zip`);
+      } else if (delivery === "single") {
+        const blob = await api.exportImage(sessionId, {
+          files: encoded.map((item) => ({ mask_b64: item.mask_b64 })),
+          format,
+          background_color: background,
+          feather_radius: feather,
+        });
+        saveBlob(blob, `${rootName}_combined.${format}`);
+      } else {
+        for (let i = 0; i < encoded.length; i++) {
+          const item = encoded[i];
+          const blob = await api.exportImage(sessionId, {
+            files: [{ mask_b64: item.mask_b64 }],
+            format,
+            background_color: background,
+            feather_radius: feather,
+          });
+          const filename = item.path
+            .replace(/\//g, "_")
+            .replace(/\.[^.]+$/, `.${format}`);
+          saveBlob(blob, `${rootName}_${filename}`);
+          await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+      }
+      emitUi(
+        "export",
+        "INFO",
+        delivery === "zip"
+          ? `Saved ${encoded.length} file(s) in a ZIP`
+          : delivery === "single"
+            ? "Saved one combined image"
+            : `Saved ${encoded.length} separate image(s)`
+      );
       setExported(true);
       if (exportedTimerRef.current) clearTimeout(exportedTimerRef.current);
       exportedTimerRef.current = setTimeout(() => setExported(false), 2000);
     } catch (err) {
-      console.error("Export failed:", err);
-      pushToast("Export failed - check the console for details");
+      emitUi("export", "ERROR", `Export failed: ${err instanceof Error ? err.message : "unknown error"}`);
+      pushToast("Export failed - please try again");
     } finally {
       setIsExporting(false);
     }
-  }, [sessionId, filesToExport, objectMasks, masks, perDetectionMasks, rootName, includeWhole, format, bgMode, bgColor, feather, setIsExporting, isBrush]);
+  }, [sessionId, filesToExport, objectMasks, masks, perDetectionMasks, rootName, includeWhole, format, bgMode, bgColor, delivery, feather, setIsExporting, isBrush]);
 
   if (!exportOpen) return null;
 
@@ -291,7 +315,9 @@ export function ExportDialog() {
                 </div>
                 <div>
                   <h3 className="text-sm font-semibold text-neutral-100 font-sans">{isSam3 ? "Export Segments" : isBrush ? "Export Subjects" : "Export Layers"}</h3>
-                  <p className="text-[10px] text-neutral-500 font-sans">{`${rootName}.zip`}</p>
+                  <p className="text-[10px] text-neutral-500 font-sans">
+                    {delivery === "zip" ? `${rootName}.zip` : `${rootName}_*.${format}`}
+                  </p>
                 </div>
               </div>
               <button
@@ -346,7 +372,7 @@ export function ExportDialog() {
                       {effectiveGroup === g.name && <span className="w-1.5 h-1.5 rounded-full bg-orange-400" />}
                     </span>
                     <span className="text-xs font-sans truncate flex-1">{g.name}</span>
-                    <span className="text-[10px] font-mono text-neutral-500">{groupCount(g)}</span>
+                    <span className="text-[10px] font-sans text-neutral-500">{groupCount(g)}</span>
                   </button>
                 ))}
               </div>
@@ -358,7 +384,7 @@ export function ExportDialog() {
                   <div key={g.name} className="px-2.5 py-2 border-b border-neutral-800/40">
                     <div className="flex items-center gap-1.5 mb-1">
                       <span className="text-[10px] text-neutral-500 uppercase tracking-wider font-sans font-semibold">{g.name}</span>
-                      <span className="text-[9px] text-neutral-600 font-mono">{groupCount(g)}</span>
+                      <span className="text-[9px] text-neutral-600 font-sans">{groupCount(g)}</span>
                     </div>
                     <div className="flex flex-col gap-0.5">
                       {g.subs.map((s) => {
@@ -372,14 +398,14 @@ export function ExportDialog() {
                             className={cn(
                               "flex items-center gap-2 px-2 py-1 rounded-md text-left transition-all duration-150 cursor-pointer hover:scale-[1.01] active:scale-[0.99]",
                               s.hasMask ? "hover:bg-neutral-800/50" : "opacity-40 cursor-not-allowed",
-                              checked && "bg-green-500/10"
+                              checked && "bg-orange-500/10"
                             )}
                           >
                             <span className={cn(
                               "w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0",
-                              checked ? "bg-green-500/20 border-green-400" : "border-neutral-600"
+                              checked ? "bg-orange-500/20 border-orange-400" : "border-neutral-600"
                             )}>
-                              {checked && <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" className="text-green-400"><path d="M20 6 9 17l-5-5"/></svg>}
+                              {checked && <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" className="text-orange-400"><path d="M20 6 9 17l-5-5"/></svg>}
                             </span>
                             <span className="text-[11px] text-neutral-300 font-sans truncate flex-1">{s.kind === "detection" ? `${g.name} ${s.detectionIndex! + 1}` : s.name}</span>
                             <span className={cn("w-1.5 h-1.5 rounded-full flex-shrink-0", s.hasMask ? "bg-green-400" : "bg-neutral-600")} />
@@ -392,9 +418,8 @@ export function ExportDialog() {
               </div>
             )}
 
-            {includeWhole && (
-              <div className="mb-3">
-                <label className="text-[10px] text-neutral-500 uppercase tracking-widest font-sans block mb-2">{isBrush || isSam3 ? "Composite format" : "Whole image format"}</label>
+            <div className="mb-3">
+                <label className="text-[10px] text-neutral-500 uppercase tracking-widest font-sans block mb-2">Image format</label>
                 <div className="grid grid-cols-2 gap-2">
                   {(["png", "jpg"] as const).map((f) => (
                 <button
@@ -415,7 +440,31 @@ export function ExportDialog() {
                   ))}
                 </div>
               </div>
-            )}
+
+            <div className="mb-3">
+              <label className="text-[10px] text-neutral-500 uppercase tracking-widest font-sans block mb-2">Download</label>
+              <div className="grid grid-cols-3 gap-2">
+                {([
+                  { key: "zip", title: "ZIP", desc: "One archive" },
+                  { key: "single", title: "One image", desc: "Combined mask" },
+                  { key: "separate", title: "Separate", desc: "No ZIP" },
+                ] as const).map((option) => (
+                  <button
+                    key={option.key}
+                    onClick={() => setDelivery(option.key)}
+                    className={cn(
+                      "px-2 py-1.5 rounded-lg border text-left transition-colors cursor-pointer",
+                      delivery === option.key
+                        ? "bg-orange-500/10 border-orange-500/30 text-orange-200"
+                        : "bg-neutral-900/50 border-neutral-800/50 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300"
+                    )}
+                  >
+                    <span className="block text-[11px] font-medium font-sans">{option.title}</span>
+                    <span className="block text-[9px] font-sans text-neutral-600 mt-0.5">{option.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
 
             <div className="mb-3">
               <label className="text-[10px] text-neutral-500 uppercase tracking-widest font-sans block mb-2">Background</label>
@@ -460,7 +509,7 @@ export function ExportDialog() {
                     onChange={(e) => setBgColor(e.target.value)}
                     className="w-7 h-7 rounded-lg border border-neutral-800 cursor-pointer hover:border-neutral-700 transition-colors"
                   />
-                  <span className="text-[11px] text-neutral-500 font-mono">{bgColor}</span>
+                  <span className="text-[11px] text-neutral-500 font-sans">{bgColor}</span>
                 </div>
               )}
             </div>
@@ -479,13 +528,13 @@ export function ExportDialog() {
                   className="w-full h-1 cursor-pointer"
                   style={{ "--pct": `${(feather / 20) * 100}%` } as React.CSSProperties}
                 />
-                <span className="text-[10px] text-neutral-500 font-mono tabular-nums min-w-[16px] text-right">{feather}</span>
+                <NumberInput value={feather} min={0} max={20} onChange={setFeather} ariaLabel="Feather radius value" />
               </div>
             </div>
 
             {filesToExport.length > 0 && (
               <div className="mb-3 rounded-lg border border-neutral-800/60 bg-black/30 p-2 max-h-32 overflow-y-auto custom-scrollbar">
-                <div className="flex items-center gap-1 text-[10px] text-neutral-400 font-mono px-1">
+                <div className="flex items-center gap-1 text-[10px] text-neutral-400 font-sans px-1">
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-orange-400 shrink-0"><path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/></svg>
                   <span className="truncate">{rootName}/</span>
                 </div>
@@ -503,7 +552,7 @@ export function ExportDialog() {
                     if (!folder) {
                       files.forEach((file) => {
                         entries.push(
-                          <div key={file} className="flex items-center gap-1 text-[10px] text-neutral-400 font-mono pl-3">
+                          <div key={file} className="flex items-center gap-1 text-[10px] text-neutral-400 font-sans pl-3">
                             <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-neutral-600 shrink-0"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/></svg>
                             {file}
                           </div>
@@ -512,14 +561,14 @@ export function ExportDialog() {
                       continue;
                     }
                     entries.push(
-                      <div key={folder} className="flex items-center gap-1 text-[10px] text-neutral-500 font-mono pl-3">
+                      <div key={folder} className="flex items-center gap-1 text-[10px] text-neutral-500 font-sans pl-3">
                         <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-neutral-600 shrink-0"><path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z"/></svg>
                         {folder}/
                       </div>
                     );
                     files.forEach((file) => {
                       entries.push(
-                        <div key={`${folder}/${file}`} className="flex items-center gap-1 text-[10px] text-neutral-400 font-mono pl-6">
+                        <div key={`${folder}/${file}`} className="flex items-center gap-1 text-[10px] text-neutral-400 font-sans pl-6">
                           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-neutral-600 shrink-0"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/></svg>
                           {file}
                         </div>
@@ -528,7 +577,7 @@ export function ExportDialog() {
                   }
                   if (includeWhole) {
                     entries.push(
-                      <div key="__whole" className="flex items-center gap-1 text-[10px] text-neutral-400 font-mono pl-6">
+                      <div key="__whole" className="flex items-center gap-1 text-[10px] text-neutral-400 font-sans pl-6">
                         <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-neutral-600 shrink-0"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/></svg>
                         whole.{format}
                       </div>
@@ -564,7 +613,9 @@ export function ExportDialog() {
                 ) : (
                   <>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7,10 12,15 17,10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                    Export {filesToExport.length} {filesToExport.length === 1 ? "file" : "files"}{includeWhole ? (isBrush || isSam3 ? " + composite" : " + whole") : ""}
+                    {delivery === "single"
+                      ? "Download combined image"
+                      : `Export ${filesToExport.length} ${filesToExport.length === 1 ? "file" : "files"}${delivery === "zip" && includeWhole ? (isBrush || isSam3 ? " + composite" : " + whole") : ""}`}
                   </>
                 )}
             </button>

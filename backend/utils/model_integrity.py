@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import urllib.request
@@ -69,19 +70,56 @@ PUBLISHED_DIGESTS: dict[str, str] = {
 }
 
 
-def _load_hash_db() -> dict[str, str]:
-    if not HASH_DB.exists():
-        return {}
+_db_lock = threading.Lock()
+HASH_CACHE = MODELS_DIR / ".hash_cache.json"
+
+
+def _read_json(path: Path) -> dict:
     try:
-        return json.loads(HASH_DB.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError):
-        LOGGER.debug("Corrupt hash database at %s - starting fresh", HASH_DB)
         return {}
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _load_hash_db() -> dict[str, str]:
+    return _read_json(HASH_DB)
 
 
 def _save_hash_db(db: dict[str, str]) -> None:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    HASH_DB.write_text(json.dumps(db, indent=2), encoding="utf-8")
+    _write_json_atomic(HASH_DB, db)
+
+
+def _cached_digest(model_path: Path, model_name: str) -> str:
+    stat = model_path.stat()
+    with _db_lock:
+        cache = _read_json(HASH_CACHE)
+    entry = cache.get(model_name)
+    if (
+        isinstance(entry, dict)
+        and entry.get("size") == stat.st_size
+        and entry.get("mtime_ns") == stat.st_mtime_ns
+        and isinstance(entry.get("sha256"), str)
+    ):
+        return entry["sha256"]
+
+    digest = compute_sha256(model_path)
+    with _db_lock:
+        cache = _read_json(HASH_CACHE)
+        cache[model_name] = {
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": digest,
+        }
+        _write_json_atomic(HASH_CACHE, cache)
+    return digest
 
 
 def compute_sha256(file_path: Path) -> str:
@@ -96,7 +134,7 @@ def verify_model(model_path: Path, model_name: str) -> bool:
     if not model_path.exists():
         return False
 
-    actual_hash = compute_sha256(model_path)
+    actual_hash = _cached_digest(model_path, model_name)
 
     published = PUBLISHED_DIGESTS.get(model_name)
     if published is not None:

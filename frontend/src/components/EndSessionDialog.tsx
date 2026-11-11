@@ -2,11 +2,13 @@ import { useState } from "react";
 import { useAtom } from "jotai";
 import { endSessionOpenAtom } from "@/store/ui";
 import { useSession } from "@/hooks/useSession";
+import { useSessionBusy } from "@/hooks/useSessionBusy";
 import { DialogFooter } from "@/components/ui/DialogFooter";
 
 export function EndSessionDialog() {
   const [open, setOpen] = useAtom(endSessionOpenAtom);
   const { endSession } = useSession();
+  const { running, tasks } = useSessionBusy();
   const [busy, setBusy] = useState(false);
 
   if (!open) return null;
@@ -65,6 +67,18 @@ export function EndSessionDialog() {
               <p className="text-[11px] text-neutral-500 font-sans leading-relaxed">
                 The model and image will be unloaded and memory freed. Any unsaved work in this session will be lost.
               </p>
+              {running && (
+                <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-2">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="shrink-0 mt-0.5 text-amber-400">
+                    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+                    <path d="M12 9v4" />
+                    <path d="M12 17h.01" />
+                  </svg>
+                  <p className="text-[11px] text-amber-200/90 font-sans leading-relaxed">
+                    Session is still running: {tasks.join(", ")}. Ending now will interrupt it.
+                  </p>
+                </div>
+              )}
             </div>
 
             <DialogFooter

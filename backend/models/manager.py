@@ -16,9 +16,20 @@ import torch as _torch
 from .base import SegmentationBackend
 from .detector_base import DetectorBackend
 from .ultralytics_backend import ULTRALYTICS_MODELS, UltralyticsBackend
-from .grounding_detector import GROUNDING_DETECTORS, DETECTOR_METADATA, GroundingDetector, HF_MODEL_IDS, hf_weights_downloaded
+from .grounding_detector import GROUNDING_DETECTORS, DETECTOR_METADATA, GroundingDetector, HF_MODEL_IDS, HF_MODEL_REVISIONS, hf_weights_downloaded
 from .yoloe_detector import YOLOE_MODELS, YOLOE_METADATA, YOLEDetector
 from .sam3_backend import SAM3_MODEL, SAM3Backend, DEFAULT_ENCODE_DIM, ENCODE_DIM_MAX
+from .matte_backend import (
+    MATTE_MODELS,
+    MAX_GUIDED_BOXES,
+    BiRefNetBackend,
+    alpha_to_png_b64,
+    apply_alpha_controls,
+    matte_model_choices,
+    points_bbox,
+    sample_points,
+    subtract_negative_strokes,
+)
 from ..utils.compositing import mask_to_png_b64
 from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
 from ..utils.humantime import format_duration
@@ -33,6 +44,8 @@ SAM3_ENCODE_DIM_MIN = 384
 SAM3_ENCODE_DIM_MAX = ENCODE_DIM_MAX
 
 DETECTOR_IDLE_TIMEOUT = 300
+
+_ENCODE_HEADROOM_MB = 2048
 
 MAX_STROKE_HISTORY = int(os.environ.get("SPECTRA_MAX_HISTORY", "200"))
 
@@ -49,7 +62,7 @@ MAX_SESSIONS = int(os.environ.get("SPECTRA_MAX_SESSIONS", "100"))
 class Session:
     session_id: str
     model_name: str
-    backend: SegmentationBackend
+    backend: SegmentationBackend | None = None
     image_id: str | None = None
     image_width: int = 0
     image_height: int = 0
@@ -64,6 +77,7 @@ class Session:
     sam3_last_bboxes: np.ndarray | None = None
     has_image: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
+    matte: MatteState | None = None
 
 
 @dataclass(slots=True)
@@ -89,6 +103,7 @@ class StrokeEntry:
     points: list[list[float]]
     labels: list[int]
     bboxes: list[float] | None = None
+    radius: int | None = None
 
 
 @dataclass(slots=True)
@@ -105,6 +120,15 @@ class SAM3Snapshot:
     mask_shape: tuple[int, ...] | None = None
 
 
+@dataclass(slots=True)
+class MatteState:
+    model: str
+    alpha: np.ndarray
+    alpha_png: str
+    guide: str
+    box: list[float] | None
+
+
 class ModelManager:
     def __init__(self, device: str = "cpu") -> None:
         self._device = device
@@ -117,6 +141,8 @@ class ModelManager:
         self._last_seg_use: float = time.time()
         self._last_detector_use: float = time.time()
         self._keep_sam3_loaded: bool = False
+        self._matte_backends: dict[str, BiRefNetBackend] = {}
+        self._current_matte: str | None = None
         self._no_co_residency: bool = os.environ.get("SPECTRA_NO_CO_RESIDENCY", "") == "1"
         self._sam3_encode_dim: int = DEFAULT_ENCODE_DIM
         self._lock = threading.Lock()
@@ -149,7 +175,11 @@ class ModelManager:
             LOGGER.exception("Error unloading model for VRAM headroom")
             return False
 
-    def _evict_loaded_models(self, keep_backend: SegmentationBackend | None = None) -> None:
+    def _evict_loaded_models(
+        self,
+        keep_backend: SegmentationBackend | None = None,
+        keep_matte: str | None = None,
+    ) -> None:
         if not _torch.cuda.is_available() or self._device == "cpu":
             return
         evict: list[Any] = []
@@ -172,6 +202,14 @@ class ModelManager:
                 del self._loaded_models[name]
                 if self._current_model == name:
                     self._current_model = None
+            for name in list(self._matte_backends.keys()):
+                obj = self._matte_backends[name]
+                if name == keep_matte or not obj.is_loaded:
+                    continue
+                evict.append(obj)
+                del self._matte_backends[name]
+                if self._current_matte == name:
+                    self._current_matte = None
         for obj in evict:
             self._safe_unload(obj)
         if _torch.cuda.is_available():
@@ -191,27 +229,18 @@ class ModelManager:
             return
         free_mb = free / (1024 * 1024)
         total_mb = total / (1024 * 1024)
-        try:
-            fraction = min(float(os.environ.get("SPECTRA_VRAM_FRACTION", "1.0")), 0.95)
-        except (ValueError, TypeError):
-            fraction = 1.0
-        if fraction <= 0.0:
-            return
-        budget_mb = fraction * total_mb
-        projected_mb = (total_mb - free_mb) + required_mb
-        if projected_mb <= budget_mb:
+        if free_mb >= required_mb:
             return
 
         LOGGER.info(
-            "VRAM: freeing headroom - over budget by %.0f MB "
-            "(free %.0f / total %.0f MB, need %.0f MB)",
-            max(0.0, projected_mb - budget_mb), free_mb, total_mb, required_mb,
-            extra={"phase":"vram","reason":"over-budget"},
+            "VRAM: freeing headroom - need %.0f MB, free %.0f / total %.0f MB",
+            required_mb, free_mb, total_mb,
+            extra={"phase":"vram","reason":"headroom"},
         )
         self._evict_loaded_models(keep_backend=keep_backend)
 
     def _ensure_encode_headroom(self, keep_backend: SegmentationBackend | None = None) -> None:
-        self._evict_loaded_models(keep_backend=keep_backend)
+        self._ensure_vram_headroom(_ENCODE_HEADROOM_MB, keep_backend=keep_backend)
 
     def get_or_load_model(self, model_name: str) -> SegmentationBackend:
         with self._lock:
@@ -323,23 +352,25 @@ class ModelManager:
         finally:
             lock.release()
 
-    def create_session(self, model_name: str) -> Session:
+    def create_session(self, model_name: str | None) -> Session:
         self.evict_idle_sessions()
         with self._lock:
             if len(self._sessions) >= MAX_SESSIONS:
                 raise RuntimeError(f"Maximum sessions ({MAX_SESSIONS}) reached")
             session_id = str(uuid.uuid4())
             self._sessions[session_id] = None  # type: ignore[assignment]
-        try:
-            backend = self.get_or_load_model(model_name)
-        except Exception:
-            with self._lock:
-                self._sessions.pop(session_id, None)
-            raise
+        backend: SegmentationBackend | None = None
+        if model_name:
+            try:
+                backend = self.get_or_load_model(model_name)
+            except Exception:
+                with self._lock:
+                    self._sessions.pop(session_id, None)
+                raise
 
         session = Session(
             session_id=session_id,
-            model_name=model_name,
+            model_name=model_name or "",
             backend=backend,
         )
         with self._lock:
@@ -374,7 +405,7 @@ class ModelManager:
                 self._detector = None
                 self._current_detector = None
         if session:
-            if session.backend.has_image:
+            if session.backend is not None and session.backend.has_image:
                 if self._can_unload(session.backend):
                     session.backend.reset_image()
                 else:
@@ -387,6 +418,7 @@ class ModelManager:
                 LOGGER.info("Residency: unloading %s (idle)", unload_model_name, extra={"phase":"residency","model":unload_model_name,"reason":"idle"})
             if unload_detector is not None and self._safe_unload(unload_detector):
                 LOGGER.info("Residency: unloading detector %s (idle)", unload_detector_name, extra={"phase":"residency","detector":unload_detector_name,"reason":"idle"})
+            self._unload_all_matte()
             if _torch.cuda.is_available():
                 try:
                     _torch.cuda.empty_cache()
@@ -405,7 +437,7 @@ class ModelManager:
         if not session:
             raise ValueError(f"Session {session_id} not found")
 
-        if session.backend.has_image:
+        if session.backend is not None and session.backend.has_image:
             session.backend.reset_image()
 
         session.image_id = image_id
@@ -418,6 +450,16 @@ class ModelManager:
         session.sam3_last_masks = None
         session.sam3_last_scores = None
         session.sam3_last_bboxes = None
+        session.matte = None
+
+        if session.backend is None:
+            session.last_active = time.time()
+            LOGGER.info(
+                "Stored %dx%d image in matte-only session %s",
+                session.image_width, session.image_height, session_id,
+                extra={"phase": "upload", "sid": session_id},
+            )
+            return
 
         LOGGER.debug("Encoding %dx%d image for session %s ...",
                      image.shape[1], image.shape[0], session_id,
@@ -444,6 +486,9 @@ class ModelManager:
         LOGGER.info("Encoded %dx%d image in %s", session.image_width, session.image_height, format_duration(time.time() - t0), extra={"phase":"encode","sid":session.session_id,"dur_ms":int((time.time()-t0)*1000)})
 
     def _ensure_model_loaded(self, session: Session) -> None:
+        if session.backend is None:
+            raise ValueError("This session has no segmentation model")
+
         with self._lock:
             self._last_seg_use = time.time()
 
@@ -489,6 +534,7 @@ class ModelManager:
         points: list[list[float]] | None = None,
         labels: list[int] | None = None,
         bboxes: list[float] | None = None,
+        stroke_radius: int | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             session = self._sessions.get(session_id)
@@ -499,14 +545,14 @@ class ModelManager:
         if not session.backend.has_image:
             raise ValueError("No image loaded in session")
 
-        if object_id not in session.objects:
-            if len(session.objects) >= MAX_OBJECTS_PER_SESSION:
-                raise ValueError(
-                    f"Maximum objects per session ({MAX_OBJECTS_PER_SESSION}) reached"
-                )
-            session.objects[object_id] = ObjectState(object_id=object_id)
-
-        obj = session.objects[object_id]
+        with session.lock:
+            if object_id not in session.objects:
+                if len(session.objects) >= MAX_OBJECTS_PER_SESSION:
+                    raise ValueError(
+                        f"Maximum objects per session ({MAX_OBJECTS_PER_SESSION}) reached"
+                    )
+                session.objects[object_id] = ObjectState(object_id=object_id)
+            obj = session.objects[object_id]
 
         appended = False
         if points or bboxes:
@@ -523,6 +569,7 @@ class ModelManager:
                         points=points or [],
                         labels=labels or [],
                         bboxes=bboxes,
+                        radius=stroke_radius,
                     )
                 )
                 obj.redo_stack.clear()
@@ -601,7 +648,6 @@ class ModelManager:
     ) -> dict[str, Any]:
         object_masks = self._object_masks_png(session)
         result["object_masks"] = object_masks
-        result["all_scores"] = [1.0] * len(object_masks)
         result["object_history"] = self._object_history(session)
         return result
 
@@ -652,7 +698,7 @@ class ModelManager:
                 del obj.redo_stack[:excess]
 
         session.last_active = time.time()
-        if not session.backend.is_loaded:
+        if session.backend is not None and not session.backend.is_loaded:
             self._ensure_model_loaded(session)
         result = self._restore_object_mask(session, obj)
         return self._brush_response(session, result)
@@ -676,7 +722,7 @@ class ModelManager:
                 )
 
         session.last_active = time.time()
-        if not session.backend.is_loaded:
+        if session.backend is not None and not session.backend.is_loaded:
             self._ensure_model_loaded(session)
         result = self._restore_object_mask(session, obj)
         return self._brush_response(session, result)
@@ -746,16 +792,16 @@ class ModelManager:
             if len(session.sam3_redo_stack) > SAM3_MAX_HISTORY:
                 excess = len(session.sam3_redo_stack) - SAM3_MAX_HISTORY
                 del session.sam3_redo_stack[:excess]
-        prev = session.sam3_prompt_history[-1] if session.sam3_prompt_history else None
-        if prev is not None:
-            session.sam3_last_masks = self._unpack_masks(prev[1].masks, prev[1].mask_shape)
-            session.sam3_last_scores = prev[1].scores
-            session.sam3_last_bboxes = prev[1].bboxes
-        else:
-            session.sam3_last_masks = None
-            session.sam3_last_scores = None
-            session.sam3_last_bboxes = None
-        return self._sam3_response(session)
+            prev = session.sam3_prompt_history[-1] if session.sam3_prompt_history else None
+            if prev is not None:
+                session.sam3_last_masks = self._unpack_masks(prev[1].masks, prev[1].mask_shape)
+                session.sam3_last_scores = prev[1].scores
+                session.sam3_last_bboxes = prev[1].bboxes
+            else:
+                session.sam3_last_masks = None
+                session.sam3_last_scores = None
+                session.sam3_last_bboxes = None
+            return self._sam3_response(session)
 
     def sam3_redo(self, session_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -766,12 +812,13 @@ class ModelManager:
         if not session.sam3_redo_stack:
             return None
 
-        entry, snap = session.sam3_redo_stack.pop()
-        session.sam3_prompt_history.append((entry, snap))
-        session.sam3_last_masks = self._unpack_masks(snap.masks, snap.mask_shape)
-        session.sam3_last_scores = snap.scores
-        session.sam3_last_bboxes = snap.bboxes
-        return self._sam3_response(session)
+        with session.lock:
+            entry, snap = session.sam3_redo_stack.pop()
+            session.sam3_prompt_history.append((entry, snap))
+            session.sam3_last_masks = self._unpack_masks(snap.masks, snap.mask_shape)
+            session.sam3_last_scores = snap.scores
+            session.sam3_last_bboxes = snap.bboxes
+            return self._sam3_response(session)
 
     def sam3_remove_instance(
         self,
@@ -816,16 +863,16 @@ class ModelManager:
                     ),
                 )
 
-        if session.sam3_prompt_history:
-            _, last = session.sam3_prompt_history[-1]
-            session.sam3_last_masks = self._unpack_masks(last.masks, last.mask_shape)
-            session.sam3_last_scores = last.scores
-            session.sam3_last_bboxes = last.bboxes
-        else:
-            session.sam3_last_masks = None
-            session.sam3_last_scores = None
-            session.sam3_last_bboxes = None
-        return self._sam3_response(session)
+            if session.sam3_prompt_history:
+                _, last = session.sam3_prompt_history[-1]
+                session.sam3_last_masks = self._unpack_masks(last.masks, last.mask_shape)
+                session.sam3_last_scores = last.scores
+                session.sam3_last_bboxes = last.bboxes
+            else:
+                session.sam3_last_masks = None
+                session.sam3_last_scores = None
+                session.sam3_last_bboxes = None
+            return self._sam3_response(session)
 
     @staticmethod
     def _pack_masks(masks: np.ndarray | None) -> np.ndarray | None:
@@ -907,7 +954,7 @@ class ModelManager:
         return self._replay_history(session, obj)
 
     def _ensure_full_image_encoded(self, session: Session) -> None:
-        if session.image_rgb is None:
+        if session.image_rgb is None or session.backend is None:
             return
         H, W = session.image_rgb.shape[:2]
         cur = getattr(session.backend, "_src_shape", None)
@@ -969,8 +1016,8 @@ class ModelManager:
         return result
 
     def _restore_object_mask(self, session: Session, obj: ObjectState) -> dict[str, Any]:
-        history = obj.stroke_history
         with session.lock:
+            history = list(obj.stroke_history)
             snapshots_align = len(obj.mask_snapshots) == len(history)
             prev_low_res = (
                 obj.mask_snapshots[-2].low_res
@@ -992,10 +1039,51 @@ class ModelManager:
         result = self._apply_stroke(
             session, obj, entry, first_stroke=is_first_prompt, mask_input=mask_input
         )
-        if obj.mask_snapshots:
-            obj.mask_snapshots[-1] = MaskSnapshot(low_res=result.get("low_res_masks"))
+        with session.lock:
+            if obj.mask_snapshots:
+                obj.mask_snapshots[-1] = MaskSnapshot(low_res=result.get("low_res_masks"))
         self._store_object_mask(obj, result["masks"], result.get("low_res_masks"))
         return result
+
+    @staticmethod
+    def _mask_to_low_res(mask: Any) -> np.ndarray | None:
+        arr = np.asarray(mask)
+        if arr.size == 0:
+            return None
+        if arr.ndim == 3:
+            arr = arr[0]
+        small = cv2.resize(
+            arr.astype(np.float32), (256, 256), interpolation=cv2.INTER_AREA
+        )
+        logits = np.where(small >= 0.5, 8.0, -8.0).astype(np.float32)
+        return logits[None, None]
+
+    @staticmethod
+    def _selection_box(
+        points: list[list[float]], radius: int, width: int, height: int
+    ) -> list[float]:
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        pad = max(4.0, float(radius) * 1.2)
+        return [
+            max(0.0, min(xs) - pad),
+            max(0.0, min(ys) - pad),
+            min(float(max(1, width - 1)), max(xs) + pad),
+            min(float(max(1, height - 1)), max(ys) + pad),
+        ]
+
+    @staticmethod
+    def _subtract_selection(base: Any, selected: Any, radius: int) -> np.ndarray:
+        base_arr = np.asarray(base)
+        sel = np.asarray(selected)
+        if sel.size == 0:
+            return base_arr
+        if sel.ndim == 3:
+            sel = sel[0]
+        grow = max(1, min(8, round(radius * 0.3)))
+        kernel = np.ones((2 * grow + 1, 2 * grow + 1), dtype=np.uint8)
+        sel = cv2.dilate(sel.astype(np.uint8), kernel, iterations=1).astype(bool)
+        return base_arr & ~sel
 
     def _apply_stroke(
         self,
@@ -1008,49 +1096,43 @@ class ModelManager:
         points = entry.points
         labels = entry.labels
         bboxes = entry.bboxes
-        pos_count = labels.count(1) if labels else 0
-        neg_count = labels.count(0) if labels else 0
+        pos_points = [p for p, lb in zip(points, labels) if lb == 1] if labels else []
+        neg_points = [p for p, lb in zip(points, labels) if lb == 0] if labels else []
 
-        use_multimask = first_stroke and not bboxes and len(points) <= 1
+        if pos_points or bboxes:
+            return session.backend.predict(
+                points=points if neg_points else (pos_points or None),
+                labels=labels if neg_points else ([1] * len(pos_points) or None),
+                bboxes=bboxes,
+                mask_input=mask_input,
+                multimask_output=first_stroke and not bboxes and len(pos_points) <= 1,
+            )
 
-        if first_stroke and not bboxes and pos_count > 0 and neg_count > 0:
-            pos_points = [p for p, lb in zip(points, labels) if lb == 1]
-            pos_labels = [1] * len(pos_points)
-            coarse = session.backend.predict(
-                points=pos_points,
-                labels=pos_labels,
-                bboxes=None,
+        if neg_points and obj.last_mask is not None:
+            radius = entry.radius or max(
+                6, min(session.image_width, session.image_height) // 80
+            )
+            box = self._selection_box(
+                neg_points, int(radius), session.image_width, session.image_height
+            )
+            result = session.backend.predict(
+                points=neg_points,
+                labels=[1] * len(neg_points),
+                bboxes=box,
                 mask_input=None,
                 multimask_output=False,
             )
-            coarse_low = coarse.get("low_res_masks")
-            if coarse_low is not None and coarse_low.size > 0:
-                LOGGER.debug(
-                    "First-stroke refinement: pass1 mask (positives only) -> pass2 refine with %d negatives",
-                    neg_count,
-                )
-                return session.backend.predict(
-                    points=points if points else None,
-                    labels=labels if labels else None,
-                    bboxes=bboxes,
-                    mask_input=coarse_low,
-                    multimask_output=False,
-                )
-            return session.backend.predict(
-                points=points if points else None,
-                labels=labels if labels else None,
-                bboxes=bboxes,
-                mask_input=mask_input,
-                multimask_output=use_multimask,
+            result["masks"] = self._subtract_selection(
+                obj.last_mask, result.get("masks"), int(radius)
             )
+            result["low_res_masks"] = self._mask_to_low_res(result["masks"])
+            return result
 
-        return session.backend.predict(
-            points=points if points else None,
-            labels=labels if labels else None,
-            bboxes=bboxes,
-            mask_input=mask_input,
-            multimask_output=use_multimask,
-        )
+        return {
+            "masks": np.array([], dtype=bool),
+            "scores": np.array([]),
+            "low_res_masks": None,
+        }
 
     def evict_idle_sessions(self) -> int:
         now = time.time()
@@ -1148,7 +1230,8 @@ class ModelManager:
     def _detector_downloaded(self, detector_name: str) -> bool:
         if detector_name in GROUNDING_DETECTORS:
             hf_id = HF_MODEL_IDS.get(detector_name, detector_name)
-            return hf_weights_downloaded(hf_id)
+            revision = HF_MODEL_REVISIONS.get(detector_name)
+            return hf_weights_downloaded(hf_id, revision=revision)
         if detector_name in YOLOE_MODELS:
             return (MODEL_WEIGHTS_DIR / f"{detector_name}.pt").exists()
         return False
@@ -1303,6 +1386,208 @@ class ModelManager:
             "image_width": session.image_width,
             "image_height": session.image_height,
             "object_count": len(session.objects),
+            "has_matte": session.matte is not None,
             "last_active": session.last_active,
             "idle_seconds": time.time() - session.last_active,
         }
+
+    def _unload_all_matte(self) -> None:
+        with self._lock:
+            backends = list(self._matte_backends.values())
+            self._matte_backends.clear()
+            self._current_matte = None
+        for backend in backends:
+            self._safe_unload(backend)
+
+    def list_matte_models(self) -> list[dict[str, Any]]:
+        with self._lock:
+            current = self._current_matte
+            loaded = {name for name, b in self._matte_backends.items() if b.is_loaded}
+        entries = matte_model_choices()
+        for entry in entries:
+            entry["loaded"] = entry["name"] in loaded and entry["name"] == current
+        return entries
+
+    def load_matte_model(self, model_name: str) -> BiRefNetBackend:
+        spec = MATTE_MODELS.get(model_name)
+        if spec is None:
+            raise ValueError(
+                f"Unknown matte model '{model_name}'. Available: {sorted(MATTE_MODELS)}"
+            )
+        with self._lock:
+            existing = self._matte_backends.get(model_name)
+            if existing is not None and existing.is_loaded:
+                self._current_matte = model_name
+                self._last_seg_use = time.time()
+                return existing
+
+        self._evict_loaded_models()
+        backend = BiRefNetBackend(spec, device=self._device)
+        downloaded = next(
+            (m["downloaded"] for m in matte_model_choices() if m["name"] == model_name),
+            False,
+        )
+        if self._status_callback:
+            self._status_callback("matte-loading" if downloaded else "matte-downloading")
+        t0 = time.time()
+        try:
+            backend.load_model()
+        except Exception:
+            backend.unload_model()
+            raise
+        with self._lock:
+            self._matte_backends[model_name] = backend
+            self._current_matte = model_name
+            self._last_seg_use = time.time()
+        LOGGER.info(
+            "Matte model %s ready in %s",
+            spec.display_name,
+            format_duration(time.time() - t0),
+            extra={
+                "phase": "residency",
+                "model": model_name,
+                "dur_ms": int((time.time() - t0) * 1000),
+            },
+        )
+        if self._status_callback:
+            self._status_callback("matte-loaded")
+        return backend
+
+    def _ensure_matte_backend(self, model_name: str) -> BiRefNetBackend:
+        with self._lock:
+            existing = self._matte_backends.get(model_name)
+        if existing is not None and existing.is_loaded:
+            return existing
+        return self.load_matte_model(model_name)
+
+    def run_matte(
+        self,
+        session_id: str,
+        model_name: str,
+        guide: str = "auto",
+        points: list[list[float]] | None = None,
+        labels: list[int] | None = None,
+        bbox: list[float] | None = None,
+        text: str | None = None,
+        confidence: float | None = None,
+        max_detections: int = 1,
+        crop_margin: float = 0.08,
+        stroke_radius: int | None = None,
+        edge_shift: int = 0,
+        edge_feather: int = 0,
+        invert: bool = False,
+    ) -> dict[str, Any]:
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        if session.image_rgb is None:
+            raise ValueError("No image loaded in session")
+
+        height, width = session.image_rgb.shape[:2]
+        points, labels = sample_points(points or [], labels)
+        boxes: list[list[float]] | None = None
+
+        if guide == "text":
+            query = (text or "").strip()
+            if not query:
+                raise ValueError("Enter a text prompt for text-guided matting")
+            with self._lock:
+                last_detector = self._last_detector_name
+            if not last_detector:
+                default_detector = next(iter(GROUNDING_DETECTORS), None)
+                if not default_detector:
+                    raise ValueError("No detector available for text guidance")
+                self.load_detector(default_detector)
+            result = self.detect(
+                session_id=session_id,
+                query=query,
+                confidence=confidence,
+                max_detections=min(max(1, int(max_detections)), MAX_GUIDED_BOXES),
+            )
+            boxes = [list(d["bbox"]) for d in result.get("detections", [])]
+            if not boxes:
+                raise ValueError(f"No object matched '{query}'")
+        elif guide == "stroke":
+            if not points:
+                raise ValueError("Draw at least one stroke first")
+            stroke_box = points_bbox(points, labels)
+            if stroke_box is None:
+                raise ValueError("Stroke guidance needs at least one positive stroke")
+            boxes = [_pad_box(stroke_box, width, height)]
+        elif guide == "box":
+            if not bbox:
+                raise ValueError("Box guidance requires a bounding box")
+            boxes = [_pad_box(bbox, width, height)]
+
+        backend = self._ensure_matte_backend(model_name)
+        t0 = time.time()
+        alpha = backend.matte(session.image_rgb, boxes=boxes, crop_margin=crop_margin)
+        if guide == "stroke":
+            radius = stroke_radius if stroke_radius else max(6, min(width, height) // 80)
+            alpha = subtract_negative_strokes(alpha, points, labels, int(radius))
+        alpha = apply_alpha_controls(alpha, edge_shift, edge_feather, invert)
+
+        alpha_png = alpha_to_png_b64(alpha)
+        state = MatteState(
+            model=model_name,
+            alpha=np.clip(alpha * 255.0, 0, 255).astype(np.uint8),
+            alpha_png=alpha_png,
+            guide=guide,
+            box=boxes[0] if boxes else None,
+        )
+        with session.lock:
+            session.matte = state
+        session.last_active = time.time()
+
+        elapsed = time.time() - t0
+        LOGGER.info(
+            "Matte ready via %s in %s (%dx%d)",
+            guide,
+            format_duration(elapsed),
+            width,
+            height,
+            extra={
+                "phase": "matte",
+                "sid": session_id,
+                "model": model_name,
+                "dur_ms": int(elapsed * 1000),
+            },
+        )
+        return {
+            "alpha": alpha_png,
+            "width": width,
+            "height": height,
+            "model": model_name,
+            "guide": guide,
+            "box": state.box,
+            "ms": int(elapsed * 1000),
+        }
+
+    def clear_matte(self, session_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if not session:
+            return False
+        with session.lock:
+            session.matte = None
+        return True
+
+    def get_matte(self, session_id: str) -> MatteState | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if not session:
+            return None
+        return session.matte
+
+
+def _pad_box(box: list[float], width: int, height: int) -> list[float]:
+    x1, y1, x2, y2 = (float(v) for v in box[:4])
+    pad_x = 12.0 if x2 - x1 < 16 else 0.0
+    pad_y = 12.0 if y2 - y1 < 16 else 0.0
+    return [
+        max(0.0, min(x1, x2) - pad_x),
+        max(0.0, min(y1, y2) - pad_y),
+        min(float(width), max(x1, x2) + pad_x),
+        min(float(height), max(y1, y2) + pad_y),
+    ]

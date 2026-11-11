@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 
 interface DialogFooterProps {
   busy: boolean;
+  disabled?: boolean;
   tone: "danger" | "accent";
   confirmLabel: string;
   busyLabel: string;
@@ -23,6 +24,7 @@ const TONES = {
 
 export function DialogFooter({
   busy,
+  disabled,
   tone,
   confirmLabel,
   busyLabel,
@@ -34,7 +36,7 @@ export function DialogFooter({
       <button onClick={onCancel} disabled={busy} className={CANCEL_CLASS}>
         Cancel
       </button>
-      <button onClick={onConfirm} disabled={busy} className={cn(CONFIRM_CLASS, TONES[tone])}>
+      <button onClick={onConfirm} disabled={busy || disabled} className={cn(CONFIRM_CLASS, TONES[tone])}>
         {busy ? (
           <span className="inline-flex items-center justify-center gap-2">
             <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">

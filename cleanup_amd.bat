@@ -18,7 +18,7 @@ echo  ^|                        Cleanup  (AMD)                      ^|
 echo  ^|  Portable, self-contained. Everything stays in this folder ^|
 echo  +------------------------------------------------------------+
 echo(
-echo    Protected: docs\ folder and checks\ folder are never removed.
+echo    Protected: docs\, checks\, and source files are never removed.
 
 call :section "[ 1 / 3 ]  Reviewing items to remove"
 echo   The following will be permanently removed:
@@ -103,6 +103,10 @@ if exist "%AMD_DIR%\backend_launch.log" (
     echo    [FILE] backend_amd_gpu\backend_launch.log  ^(launch output^)
     set "HAS_ITEMS=1"
 )
+if exist "%AMD_DIR%\spectra_amd_hardware.cfg" (
+    echo    [FILE] backend_amd_gpu\spectra_amd_hardware.cfg  ^(detected GPU profile^)
+    set "HAS_ITEMS=1"
+)
 if exist "%AMD_DIR%\spectra_launcher.cfg" (
     echo    [FILE] backend_amd_gpu\spectra_launcher.cfg  ^(memory profile^)
     set "HAS_ITEMS=1"
@@ -116,7 +120,7 @@ if exist "%AMD_DIR%\web" (
     set "HAS_ITEMS=1"
 )
 if exist "%ROOT%frontend\bun.lock" (
-    echo    [FILE] frontend\bun.lock  ^(bun dependency lockfile^)
+    echo    [FILE] frontend\bun.lock  ^(frontend lockfile^)
     set "HAS_ITEMS=1"
 )
 
@@ -124,7 +128,8 @@ if exist "%ROOT%tools\uv-amd" (
     echo    [DIR]  tools\uv-amd\  ^(uv binary - AMD^)
     set "HAS_ITEMS=1"
 )
-if exist "%ROOT%tools\python\cpython-3.12*" (
+dir /b /ad "%ROOT%tools\python\cpython-3.12*" >nul 2>&1
+if not errorlevel 1 (
     echo    [DIR]  tools\python\cpython-3.12*\  ^(portable Python 3.12.13 - AMD^)
     set "HAS_ITEMS=1"
 )
@@ -166,6 +171,14 @@ echo(
 echo   [WARN]  This cleanup cannot be undone.
 echo(
 
+set /p "CONFIRM=Proceed with cleanup? (Y/N): "
+if /i not "%CONFIRM%"=="Y" (
+    echo   [INFO]  Cleanup cancelled.
+    exit /b 0
+)
+
+echo(
+
 call :section "[ 2 / 3 ]  Stopping processes"
 echo   [INFO]  Stopping AMD backend...
 for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do (
@@ -186,14 +199,6 @@ if not errorlevel 1 (
 )
 timeout /t 2 /nobreak >nul
 echo   [ OK ]  Processes stopped.
-
-echo(
-
-set /p "CONFIRM=Proceed with cleanup? (Y/N): "
-if /i not "%CONFIRM%"=="Y" (
-    echo   [INFO]  Cleanup cancelled.
-    exit /b 0
-)
 
 echo(
 
@@ -266,17 +271,26 @@ if exist "%AMD_DIR%\.gpu_id.txt" del /q "%AMD_DIR%\.gpu_id.txt" && echo  Removed
 if exist "%MODELS_DIR%\.gpu_arch.txt" del /q "%MODELS_DIR%\.gpu_arch.txt" && echo  Removed model_weights\.gpu_arch.txt
 if exist "%MODELS_DIR%\.gpu_id.txt" del /q "%MODELS_DIR%\.gpu_id.txt" && echo  Removed model_weights\.gpu_id.txt
 if exist "%AMD_DIR%\backend_launch.log" del /q "%AMD_DIR%\backend_launch.log" && echo  Removed backend_launch.log
+if exist "%AMD_DIR%\spectra_amd_hardware.cfg" del /q "%AMD_DIR%\spectra_amd_hardware.cfg" && echo  Removed spectra_amd_hardware.cfg
 if exist "%AMD_DIR%\spectra_launcher.cfg" del /q "%AMD_DIR%\spectra_launcher.cfg" && echo  Removed spectra_launcher.cfg
 if exist "%AMD_DIR%\spectra_launcher.cfg.env" del /q "%AMD_DIR%\spectra_launcher.cfg.env" && echo  Removed spectra_launcher.cfg.env
+call :remove_own_web_link "%ROOT%frontend\node_modules" "%AMD_DIR%\web\node_modules"
+call :remove_own_web_link "%ROOT%frontend\dist" "%AMD_DIR%\web\dist"
+
 if exist "%AMD_DIR%\web" (
     echo Removing backend_amd_gpu\web\ ^(frontend workspace^)...
     rmdir /s /q "%AMD_DIR%\web" 2>nul && echo  Done.
 )
+
 if exist "%ROOT%frontend\bun.lock" (
-    del /q "%ROOT%frontend\bun.lock" && echo  Removed frontend\bun.lock
+    echo Removing frontend\bun.lock...
+    del /q "%ROOT%frontend\bun.lock" 2>nul
+    if exist "%ROOT%frontend\bun.lock" (
+        echo   [WARN]  Failed to remove frontend\bun.lock ^(file may be in use^)
+    ) else (
+        echo   Done.
+    )
 )
-call :remove_own_web_link "%ROOT%frontend\node_modules" "%AMD_DIR%\web\node_modules"
-call :remove_own_web_link "%ROOT%frontend\dist" "%AMD_DIR%\web\dist"
 
 if exist "%ROOT%\.tmp" (
     rmdir /s /q "%ROOT%\.tmp" >nul 2>&1
@@ -323,11 +337,13 @@ if exist "%ROOT%docs\*.md" (
     echo   [FAIL]  docs\ is MISSING or empty!
     set "PROTECTED_FAIL=1"
 )
-if exist "%ROOT%checks\check_gpu_health.py" (
-    echo   [ OK ]  checks\check_gpu_health.py
-) else (
-    echo   [FAIL]  checks\check_gpu_health.py is MISSING!
-    set "PROTECTED_FAIL=1"
+for %%f in (backend_amd_gpu\main.py backend_amd_gpu\amd_gfx.py backend_amd_gpu\detect_amd_gpu.py checks\check_gpu_health.py checks\check_gpu.bat checks\check_gpu_amd.bat checks\check_gpu_nvidia.bat) do (
+    if exist "%ROOT%%%f" (
+        echo   [ OK ]  %%f
+    ) else (
+        echo   [FAIL]  %%f is MISSING!
+        set "PROTECTED_FAIL=1"
+    )
 )
 if exist "%ROOT%.git" (
     echo   [ OK ]  .git\
@@ -353,17 +369,14 @@ exit /b 0
 
 :remove_own_web_link
 set "CUR="
-if exist "%~1" (
-    fsutil reparsepoint query "%~1" >nul 2>&1
-    if not errorlevel 1 (
-        for /f "delims=" %%t in ('powershell -NoProfile -Command "(Get-Item -LiteralPath '%~1').Target" 2^>nul') do set "CUR=%%t"
-        if /i "!CUR!"=="%~2" (
-            echo Removing %~1 ^(junction^)...
-            rd "%~1" >nul 2>&1
-            if not exist "%~1" echo   Done.
-        )
-    )
-)
+fsutil reparsepoint query "%~1" >nul 2>&1
+if errorlevel 1 exit /b 0
+for /f "delims=" %%t in ('powershell -NoProfile -Command "(Get-Item -LiteralPath '%~1').Target" 2^>nul') do set "CUR=%%t"
+if /i not "!CUR!"=="%~2" exit /b 0
+echo Removing %~1 ^(junction^)...
+rd "%~1" >nul 2>&1
+fsutil reparsepoint query "%~1" >nul 2>&1
+if errorlevel 1 (echo   Done.) else (echo   [WARN]  Could not remove junction ^(in use^))
 exit /b 0
 
 :is_own_web

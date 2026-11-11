@@ -13,6 +13,9 @@ import { showTransparentAtom, hideBboxesAtom, fitToViewAtom, zoomInAtom, zoomOut
 import { api, decodeDetectionMask } from "@/lib/api";
 import { emitUi, logErr } from "@/store/logs";
 import { buildStrokePrompt } from "@/lib/strokePrompt";
+import { useMatte } from "@/hooks/useMatte";
+import { matteEdgeFeatherAtom, matteEdgeShiftAtom, matteGuideAtom, matteInvertAtom, matteLayersAtom, matteModeAtom, matteStrokesAtom } from "@/store/matte";
+import { applyAlphaControls, mergeAlphaCanvases } from "@/lib/matte";
 import {
   removeDetectionMask,
   removeDetectionIndexFromLayers,
@@ -52,6 +55,14 @@ export function Canvas({ interactive = true }: CanvasProps) {
   const [hideBboxes] = useAtom(hideBboxesAtom);
   const [sam3Instances] = useAtom(sam3InstancesAtom);
   const [selectedSam3Instance] = useAtom(selectedSam3InstanceAtom);
+  const [matteMode] = useAtom(matteModeAtom);
+  const [matteGuide] = useAtom(matteGuideAtom);
+  const [matteLayers] = useAtom(matteLayersAtom);
+  const [matteEdgeShift] = useAtom(matteEdgeShiftAtom);
+  const [matteEdgeFeather] = useAtom(matteEdgeFeatherAtom);
+  const [matteInvert] = useAtom(matteInvertAtom);
+  const [matteStrokes, setMatteStrokes] = useAtom(matteStrokesAtom);
+  const { run: runMatte } = useMatte();
   const [, setFitToView] = useAtom(fitToViewAtom);
   const [, setZoomIn] = useAtom(zoomInAtom);
   const [, setZoomOut] = useAtom(zoomOutAtom);
@@ -102,6 +113,23 @@ export function Canvas({ interactive = true }: CanvasProps) {
   sessionIdRef.current = sessionId;
   const perDetectionMasksRef = useRef(perDetectionMasks);
   perDetectionMasksRef.current = perDetectionMasks;
+  const matteModeRef = useRef(matteMode);
+  matteModeRef.current = matteMode;
+  const matteGuideRef = useRef(matteGuide);
+  matteGuideRef.current = matteGuide;
+  const matteStrokesRef = useRef(matteStrokes);
+  matteStrokesRef.current = matteStrokes;
+  const matteCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const matteAlpha = useMemo(() => {
+    const visible = matteLayers.flatMap((layer) =>
+      layer.visible && layer.rawAlpha ? [layer.rawAlpha.canvas] : []
+    );
+    const merged = mergeAlphaCanvases(visible);
+    return merged ? applyAlphaControls(merged, matteEdgeShift, matteEdgeFeather, matteInvert) : null;
+  }, [matteLayers, matteEdgeShift, matteEdgeFeather, matteInvert]);
+  matteCanvasRef.current = matteAlpha;
+  const matteActiveRef = useRef(false);
+  matteActiveRef.current = matteMode;
 
   const canvasRefs = useMemo(
       () => ({ containerRef, imageCanvasRef, drawCanvasRef, maskCanvasRef, detectCanvasRef, imageRef }),
@@ -119,6 +147,8 @@ export function Canvas({ interactive = true }: CanvasProps) {
       featherRadiusRef,
       sam3InstancesRef,
       selectedSam3InstanceRef,
+      matteAlphaRef: matteCanvasRef,
+      matteActiveRef,
     }),
     []
   );
@@ -200,7 +230,7 @@ export function Canvas({ interactive = true }: CanvasProps) {
     if (!imageRef.current) return;
     invalidateCache();
     requestAnimationFrame(() => redraw());
-  }, [masks, objectMasks, perDetectionMasks, detections, featherRadius, sam3Instances, redraw, invalidateCache]);
+  }, [masks, objectMasks, perDetectionMasks, detections, featherRadius, sam3Instances, matteAlpha, matteLayers, redraw, invalidateCache]);
 
   useEffect(() => {
     if (!imageRef.current) return;
@@ -352,6 +382,7 @@ export function Canvas({ interactive = true }: CanvasProps) {
       const active = document.activeElement as HTMLElement | null;
       if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) active.blur();
       if (!interactive || !imageRef.current || isPanningRef.current || detectMode) return;
+      if (matteMode && matteGuide !== "stroke") return;
       if (e.button === 1 || e.shiftKey) return;
       const pos = getPointerPos(e);
       if (!isInsideImage(pos)) {
@@ -361,18 +392,22 @@ export function Canvas({ interactive = true }: CanvasProps) {
       e.preventDefault();
       isDrawingRef.current = true;
       strokeIdRef.current += 1;
-      activeStrokeModeRef.current = e.button === 2 ? "negative" : toolMode;
+      activeStrokeModeRef.current = matteMode
+        ? "positive"
+        : e.button === 2
+          ? "negative"
+          : toolMode;
       const imgPt = canvasToImage(pos.x, pos.y);
       strokePointsRef.current = [imgPt];
       drawBrushPreview([imgPt]);
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     },
-    [canvasToImage, getPointerPos, drawBrushPreview, toolMode, detectMode, isInsideImage, isPanningRef, isDrawingRef, strokePointsRef, interactive]
+    [canvasToImage, getPointerPos, drawBrushPreview, toolMode, detectMode, matteMode, matteGuide, isInsideImage, isPanningRef, isDrawingRef, strokePointsRef, interactive]
   );
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (e.button === 2 && !isDrawingRef.current && !isPanningRef.current && imageRef.current && !detectMode && interactive) {
+      if (e.button === 2 && !matteMode && !isDrawingRef.current && !isPanningRef.current && imageRef.current && !detectMode && interactive) {
         const pos = getPointerPos(e);
         if (!isInsideImage(pos)) return;
         e.preventDefault();
@@ -384,7 +419,7 @@ export function Canvas({ interactive = true }: CanvasProps) {
         drawBrushPreview([imgPt]);
       }
     },
-    [canvasToImage, getPointerPos, drawBrushPreview, detectMode, isInsideImage, isDrawingRef, isPanningRef]
+    [canvasToImage, getPointerPos, drawBrushPreview, detectMode, matteMode, matteGuide, isInsideImage, isDrawingRef, isPanningRef]
   );
 
   const handlePointerMove = useCallback(
@@ -393,7 +428,7 @@ export function Canvas({ interactive = true }: CanvasProps) {
         const pos = getPointerPos(e);
         if (!interactive) {
           setCursorMode(isInsideImage(pos) ? "grab" : "not-allowed");
-        } else if (detectMode) {
+        } else if (detectMode || (matteMode && matteGuide !== "stroke")) {
           setCursorMode("pointer");
         } else if (isInsideImage(pos)) {
           setCursorMode("crosshair");
@@ -414,7 +449,7 @@ export function Canvas({ interactive = true }: CanvasProps) {
       }
       drawBrushPreview(strokePointsRef.current);
     },
-    [canvasToImage, getPointerPos, drawBrushPreview, isInsideImage, detectMode, isDrawingRef, isPanningRef, strokePointsRef, interactive]
+    [canvasToImage, getPointerPos, drawBrushPreview, isInsideImage, detectMode, matteMode, matteGuide, isDrawingRef, isPanningRef, strokePointsRef, interactive]
   );
 
   const handlePointerUp = useCallback(async () => {
@@ -451,11 +486,38 @@ export function Canvas({ interactive = true }: CanvasProps) {
 
     const showRingTimer = setTimeout(() => startProcessingRing(cx, cy), 150);
 
-    const res = await predict({ object_id: activeObjectIdRef.current, points: sampled, labels });
+    if (matteModeRef.current && matteGuideRef.current === "stroke") {
+      const previous = matteStrokesRef.current;
+      const positivePoints: number[][] = [];
+      const positiveLabels: number[] = [];
+      previous.points.forEach((point, index) => {
+        if (previous.labels[index] === 1) {
+          positivePoints.push(point);
+          positiveLabels.push(1);
+        }
+      });
+      const next = {
+        points: [...positivePoints, ...sampled],
+        labels: [...positiveLabels, ...sampled.map(() => 1)],
+      };
+      setMatteStrokes(next);
+      await runMatte({ guide: "stroke", points: next.points, labels: next.labels });
+      clearTimeout(showRingTimer);
+      stopProcessingRing();
+      return;
+    }
+
+    const res = await predict({
+      object_id: activeObjectIdRef.current,
+      points: sampled,
+      labels,
+      bboxes: prompt.bboxes,
+      stroke_radius: Math.max(2, Math.round(brushSize / 2)),
+    });
     clearTimeout(showRingTimer);
     if (strokeIdRef.current === strokeId) stopProcessingRing();
     if (!res) return;
-  }, [predict, brushSize, startProcessingRing, stopProcessingRing, isDrawingRef, strokePointsRef, activeStrokeModeRef, drawCanvasRef, imageRef]);
+  }, [predict, runMatte, setMatteStrokes, brushSize, startProcessingRing, stopProcessingRing, isDrawingRef, strokePointsRef, activeStrokeModeRef, drawCanvasRef, imageRef]);
 
   const handleDetectClick = useCallback(
     async (e: React.MouseEvent) => {

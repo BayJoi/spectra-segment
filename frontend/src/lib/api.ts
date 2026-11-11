@@ -7,8 +7,17 @@ import type {
   UploadResponse,
 } from "./types";
 import type { PackedMask } from "./mask";
+import type { MatteModelInfo, MatteResponse } from "./matte";
 
-export const BASE = "http://localhost:8000";
+function apiOrigin(): string {
+  if (typeof window === "undefined") return "http://localhost:8000";
+  const host = window.location.hostname;
+  // The launchers serve the UI from 127.0.0.1:3000 and the API binds there too.
+  // Keep the API on the same hostname instead of forcing a localhost round trip.
+  return `http://${host.includes(":") ? `[${host.replace(/^\[|\]$/g, "")}]` : host}:8000`;
+}
+
+export const BASE = apiOrigin();
 
 export class ApiError extends Error {
   readonly status: number;
@@ -89,7 +98,7 @@ function resetToken(): void {
 
 function getToken(): Promise<string> {
   if (_token) return Promise.resolve(_token);
-  _tokenPromise ??= fetch(`${BASE}/api/token`)
+  _tokenPromise ??= fetch(`${BASE}/api/token`, { cache: "no-store" })
     .then((res) => {
       if (!res.ok) throw new Error("Failed to get local token");
       return res.json() as Promise<{ token: string }>;
@@ -103,6 +112,39 @@ function getToken(): Promise<string> {
       throw err;
     });
   return _tokenPromise;
+}
+
+/** Fetch a current token for a new SSE connection, including reconnects. */
+export async function getFreshToken(): Promise<string> {
+  const res = await fetch(`${BASE}/api/token`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to get local token");
+  const data = (await res.json()) as { token?: unknown };
+  if (typeof data.token !== "string" || !data.token) {
+    throw new Error("Invalid local token response");
+  }
+  _token = data.token;
+  _tokenPromise = null;
+  return _token;
+}
+
+async function postBlob(path: string, body: unknown): Promise<Blob> {
+  const send = (token: string) =>
+    fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Local-Token": token },
+      body: JSON.stringify(body),
+    });
+
+  let res = await send(await getToken());
+  if (res.status === 401) {
+    resetToken();
+    res = await send(await getToken());
+  }
+  if (!res.ok) {
+    const text = (await res.text()).replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 300).trim();
+    throw new ApiError(res.status, `Export failed: ${res.status} ${text}`);
+  }
+  return res.blob();
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -126,7 +168,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  createSession: (modelName: string) =>
+  createSession: (modelName: string | null) =>
     apiFetch<CreateSessionResponse>("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -140,12 +182,19 @@ export const api = {
 
   releaseSession: (sessionId: string): void => {
     const base = `${BASE}/api/sessions/${sessionId}`;
-    if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+    const token = _token;
+    if (
+      token &&
+      typeof navigator !== "undefined" &&
+      typeof navigator.sendBeacon === "function"
+    ) {
       try {
-        navigator.sendBeacon(`${base}/release`, "release");
+        navigator.sendBeacon(
+          `${base}/release?token=${encodeURIComponent(token)}`,
+          "release"
+        );
       } catch {}
     }
-    const token = _token;
     if (!token) return;
     fetch(base, {
       method: "DELETE",
@@ -206,6 +255,7 @@ export const api = {
       points?: number[][];
       labels?: number[];
       bboxes?: number[];
+      stroke_radius?: number;
     }
   ) =>
     apiFetch<RawPredictResponse>(`/api/sessions/${sessionId}/predict`, {
@@ -301,6 +351,46 @@ export const api = {
         body: JSON.stringify(params),
       }
     ),
+
+  listMatteModels: () => apiFetch<{ models: MatteModelInfo[] }>("/api/matte/models"),
+
+  runMatte: (
+    sessionId: string,
+    params: {
+      model: string;
+      guide: string;
+      points?: number[][];
+      labels?: number[];
+      bbox?: number[];
+      text?: string;
+      edge_shift?: number;
+      edge_feather?: number;
+      invert?: boolean;
+      crop_margin?: number;
+      stroke_radius?: number;
+    }
+  ) =>
+    apiFetch<MatteResponse>(`/api/sessions/${sessionId}/matte`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    }),
+
+  clearMatte: (sessionId: string) =>
+    apiFetch<{ status: string }>(`/api/sessions/${sessionId}/matte/clear`, {
+      method: "POST",
+    }),
+
+  exportImage: (
+    sessionId: string,
+    params: {
+      files: { mask_b64: string }[];
+      format?: string;
+      background_color?: number[];
+      feather_radius?: number;
+    }
+  ): Promise<Blob> =>
+    postBlob(`/api/sessions/${sessionId}/export-image`, params),
 
   getLogs: (limit: number = 300) =>
     apiFetch<{ entries: { level: string; message: string }[]; total: number }>(

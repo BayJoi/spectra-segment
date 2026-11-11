@@ -57,9 +57,11 @@ backend\utils\humantime.py           format_duration
 backend\utils\logctx.py              contextvars for rid / sid
 ```
 
-The AMD fork adds two files with no CPU/CUDA counterpart: `amd_gfx.py` (gfx target to
-`HSA_OVERRIDE_GFX_VERSION`) and `detect_amd_gpu.py` (the launcher's standalone gfx/VRAM
-probe, which runs before torch is importable). Everything else mirrors this map;
+The AMD fork adds two files with no CPU/CUDA counterpart: `amd_gfx.py` (the complete
+Windows TheRock target registry and support levels) and `detect_amd_gpu.py` (the
+installer probe that scores adapters and writes the hardware/launcher config before
+torch is importable). `HSA_OVERRIDE_GFX_VERSION` is never derived automatically;
+only an explicit `AMD_HSA_OVERRIDE` is applied. Everything else mirrors this map;
 section 9 lists the files allowed to differ.
 
 ---
@@ -85,13 +87,18 @@ backend_amd_gpu\.venv\Scripts\python.exe -m py_compile backend_amd_gpu\main.py b
 set PYTHONPATH=<repo root>
 backend_amd_gpu\.venv\Scripts\python.exe -X utf8 -c "import importlib; importlib.import_module('backend.main'); importlib.import_module('backend_amd_gpu.main')"
 
-# GPU smoke test after any wheel change
+# GPU and catalogue checks after any wheel change
 checks\check_gpu.bat
+checks\check_gpu_amd.bat --all-models
+checks\check_gpu_nvidia.bat
 ```
 
-`check_gpu.bat` does **not** reproduce the launchers' environment (no
-`PYTORCH_HIP_ALLOC_CONF`, `HSA_OVERRIDE_GFX_VERSION`, attention toggles or hard cap),
-so it cannot catch a regression caused by a launcher-set variable.
+`check_gpu.bat` auto-selects AMD, NVIDIA or CPU. The explicit wrappers avoid that
+choice on mixed machines. The checker applies the backend cache paths and the
+8 GB matte cap, but it does **not** reproduce every launcher setting
+(`PYTORCH_HIP_ALLOC_CONF`, generated per-card settings, attention toggles or the
+hard cap). It therefore complements, rather than replaces, a launcher smoke test.
+NVIDIA remains untested on physical hardware even when its code path runs.
 
 ---
 
@@ -109,7 +116,7 @@ ServerErrorMiddleware
         -> HostValidation      (host must be 127.0.0.1/localhost; a port, if sent, must be 8000)
           -> RateLimit         (300 req / 60 s / IP)
             -> RequestSizeLimit (50 MiB)
-              -> TokenAuth      (X-Local-Token, except the exempt paths)
+              -> TokenAuth      (token except health/token; SSE/release may use ?token=)
                 -> ExceptionMiddleware
                   -> router
 ```
@@ -118,15 +125,14 @@ Auth is a `secrets.token_urlsafe(32)` generated once at startup, never written t
 disk, and handed to the frontend by `GET /api/token`. Comparison runs on **bytes**,
 because headers arrive latin-1 and a non-ASCII token used to raise `TypeError`.
 
-Auth-exempt paths: `/api/token`, `/health`, the SSE endpoints (`/api/logs/stream`,
-`/api/models/stream`), and `POST /api/sessions/{id}/release` (called by
-`navigator.sendBeacon`, which cannot set headers). `/api/logs` itself requires the
-token.
+Auth is required for every endpoint except `/api/token` and `/health`.
+`EventSource` and `navigator.sendBeacon` cannot set request headers, so the two SSE
+endpoints and `POST /api/sessions/{id}/release` also accept `?token=...`; no other
+path accepts a query token. `/api/logs` itself requires the token header.
 
-SSE cannot carry the header, so it has its own caps instead: `/api/logs/stream` allows
-5 connections per IP with a 1800 s maximum lifetime, and both streams share one global
-cap of 100 subscribers (503 when full). `/api/models/stream` has no per-IP cap and no
-lifetime cap - it closes only with the client.
+SSE keeps its own resource caps: each stream allows 5 connections per IP with a
+1800 s maximum lifetime, and both share one global cap of 100 subscribers (503
+when full). `/api/models/stream` also stops after the same lifetime.
 
 Every handler that touches the manager runs on the threadpool through
 `asyncio.to_thread`; the token route and the SSE streams stay on the event loop. The
@@ -144,13 +150,13 @@ Auth column: **Y** = token required, **-** = exempt.
 | GET | `/health` | - | liveness + active session count |
 | GET | `/api/token` | - | bootstrap token |
 | GET | `/api/logs` | Y | tail of the 300-entry ring |
-| GET | `/api/logs/stream` | - | SSE log stream |
+| GET | `/api/logs/stream` | Y | SSE log stream; accepts `?token=` |
 | GET | `/api/models/status` | Y | one-shot model + detector list |
-| GET | `/api/models/stream` | - | SSE model status, 3 s poll |
+| GET | `/api/models/stream` | Y | SSE model status, 3 s poll; accepts `?token=` |
 | POST | `/api/sessions` | Y | `CreateSessionRequest` -> `CreateSessionResponse` |
 | GET | `/api/sessions/{id}` | Y | session info |
 | DELETE | `/api/sessions/{id}` | Y | destroy |
-| POST | `/api/sessions/{id}/release` | - | teardown from `sendBeacon` |
+| POST | `/api/sessions/{id}/release` | Y | teardown from `sendBeacon`; accepts `?token=` |
 | POST | `/api/sessions/{id}/image` | Y | upload, decode, resize, encode |
 | POST | `/api/sessions/{id}/predict` | Y | `StrokeRequest` -> `PredictResponse` |
 | POST | `/api/sessions/{id}/segment-batch` | Y | `SegmentBatchRequest` |
@@ -160,11 +166,15 @@ Auth column: **Y** = token required, **-** = exempt.
 | POST | `/api/sessions/{id}/sam3-undo` \| `/redo` | Y | -> `Sam3PromptResponse` |
 | POST | `/api/sessions/{id}/sam3-remove-instance` | Y | `Sam3RemoveInstanceRequest` |
 | POST | `/api/settings/sam3` | Y | `Sam3SettingsRequest` |
+| GET | `/api/matte/models` | Y | matte model catalog + download/load state |
+| POST | `/api/sessions/{id}/matte` | Y | `MatteRequest` -> `{alpha, width, height, model, guide, box, ms}` |
+| POST | `/api/sessions/{id}/matte/clear` | Y | drop the stored alpha |
 | GET | `/api/detectors` | Y | detector catalog + download/load state |
 | POST | `/api/detectors/load` | Y | `LoadDetectorRequest` |
 | POST | `/api/sessions/{id}/detect` | Y | `DetectRequest` |
 | POST | `/api/sessions/{id}/export-zip` | Y | `ExportZipRequest` -> `{data, format, count}` (base64 zip) |
 | POST | `/api/sessions/{id}/export-image` | Y | `ExportImageRequest` -> raw image bytes (`image/png` / `image/jpeg`) |
+| POST | `/api/sessions/{id}/export-matte` | Y | `MatteExportRequest` -> raw cutout bytes |
 
 ### Request models
 
@@ -172,7 +182,8 @@ All of these are defined in `main.py` with `field_validator`s that reject
 out-of-range input **before** the manager sees it.
 
 ```
-CreateSessionRequest   model_name: str = "sam2.1_b.pt"   (must be in the allowlist)
+CreateSessionRequest   model_name: str | None = None    (None = matte-only session,
+                       otherwise must be in the allowlist)
 StrokeRequest          object_id: int = 0, points: [[x,y]] (<=10000, |c|<=10000),
                        labels: [0|1] (<=10000), bboxes: [x1,y1,x2,y2]
 SegmentBatchRequest    bboxes: [[x1,y1,x2,y2]] (1..200, all coordinates >= 0)
@@ -186,7 +197,16 @@ Sam3SettingsRequest    keep_loaded: bool | None, encode_dim: int | None (384..15
 ExportZipRequest       root: str (<=200), files: [{path, mask_b64}] (<=1000),
                        include_whole: bool, format: "png"|"jpg"|"jpeg",
                        background_color: [r,g,b] | None, feather_radius: int (0..50)
-ExportImageRequest     files, format, background_color, feather_radius
+ExportImageRequest     files: [{mask_b64}] (<=1000), format, background_color,
+                       feather_radius
+MatteRequest           model: str (must be in MATTE_MODELS),
+                       guide: "auto"|"stroke"|"text"|"box",
+                       points/labels/bbox (same bounds as StrokeRequest),
+                       text: str (<=500), confidence: float | None,
+                       max_detections: 1..4, crop_margin: 0.0..0.5,
+                       stroke_radius: 1..400 | None,
+                       edge_shift: -50..50, edge_feather: 0..50, invert: bool
+MatteExportRequest     format: "png"|"jpg"|"jpeg", background_color: [r,g,b] | None
 ```
 
 ### Response models
@@ -196,6 +216,7 @@ CreateSessionResponse  session_id: str, model_name: str
 PredictResponse        scores: [float], object_masks: {oid: b64 png},
                        object_history: {oid: {undo,redo,strokes,has_mask}}
 Sam3PromptResponse     masks: [b64 png], scores: [float], bboxes: [[x1,y1,x2,y2]]
+MatteResponse          alpha: b64 png, width, height, model, guide, box, ms
 ```
 
 `object_masks` is the only place a brush response carries masks: each subject
@@ -280,13 +301,57 @@ and each subject's mask history.
      semantics exactly, which is the state the user was looking at.
 3. **Lifetime.** `create_session` reserves its slot under the lock; `evict_idle_sessions`
    sweeps every 10 s and reclaims idle SAM3 models; `last_active` is refreshed by
-   every working endpoint so an active session is not evicted mid-edit.
+   every working endpoint so an active session is not evicted mid-edit. A `None`
+   model name skips `get_or_load_model`, so a matte-only session uploads and mats
+   without a segmentation backend; predict, segment-batch, detect and SAM 3 answer 400
+   until one is loaded.
 
 ### Adding a session-scoped feature
 
 Do **not** keep per-subject counters on the client. Return `object_history` from the
 mutating endpoint and let the client adopt it. That is the one rule that keeps undo
 and redo correct across deletes, recoveries and id reuse.
+
+---
+
+### Matte state and residency
+
+`Session.matte` is a `MatteState` (`model`, `alpha` as uint8, cached `alpha_png`,
+`guide`, `box`) or `None`. The server keeps one latest alpha per session,
+so a new run replaces the old one. The editor's multi-layer model and its per-layer
+undo/redo live in the frontend (`lib/matte.ts`, `store/matte.ts`, `useMatte.ts`);
+layer alphas are not stored server-side. `run_matte` resolves the ROI, calls the
+backend, applies `edge_shift` / `edge_feather` / `invert` when the API asks for them,
+and stores the result under `session.lock`. The UI sends those three as neutral and
+applies them locally.
+
+Matte models live in `_matte_backends` with `_current_matte`, separate from
+`_loaded_models`. `_evict_loaded_models` evicts them too (it takes `keep_matte`), so
+loading a matte model first unloads the segmentation model and detector, then attempts
+the load. It applies the generated `SPECTRA_MATTE_INPUT_SIZE` cap (1024 px on cards below
+12 GB) so heavy HR checkpoints stay below the card limit. Switching back to Brush or
+Detect reloads SAM on demand; the matte model
+stays until another load needs the VRAM or the last session is destroyed.
+
+The first uncached load emits `matte-downloading` instead of `matte-loading`, then
+`matte-loaded`; the header turns those into "Downloading matte model..." and refreshes
+the matte model list when the load finishes. The matte backend routes stderr through
+`StderrInterceptor` with `dl` metadata (name, phase, percent, file), so both the
+simple activity feed and the Developer view show real download progress rows. The
+console's Models section fetches `/api/models/status` and `/api/matte/models`, lists
+matte checkpoints separately, labels heavy entries, and never disables one based on
+GPU size.
+
+Each matte layer stores its own model, so switching the model on one subject does not
+change another. Every matte checkpoint is selectable and heavy entries are labelled
+`Heavy` in the picker. Loading evicts the segmentation model and any detector first,
+then attempts the load. The per-card input cap prevents an HR checkpoint from
+requesting a 2048² activation on an 8 GB card; the full 2048² path is reserved for
+cards with at least 12 GB. `list_matte_models` returns the catalog and loaded state only.
+
+Text guidance calls `manager.detect()`, loading Grounding DINO Tiny when no detector
+has ever been loaded. Detection unloads the segmentation model, which is already gone
+in matte mode, so the call costs the detector load and nothing else.
 
 ---
 
@@ -300,6 +365,7 @@ and redo correct across deletes, recoveries and id reuse.
 | `sam3_backend.py` | `SAM3Backend` | SAM 3 text prompts |
 | `grounding_detector.py` | `GroundingDetector` | Grounding DINO + Florence-2 + CogFlorence |
 | `yoloe_detector.py` | `YOLEDetector` | YOLOE + MobileCLIP |
+| `matte_backend.py` | `BiRefNetBackend`, `MatteModelSpec` | BiRefNet soft-alpha matting |
 
 Key facts to remember while editing them (full detail in `CODE_GUIDE.md` section 6):
 
@@ -307,7 +373,8 @@ Key facts to remember while editing them (full detail in `CODE_GUIDE.md` section
   Without it, every prompt builds a live autograd graph over the prompt encoder and
   decoder; with it, that memory is never allocated. Keep it.
 - Precision is decided at runtime by `_model_dtype()` / `*_QUANTIZE`; the AMD fork
-  sets `SPECTRA_DETECTOR_FP16=1` by default, the CUDA fork does not.
+  sets `SPECTRA_DETECTOR_FP16=1` in `run.cmd`, while the CUDA fork sets it from the
+  detected capability (on for Volta+, off for Maxwell/Pascal).
 - `torch.load` is patched to default `weights_only=True` in `UltralyticsBackend` and
   in `SAM3Backend` - that is the guard against arbitrary code execution from a
   malicious checkpoint. Keep it, and restore the original in `finally`.
@@ -318,6 +385,21 @@ Key facts to remember while editing them (full detail in `CODE_GUIDE.md` section
 - Florence returns no per-box score, so `_detect_florence` hardcodes `score = 1.0`;
   the confidence slider cannot filter Florence results.
 - `_nms` prefers `supervision` when importable, otherwise a hand-written greedy pass.
+- `matte_backend.py` runs the full image when no ROI is supplied. On a large image
+  with ROIs, and when the card cap is below the model's native input size, it runs
+  `_crop_matte` directly so the selected subject gets the available detail. On
+  smaller images, or at native HR input, it keeps the full-image alpha and filters it
+  with `_roi_component_mask`. Crops still use context margins to avoid empty alpha
+  inside uniform objects.
+- Grounding DINO and Florence snapshots are downloaded at the commit revisions in
+  `HF_MODEL_REVISIONS`. The revision is passed to `HfApi.model_info`,
+  `snapshot_download`, `hf_hub_download` and the direct `from_pretrained` fallback;
+  cached detector loads use `local_files_only=True` and the pinned snapshot directory.
+- BiRefNet loads with `trust_remote_code=True` at a pinned commit revision per model.
+  Never drop the revision: the remote code would then change under an installed copy.
+  Cached matte snapshots load with `local_files_only=True`; only a missing or unreadable
+  snapshot falls back to a pinned download. These weights are not in
+  `PUBLISHED_DIGESTS`; the Hub's own file hashes apply.
 
 ---
 
@@ -328,31 +410,56 @@ Read by the backend (defaults come from the launcher's memory profile):
 | Variable | Read by | Effect |
 |---|---|---|
 | `SPECTRA_FORCE_CPU` | `utils/device.py` | ignore all GPUs |
-| `SPECTRA_VRAM_FRACTION` | `manager.py` | soft VRAM budget before proactive eviction |
-| `SPECTRA_VRAM_HARD_CAP` | `main.py` | `set_per_process_memory_fraction`, default 0.90 |
+| `SPECTRA_VRAM_HARD_CAP` | `main.py` | `set_per_process_memory_fraction`, default 0.90; applied only when CUDA is used |
+| `SPECTRA_TF32` | `utils/cuda_profile.py` | set to `0` to disable TF32 on Ampere and newer |
+| `SPECTRA_MATTE_FP16` | `matte_backend.py` | fp16 autocast for BiRefNet on Volta+ (default on); off on Maxwell/Pascal; CPU stays fp32 |
+| `SPECTRA_CPU_RAM_MB` | `main.py` | process memory hard cap applied at startup |
 | `SPECTRA_KEEP_SEG_ON_DETECT` | `manager.py` | keep the SAM model resident during detection |
 | `SPECTRA_NO_CO_RESIDENCY` | `manager.py` | unload the segmentation model when a detector loads |
-| `SPECTRA_DETECTOR_FP16` | `grounding_detector.py` | fp16 detectors on GPU. Ignored on CPU |
+| `SPECTRA_DETECTOR_FP16` | `grounding_detector.py` | fp16 detectors on Volta+ (default on); off on Maxwell/Pascal. Ignored on CPU |
 | `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `utils/offline.py` | forced on while a cached HF model loads |
+| `YOLO_OFFLINE` | `main.py` | set to `1` before ultralytics loads, so it skips its DNS probe and PyPI update check |
 | `SAM2_OFFLOAD_ENCODER` | `ultralytics_backend.py` | park the SAM2 encoder on CPU between images |
-| `SAM2_QUANTIZE`, `SAM3_QUANTIZE` | SAM backends | working precision |
+| `SAM2_QUANTIZE`, `SAM3_QUANTIZE` | SAM backends | working precision; fp32 on CPU and Maxwell/Pascal, fp16 on Volta+ |
 | `SAM2_THREADS`, `SAM3_THREADS`, `SPECTRA_MAX_THREADS` | `torch_threads.py` | torch thread count / clamp |
 | `SAM2_CHANNELS_LAST`, `SAM3_CHANNELS_LAST` | SAM backends | channels-last format |
-| `SAM2_COMPILE`, `SAM3_COMPILE` | SAM backends | `torch.compile` after load (GPU only) |
+| `SAM2_COMPILE`, `SAM3_COMPILE` | SAM backends | Optional `torch.compile` after load. Default Inductor needs Triton, which the Windows ROCm wheel does not ship; the guarded path logs the failure and keeps eager execution. |
 | `SAM3_IDLE_UNLOAD_TIMEOUT` | `manager.py` | seconds before an idle SAM3 unloads |
 | `SPECTRA_MAX_HISTORY`, `SAM3_MAX_HISTORY`, `SPECTRA_MAX_OBJECTS`, `SPECTRA_MAX_SESSIONS` | `manager.py` | 200 / 100 / 50 / 100 |
 | `SPECTRA_UI_LOG_LEVEL` | `main.py` | SSE log filter, default `INFO` |
+| `SPECTRA_BACKEND_PORT` | `security.py` | port the Host check expects, default `8000` |
 | `SPECTRA_FLUSH_EVERY_REQUEST` | `main.py` | `torch.cuda.empty_cache()` after every request |
 | `SPECTRA_OMP_THREADS` | `run.cmd` | becomes `OMP_NUM_THREADS` |
-| `SPECTRA_LOG_MAX_MB`, `SPECTRA_LOG_BACKUPS` | `main.py` | log rotation, 10 MB / 3 backups |
+| `SPECTRA_LOG_FILE` | `main.py` | explicit path for this launch; default is a new timestamped file |
+| `SPECTRA_LOG_MAX_MB`, `SPECTRA_LOG_BACKUPS` | `main.py` | rotation safeguard, 10 MB / 3 backups |
+| `SPECTRA_ALLOW_CPU_FALLBACK` | both backends | automatic CPU retry on placement/OOM, default enabled; `0` disables |
+| `SPECTRA_MATTE_INPUT_SIZE` | both backends | BiRefNet input cap, 1024 below 12 GB / 2048 at 12 GB+ on NVIDIA |
+
+On the CUDA fork, `utils/cuda_profile.py` fills only unset precision variables before
+model imports: fp32 on Maxwell/Pascal, fp16 on Volta and newer, and TF32 on Ampere and
+newer (`SPECTRA_TF32=0` opts out). It also checks `torch.cuda.get_arch_list()` against
+the detected compute capability and falls back to CPU when the wheel has no kernel for
+the card. The AMD fork keeps its own `SPECTRA_DETECTOR_FP16=1` and does not use this
+module. See [`docs/NVIDIA.md`](NVIDIA.md) for the full matrix.
+
+Both forks enable automatic CPU fallback on model placement failure or OOM unless
+`SPECTRA_ALLOW_CPU_FALLBACK` is set to `0`/`false`/`no`/`off`/`disabled`. The retry is
+per model, not a silent permanent device switch, and explicit CPU selections still work.
+Each launch writes a new `logs/backend_<YYYYmmdd_HHMMSS>.log`; `SPECTRA_LOG_FILE`
+overrides that path.
 
 Portability cache redirects (`HF_HOME`, `HF_HUB_CACHE`, `TORCH_HOME`, `TRITON_CACHE_DIR`,
 `MPLCONFIGDIR`, `XDG_*`, `TEMP`/`TMP`, ...) are set in three places that must stay in
 agreement: `start_amd.bat`, `backend\run.cmd`, and `main.py` at import time. The copy
 in `main.py` is the safety net for a hand-started backend.
 
-Saved but **never enforced**: `SPECTRA_VRAM_MODE`, `SPECTRA_CPU_THREADS` (launcher
-echo only) and `SPECTRA_CPU_RAM_MB` (saved and shown, read by nothing).
+VRAM eviction uses actual free memory, not a per-profile budget: 2048 MB of headroom
+before an encode and twice the estimated weights plus 512 MB before a load. The hard
+caps are `SPECTRA_VRAM_HARD_CAP` and `SPECTRA_CPU_RAM_MB`.
+
+`SPECTRA_VRAM_MODE` and `SPECTRA_CPU_THREADS` are launcher echo only.
+`SPECTRA_CPU_RAM_MB` is enforced by `main.py` at startup; a rejected limit is logged
+as a warning.
 
 ---
 
@@ -362,6 +469,7 @@ These files are **byte-identical** and must stay that way:
 `utils/security.py`, `utils/compositing.py`, `utils/torch_threads.py`,
 `utils/stderr_progress.py`, `utils/model_integrity.py`, `utils/net_check.py`,
 `utils/offline.py`, `utils/humantime.py`, `utils/logctx.py`,
+`models/matte_backend.py`,
 `utils/__init__.py`, `models/__init__.py`, `models/ultralytics_backend.py` and
 `requirements.txt`.
 
@@ -372,7 +480,7 @@ Files that legitimately differ:
 | `main.py` | AMD-only gfx/HIP preamble, MIOpen cache dirs, `torch` vs `_torch` aliasing, the `torch.version.hip` branch, `cudnn.benchmark=False` on HIP, `matmul.allow_fp16_reduced_precision_reduction` on HIP, `_log_gpu_mem()` around detect, the AMD no-GPU warning, and `backend_amd_gpu.*` import paths |
 | `utils/device.py` | AMD adds `_detect_rocm()`. **Both** forks only claim NVIDIA when `torch.version.cuda` is set, so a ROCm build is never mislabelled on the CUDA/CPU side either |
 | `models/sam3_backend.py` | AMD also wraps the SAM3 **encode** in `cudnn_disabled` (both forks already wrap the decode paths), and its missing-`clip` hint names `install_amd.bat`. Nothing else: model resolution and download live in `utils/model_integrity.ensure_model_file()` for both forks |
-| `models/grounding_detector.py` | One absolute import path (the `net_check` import inside the download path). The per-detect `empty_cache` and the 1024-square Florence pre-warm are in both forks |
+| `models/grounding_detector.py` | One absolute import path (the `net_check` import inside the download path). The per-detect `empty_cache`, the OOM traceback clearing before it, and the 1024-square Florence pre-warm are in both forks |
 | `models/yoloe_detector.py` | Three absolute import paths (`net_check`, `model_integrity` twice) |
 | `models/manager.py` | Three absolute import paths (`net_check`, `model_integrity` twice) |
 | `models/base.py`, `models/detector_base.py` | `...` vs `pass` in the abstract stubs |
@@ -424,6 +532,18 @@ the two classes reload and re-encode differently.
 3. If it is HuggingFace-hosted, confirm `hf_weights_downloaded` reads the HF cache and
    that the load goes through `offline_guard(True)`.
 
+### Add a matte model
+
+1. Add a `MatteModelSpec` to `MATTE_MODELS` in `models/matte_backend.py` with the
+   repo id, **pinned commit revision**, input size, tier, perf string and weight
+   estimate. Put a clear Heavy/Medium/Light label in `perf`; do not add a VRAM
+   compatibility gate or a per-model hardware limit.
+2. Confirm `AutoModelForImageSegmentation.from_pretrained(repo_id, revision=...,
+   trust_remote_code=True)` loads it.
+3. Mirror `matte_backend.py` to the other fork; it is byte-identical.
+4. Run it once on the target card and record the warm time and peak VRAM in
+   `docs/modes/MATTE.md`.
+
 ### Add a detector
 
 1. Register it in `GroundingDetector` or `YOLEDetector` with its `tier` and `perf`
@@ -435,8 +555,10 @@ the two classes reload and re-encode differently.
 
 ### Force offline / allow a download
 
-Wrap cached loads in `offline_guard(True)`. Call with `local_files_only=False` to make
-the guard permissive for a download. Never edit the read-only HF model cache.
+Wrap cached detector loads in `offline_guard(True)`. Call with
+`local_files_only=False` to make the guard permissive for a download. Matte uses
+`local_files_only=True` for a cached snapshot and only falls back to a pinned download
+when that snapshot cannot be loaded. Never edit the read-only HF model cache.
 
 ---
 
@@ -449,8 +571,11 @@ the guard permissive for a download. Never edit the read-only HF model cache.
   outside it**, on purpose: a full-size PNG encode must not stall stroke appends.
   The list therefore reflects the moment of the read, and a mask computed during the
   encode is picked up by the next response.
-- **Export memory is unbounded.** `export-zip` builds the whole archive in a
-  `BytesIO` and base64-encodes it into one JSON field.
+- **Export memory is unbounded for ZIP.** `export-zip` builds the whole archive in a
+  `BytesIO` and base64-encodes it into one JSON field. The direct `export-image`
+  path returns one encoded image and is the preferred path for multi-layer work.
+  `format` applies to every ZIP entry and extensions are rewritten to match; JPEG
+  without `background_color` uses white because it cannot store alpha.
 - **Session memory is unbounded.** Worst case ~3.5 GB for 50 brush subjects, or
   ~6-13 GB for a 100-prompt SAM3 history at 30 instances each. `MAX_SESSIONS = 100`
   limits the count only.
@@ -462,10 +587,9 @@ the guard permissive for a download. Never edit the read-only HF model cache.
   detectors use none, so concurrent loads can leave the real stderr replaced.
 - **`start.bat` / `stop.bat` kill any process whose command line contains `main:app`**,
   which includes the AMD backend.
-- **`detect_amd_gpu.py` reports 0 MB VRAM for whole GPU families** (Strix Point,
-  Strix Halo, Krackan, Phoenix, Van Gogh, Rembrandt, Mendocino, Instinct).
-  `setup_memory.ps1` then silently substitutes a fallback budget. Navi 24 is not in
-  that group: RX 6500/6400 report 4096 MB.
+- **Integrated GPUs have no dedicated VRAM figure.** The detector reports 0 MB for
+  iGPUs and selects a conservative low/balanced profile from the target registry;
+  it does not claim a dedicated VRAM size that does not exist.
 - **`sam3.pt` is fetched from a community mirror** with a digest that cannot be
   confirmed against any official source.
 
@@ -476,5 +600,10 @@ the guard permissive for a download. Never edit the read-only HF model cache.
 `ultralytics` is **AGPL-3.0**. Because the backend links it, the combined,
 distributed work is AGPL-3.0, and running it as a network service triggers AGPL-3.0
 section 13. The Meta SAM 3 weights are governed by the Meta SAM License, which is separate
-from and in addition to the code license. See `THIRD-PARTY-LICENSES.txt` before
-distributing anything.
+from and in addition to the code license.See `THIRD-PARTY-LICENSES.txt` before distributing anything.
+
+The BiRefNet code and the ten catalogued matte checkpoints are MIT-licensed, which is
+why matte mode can bundle them. All ten checkpoints have measured performance on
+the tested RX 6600. SAM2Matting was evaluated and rejected: its weights are
+CC BY-NC 4.0 and its requirements pin NVIDIA-only `torch-tensorrt`. The full
+reasoning is in `docs/modes/MATTE.md` section 9.

@@ -93,7 +93,7 @@ function ShortcutRow({ keys, label }: { keys: string[]; label: string }) {
         {keys.map((k) => (
           <kbd
             key={k}
-            className="inline-flex items-center justify-center min-w-[22px] h-5 px-1.5 bg-neutral-900/80 border border-neutral-800/60 rounded-md text-[10px] text-neutral-400 font-mono"
+            className="inline-flex items-center justify-center min-w-[22px] h-5 px-1.5 bg-neutral-900/80 border border-neutral-800/60 rounded-md text-[10px] text-neutral-400 font-sans tabular-nums"
           >
             {k}
           </kbd>

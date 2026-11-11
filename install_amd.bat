@@ -38,10 +38,10 @@ set "WEB_DIR=%AMD_DIR%\web"
 if exist "%VENV_DIR%\Scripts\python.exe" (
     echo   [INFO]  AMD venv already exists at %VENV_DIR%
     if exist "%WEB_DIR%\node_modules\vite\package.json" (
-        echo           Frontend workspace ready - nothing to do.
-        goto :done
+        echo           Frontend workspace ready.
+    ) else (
+        echo   [WARN]  Frontend workspace is incomplete - continuing setup.
     )
-    echo   [WARN]  Frontend workspace is incomplete - continuing setup.
 )
 
 echo   [INFO]  ROCm runtime check...
@@ -102,44 +102,41 @@ echo   [ OK ]  venv created at %VENV_DIR%
 
 :venv_ready
 
-call :section "[ 4 / 8 ]  GPU detection"
+call :section "[ 4 / 8 ]  GPU detection and per-card profile"
 set "AMD_GFX="
+set "HARDWARE_CFG=%AMD_DIR%\spectra_amd_hardware.cfg"
+set "LAUNCHER_CFG=%AMD_DIR%\spectra_launcher.cfg"
 
-if defined AMD_GFX_OVERRIDE set "AMD_GFX=%AMD_GFX_OVERRIDE%"& echo   [INFO]  Using user-specified arch: !AMD_GFX!& goto :gpu_detected
-
-"%VENV_DIR%\Scripts\python.exe" "%AMD_DIR%\detect_amd_gpu.py" >"%AMD_DIR%\.gpu_arch.txt" 2>nul
-if exist "%AMD_DIR%\.gpu_arch.txt" for /f "usebackq delims=" %%a in ("%AMD_DIR%\.gpu_arch.txt") do if not defined AMD_GFX set "AMD_GFX=%%a"
-del "%AMD_DIR%\.gpu_arch.txt" 2>nul
-if defined AMD_GFX goto :gpu_detected
-
-set "DEV_ID="
-powershell -NoProfile -Command "try{((Get-CimInstance Win32_VideoController|?{$_.PNPDeviceID -match 'VEN_1002'}).PNPDeviceID -replace '.*DEV_([0-9A-F]{4}).*','$1')}catch{}" >"%AMD_DIR%\.gpu_id.txt" 2>nul
-if exist "%AMD_DIR%\.gpu_id.txt" for /f "usebackq delims=" %%a in ("%AMD_DIR%\.gpu_id.txt") do set "DEV_ID=%%a"
-del "%AMD_DIR%\.gpu_id.txt" 2>nul
-if defined DEV_ID if /i "!DEV_ID!"=="744c" set "AMD_GFX=gfx1100"
-if defined DEV_ID if /i "!DEV_ID!"=="73bf" set "AMD_GFX=gfx1030"
-if defined DEV_ID if /i "!DEV_ID!"=="73ff" set "AMD_GFX=gfx1032"
-if defined DEV_ID if /i "!DEV_ID!"=="731f" set "AMD_GFX=gfx1010"
-if defined DEV_ID if /i "!DEV_ID!"=="1681" set "AMD_GFX=gfx1035"
-if defined DEV_ID if /i "!DEV_ID!"=="163f" set "AMD_GFX=gfx1033"
-if defined DEV_ID if /i "!DEV_ID!"=="15bf" set "AMD_GFX=gfx1103"
-if defined DEV_ID if /i "!DEV_ID!"=="150e" set "AMD_GFX=gfx1150"
-if defined DEV_ID if /i "!DEV_ID!"=="7590" set "AMD_GFX=gfx1200"
-if defined DEV_ID if /i "!DEV_ID!"=="7550" set "AMD_GFX=gfx1201"
-if defined AMD_GFX echo   [INFO]  Matched device maps to !AMD_GFX!& goto :gpu_detected
-
-echo   [FAIL]  GPU detection failed.
-echo           Set AMD_GFX_OVERRIDE=gfxXXXX to skip detection, e.g.:
-echo             set AMD_GFX_OVERRIDE=gfx1100 ^&^& install_amd.bat
-echo           Supported: gfx1010-1012 ^(RDNA1^), gfx1030-1036 ^(RDNA2^),
-echo                      gfx1100-1103 ^(RDNA3^), gfx1150-1153 ^(RDNA3.5^),
-echo                      gfx1200-1201 ^(RDNA4^)
-pause
-exit /b 1
+echo   [INFO]  Reading AMD hardware and choosing the safest supported profile...
+"%VENV_DIR%\Scripts\python.exe" "%AMD_DIR%\detect_amd_gpu.py" --write-config "%HARDWARE_CFG%" --write-launcher-config "%LAUNCHER_CFG%" 2>&1
+if errorlevel 1 (
+    echo   [FAIL]  No Windows-supported AMD GPU was detected.
+    echo           Set AMD_GFX_OVERRIDE to an exact target only if you know the card, e.g.:
+    echo             set AMD_GFX_OVERRIDE=gfx1100 ^&^& install_amd.bat
+    pause
+    exit /b 1
+)
+if not exist "%HARDWARE_CFG%" (
+    echo   [FAIL]  Hardware configuration was not written.
+    pause
+    exit /b 1
+)
+for /f "usebackq tokens=1,* delims==" %%a in ("%HARDWARE_CFG%") do set "%%a=%%b"
+if not defined AMD_GFX (
+    echo   [FAIL]  Detection returned no gfx target.
+    pause
+    exit /b 1
+)
+echo   [ OK ]  !AMD_GPU_NAME! - !AMD_GFX! (!AMD_FAMILY!)
+echo   [ OK ]  Support: !AMD_GPU_SUPPORT!   Recommended profile: !AMD_PROFILE!
+echo   [INFO]  VRAM: !AMD_VRAM_MB! MB   FP16: !AMD_FP16!   Detector cap: !AMD_DETECT_MAX_SIDE! px   Matte cap: !SPECTRA_MATTE_INPUT_SIZE! px
+if /i "!AMD_GPU_SUPPORT!"=="build" (
+    echo   [WARN]  This target is build-only in TheRock's Windows matrix. It is not hardware-tested here.
+)
+echo   [INFO]  Settings are stored in %HARDWARE_CFG%
 
 :gpu_detected
-echo   [ OK ]  AMD GPU arch: !AMD_GFX!
-set "TORCH_INDEX_URL=https://rocm.nightlies.amd.com/whl-multi-arch/"
+if not defined TORCH_INDEX_URL set "TORCH_INDEX_URL=https://nightly.repo.amd.com/rocm/whl-next/"
 
 call :section "[ 5 / 8 ]  ROCm PyTorch"
 
@@ -147,13 +144,17 @@ set "TORCH_PKG=torch[device-!AMD_GFX!]"
 set "TORCHVISION_PKG=torchvision[device-!AMD_GFX!]"
 set "TORCHAUDIO_PKG=torchaudio"
 
-echo   [INFO]  Installing ROCm PyTorch (this may take a while)...
+echo   [INFO]  Resolving and installing the newest ROCm nightly wheels...
+echo           Existing torch, torchvision and torchaudio builds are replaced.
 "%UV_EXE%" pip install --python "%VENV_DIR%" ^
     "!TORCH_PKG!" ^
     "!TORCHVISION_PKG!" ^
     "!TORCHAUDIO_PKG!" ^
     --index-url "%TORCH_INDEX_URL%" ^
     --cache-dir "%UV_CACHE%" ^
+    --refresh ^
+    --upgrade ^
+    --prerelease=allow ^
     2>&1
 if errorlevel 1 (
     echo   [WARN]  uv could not install ROCm PyTorch - retrying with pip...
@@ -167,6 +168,8 @@ if errorlevel 1 (
         --index-url "%TORCH_INDEX_URL%" ^
         --cache-dir "%AMD_DIR%\pip_cache" ^
         --disable-pip-version-check ^
+        --pre ^
+        --upgrade ^
         2>&1
     if errorlevel 1 (
         echo   [FAIL]  ROCm PyTorch installation failed
@@ -183,9 +186,21 @@ call :section "[ 6 / 8 ]  Python requirements"
 echo   [INFO]  Installing packages from requirements.txt...
 "%UV_EXE%" pip install --python "%VENV_DIR%" -r "%AMD_DIR%\requirements.txt" --cache-dir "%UV_CACHE%" 2>&1
 if errorlevel 1 (
-    echo   [WARN]  Some packages failed to install. Check requirements.txt.
+    echo   [FAIL]  Some packages failed to install. Check requirements.txt.
+    pause
+    exit /b 1
 )
 echo   [ OK ]  Python requirements installed
+
+echo   [INFO]  Checking package compatibility...
+"%UV_EXE%" pip check --python "%VENV_DIR%" 2>&1
+if errorlevel 1 (
+    echo   [FAIL]  Installed packages have an incompatible dependency tree.
+    echo           Re-run install_amd.bat after the nightly index settles.
+    pause
+    exit /b 1
+)
+echo   [ OK ]  Package dependency tree is compatible
 
 echo   [INFO]  Installing SAM 3 CLIP text-encoder dependency...
 set "CLIP_SRC=%ROOT%tools\clip_src"
@@ -209,9 +224,9 @@ if "!CLIP_DL_ERR!"=="0" if defined CLIP_DIR (
 
 call :section "[ 7 / 8 ]  Verification"
 echo   [INFO]  Checking installation...
-"%VENV_DIR%\Scripts\python.exe" -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.cuda.is_available()); v = getattr(torch.version, 'hip', None); print('HIP:', v)" 2>&1
+"%VENV_DIR%\Scripts\python.exe" -c "import sys, torch, torchvision; print('PyTorch:', torch.__version__); print('torchvision:', torchvision.__version__); print('HIP:', getattr(torch.version, 'hip', None)); print('GPU available:', torch.cuda.is_available()); print('Arch:', torch.cuda.get_device_properties(0).gcnArchName if torch.cuda.is_available() else 'none'); sys.exit(0 if torch.cuda.is_available() else 1)" 2>&1
 if errorlevel 1 (
-    echo   [FAIL]  PyTorch verification failed
+    echo   [FAIL]  PyTorch cannot see the AMD GPU. Check the gfx target and the wheel index.
     pause
     exit /b 1
 )

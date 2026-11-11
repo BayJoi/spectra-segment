@@ -37,21 +37,22 @@ if not exist "%WEB%\package.json" (
 
 if not exist "%WEB%\bun.lock" if exist "%FRONT%bun.lock" (
     copy /y "%FRONT%bun.lock" "%WEB%\bun.lock" >nul 2>&1
-    del /q "%FRONT%bun.lock" >nul 2>&1
 )
 
 exit /b 0
 
 :link_dir
 set "CUR="
-if exist "%~1" (
-    fsutil reparsepoint query "%~1" >nul 2>&1
-    if errorlevel 1 (
-        rmdir /s /q "%~1" >nul 2>&1
+fsutil reparsepoint query "%~1" >nul 2>&1
+if not errorlevel 1 (
+    for /f "delims=" %%t in ('powershell -NoProfile -Command "(Get-Item -LiteralPath '%~1').Target" 2^>nul') do set "CUR=%%t"
+    if /i "!CUR!"=="%~2" (
+        if not exist "%~1" rd "%~1" >nul 2>&1
     ) else (
-        for /f "delims=" %%t in ('powershell -NoProfile -Command "(Get-Item -LiteralPath '%~1').Target" 2^>nul') do set "CUR=%%t"
-        if /i not "!CUR!"=="%~2" rd "%~1" >nul 2>&1
+        rd "%~1" >nul 2>&1
     )
+) else if exist "%~1" (
+    rmdir /s /q "%~1" >nul 2>&1
 )
 if not exist "%~1" mklink /J "%~1" "%~2" >nul 2>&1
 exit /b 0

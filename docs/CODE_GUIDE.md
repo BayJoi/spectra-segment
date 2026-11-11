@@ -5,25 +5,24 @@ HTTP layer, the model manager, the model backends, the utilities, the model
 catalogue, the frontend, the known limitations, how to verify a change and how to
 keep the two forks in sync.
 
-This file exists so the source stays free of prose. Anything that would otherwise
-be a comment in the code lives here or in `docs\CODE_REFERENCE.md`, which is the
-per-file reference and indexes every explanation by `path#symbol`. The companion
-files are `docs\BACKEND_GUIDE.md` (working on the backend), `docs\FRONTEND.md`
-(browser side) and `docs\LOGGING.md` (logging). The no-comment policy itself is
-stated in `docs\CODE_REFERENCE.md`.
+This file records the architecture, invariants and verification steps in one place.
+The companion files are `docs\BACKEND_GUIDE.md` (working on the backend),
+`docs\FRONTEND.md` (browser side) and `docs\LOGGING.md` (logging). The per-file
+reference in `docs\reference\` indexes explanations by `path#symbol`.
 
 ---
 
 
 ## 1. Shape of the project
 
-Windows only. Portable. Local first - nothing leaves the machine. Three editing
+Windows only. Portable. Local first - nothing leaves the machine. Four editing
 modes on top of one FastAPI backend:
 
 | Mode | What it does |
 |---|---|
 | **Brush** | Draw strokes around what to keep. Multiple subjects, each its own mask |
 | **Detection** | Type what to find. The detector finds boxes, then a model masks them |
+| **Matte** | BiRefNet soft alpha for hair, fur, glass and blur. Layers, per-layer undo and local Edge/Feather controls |
 | **SAM 3** | Type a prompt. One model does detection, segmentation and masking in one step |
 
 The backend exists in **two forks**:
@@ -49,7 +48,8 @@ start.bat / start_amd.bat       GPU detect -> memory profile -> backend (8000) -
 stop*.bat                       stop processes only
 cleanup*.bat                    remove venv, caches, workspace, toolchain
 launcher\setup_memory.ps1       memory profile -> env vars written to <cfg>.env
-checks\check_gpu_health.py      GPU smoke test (run after any wheel change)
+checks\check_gpu*.bat           AMD/NVIDIA/CPU health wrappers (run after a wheel change)
+checks\check_gpu_health.py       Universal phased GPU and 33-model checker
 backend\                        FastAPI app (CUDA/CPU fork)
 backend_amd_gpu\                FastAPI app (ROCm fork)
 frontend\                       React 19 + Vite + UnoCSS + jotai
@@ -80,11 +80,16 @@ tools\                          portable uv / Python / Bun, installed by the ins
    then install `requirements.txt`.
 
 AMD only: torch comes from TheRock's **nightly** multi-arch index,
-`https://rocm.nightlies.amd.com/whl-multi-arch/`, with the `torch[device-gfxNNNN]`
-extra. The `gfxNNNN` target comes from `detect_amd_gpu.py`, from
-`AMD_GFX_OVERRIDE`, or from a small hard-coded PCI-ID table. `rocm-sdk-devel` is
-deliberately skipped - it is only needed to compile HIP code, and it adds about
-1.4 GB.
+`https://nightly.repo.amd.com/rocm/whl-next/` (override with `TORCH_INDEX_URL`),
+with the `torch[device-gfxNNNN]` extra. The exact target comes from
+`backend_amd_gpu/amd_gfx.py` through `detect_amd_gpu.py`; PCI IDs, product names,
+VRAM and support levels live in that one detector, not in the batch files. The
+torch step always runs `--refresh --upgrade --prerelease=allow`, so an
+existing venv is moved to the newest resolved nightly instead of keeping the old
+wheels. A failed upgrade retries with `pip --pre --upgrade`; `uv pip check` then
+rejects an incompatible dependency tree. `rocm-sdk-devel` is deliberately skipped
+- it is only needed to compile HIP code, and it adds about 1.4 GB. The tested RX
+6600 environment is documented in `docs/AMD.md`.
 
 Nothing except the Python version is pinned. That means installs are not
 reproducible, and it is the largest supply-chain exposure in the project.
@@ -99,13 +104,14 @@ reproducible, and it is the largest supply-chain exposure in the project.
 | `MIOPEN_DEBUG_DISABLE_FIND_DB`, `MIOPEN_USER_DB_PATH`, `MIOPEN_CUSTOM_CACHE_DIR` | Keep the MIOpen kernel database under `model_weights\miopen` |
 | `HSA_ENABLE_SDMA=0` | Works around DMA copy stalls on Windows |
 | `TORCH_BLAS_PREFER_HIPBLASLT=1`, `DISABLE_ADDMM_CUDA_LT=1` | Prefer hipBLASLt for speed, but its addmm path crashes on some RDNA2 wheels |
-| `SPECTRA_DETECTOR_FP16=1` | AMD default. The CUDA fork does not set it |
+| `SPECTRA_DETECTOR_FP16=1` | AMD default. The CUDA fork sets it automatically on Volta and newer |
 | `MIMALLOC_PURGE_DELAY=0` | Return memory eagerly |
-| `TORCH_BACKENDS_CUDA_*_SDP_ENABLED` | Math attention on RDNA2 and older, AOTriton elsewhere |
 
-`start.bat` sets none of these. It only checks for NVIDIA with
-`Win32_VideoController | ? Name -match 'NVIDIA'`, and passes `-ForceCpu` if there
-is none.
+`start.bat` sets none of these. It checks for NVIDIA with
+`Win32_VideoController | ? Name -match 'NVIDIA'`, then runs
+`backend.utils.cuda_profile` in the venv to confirm the installed wheel has a kernel
+for the card. If the check fails it warns, passes `-ForceCpu`, and launches on CPU.
+Otherwise it passes `-ForceGpu` only when the user explicitly chooses GPU.
 
 Both launchers then call `launcher\setup_memory.ps1`, which is the only thing that
 decides memory policy.
@@ -116,7 +122,7 @@ Profiles: `high`, `balanced`, `medium`, `low`, `cpu`. They are read and written 
 `<backend>\spectra_launcher.cfg` as `vram_mode` / `cpu_threads` / `cpu_ram_mb`,
 then written as `KEY=VALUE` lines to `<cfg>.env`, which the `.bat` file imports.
 
-| Profile | VRAM fraction | Idle unload | Encoder offload | No co-residency |
+| Profile | Allocator split | Idle unload | Encoder offload | No co-residency |
 |---|---|---|---|---|
 | `high` | 0.90 | 86400 s | 0 | 0 |
 | `balanced` | 0.60 | 300 s | 0 | 0 |
@@ -124,10 +130,10 @@ then written as `KEY=VALUE` lines to `<cfg>.env`, which the `.bat` file imports.
 | `low` | 0.30 | 120 s | 1 | 1 |
 | `cpu` | 0 | 300 s | 0 | 0 |
 
-A separate hard ceiling of **0.90** is applied through
-`torch.cuda.set_per_process_memory_fraction()`. Because of that, the process can
-never use more than 90% of the user's VRAM. For the `high` profile the soft
-fraction and the hard ceiling are the same number, so they are identical there.
+Every GPU profile requests the same hard ceiling of **0.90** through
+`torch.cuda.set_per_process_memory_fraction()`. The backend logs when the platform
+accepts it and warns when it does not. The per-profile fraction only sizes the
+allocator split; it is no longer a memory budget.
 
 `max_split_size_mb` works out to `vram x fraction`, floored at 256 MB. If VRAM
 cannot be detected, the fallbacks 8192 / 4096 / 2048 / 1024 MB are used and
@@ -137,12 +143,13 @@ Two things to know:
 
 - `cpu_threads` is only asked for and emitted in `cpu` mode. Going GPU, then CPU,
   then GPU loses the thread setting.
-- Fractions are written with an invariant decimal separator. On a comma-decimal
-  locale they used to come out as `0,9`, which Python's `float()` rejects. Both
-  the budget and the hard cap were then silently switched off.
+- The allocator split and hard cap are written with an invariant decimal
+  separator. On a comma-decimal locale they used to come out as `0,9`, which
+  Python's `float()` rejects, so the hard cap was silently switched off.
 
-`SPECTRA_CPU_RAM_MB` is asked for and saved to the config, but **no backend code
-reads it**.
+`SPECTRA_CPU_RAM_MB` is applied at startup as a process memory hard limit
+(Windows Job Object, POSIX `RLIMIT_AS`). If the platform rejects it, startup logs a
+warning instead of claiming the limit is active.
 
 ### Frontend serving
 
@@ -154,51 +161,12 @@ Nothing ever reads `bun run build` output. See `docs\FRONTEND.md` for the detail
 
 ---
 
-## 3. Environment variable reference
+## 3. Environment variables
 
-### Read by the backend
-
-| Variable | Read by | Effect |
-|---|---|---|
-| `SPECTRA_FORCE_CPU` | `utils/device.py` | Ignore all GPUs |
-| `SPECTRA_VRAM_FRACTION` | `models/manager.py` | Soft VRAM budget before proactive eviction |
-| `SPECTRA_VRAM_HARD_CAP` | `main.py` | `set_per_process_memory_fraction`, default 0.90 |
-| `SPECTRA_KEEP_SEG_ON_DETECT` | `models/manager.py` | Keep the SAM model loaded during detection |
-| `SPECTRA_NO_CO_RESIDENCY` | `models/manager.py` | Unload the segmentation model when a detector loads |
-| `SPECTRA_DETECTOR_FP16` | `models/grounding_detector.py` | fp16 detectors on GPU. Ignored on CPU |
-| `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | `utils/offline.py` | Forced to `1` while a cached HuggingFace model loads; cleared only for a download that is actually needed |
-| `SAM2_OFFLOAD_ENCODER` | `models/ultralytics_backend.py` | Park the SAM2 image encoder on CPU between images |
-| `SAM2_QUANTIZE`, `SAM3_QUANTIZE` | both SAM backends | Working precision. Default fp32 on CPU, fp16 on GPU |
-| `SAM2_THREADS`, `SAM3_THREADS` | `utils/torch_threads.py` | Torch thread count, clamped to `SPECTRA_MAX_THREADS` (32) |
-| `SAM2_CHANNELS_LAST`, `SAM3_CHANNELS_LAST` | both SAM backends | Channels-last memory format |
-| `SAM2_COMPILE`, `SAM3_COMPILE` | both SAM backends | `torch.compile` after load. GPU only |
-| `SAM3_IDLE_UNLOAD_TIMEOUT` | `models/manager.py` | Seconds before an idle SAM3 model unloads |
-| `SPECTRA_MAX_HISTORY`, `SAM3_MAX_HISTORY`, `SPECTRA_MAX_OBJECTS`, `SPECTRA_MAX_SESSIONS` | `models/manager.py` | 200 / 100 / 50 / 100 |
-| `SPECTRA_UI_LOG_LEVEL` | `main.py` | SSE log filter, default `INFO` |
-| `SPECTRA_FLUSH_EVERY_REQUEST` | `main.py` | `torch.cuda.empty_cache()` after every request |
-| `SPECTRA_OMP_THREADS` | `backend\run.cmd` | Becomes `OMP_NUM_THREADS` |
-| `SPECTRA_MAX_THREADS` | `utils/torch_threads.py` | Upper clamp for the `*_THREADS` variables, default 32 |
-| `SPECTRA_LOG_MAX_MB`, `SPECTRA_LOG_BACKUPS` | `main.py` | Log rotation, default 10 MB and 3 backups |
-
-### Set for portability
-
-These are all redirected into `model_weights\` so the app stays self-contained:
-
-`HF_HOME`, `HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`, `TRANSFORMERS_CACHE`,
-`HF_MODULES_CACHE`, `HF_XET_CACHE`, `HF_DATASETS_CACHE`,
-`SENTENCE_TRANSFORMERS_HOME`, `TORCH_HOME`, `TRITON_CACHE_DIR`, `NUMBA_CACHE_DIR`,
-`ULTRALYTICS_HOME`, `YOLO_CONFIG_DIR`, `MPLCONFIGDIR`, `XDG_CACHE_HOME`,
-`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `TMPDIR` / `TEMP` / `TMP`, plus
-`PYTORCH_TUNABLEOP_CACHE_DIR` and `PYTORCH_HIP_ALLOC_CONF` on the AMD side.
-
-The same block is applied in three places: `start_amd.bat`, `backend\run.cmd`, and
-`main.py` at import time. They have to stay in agreement. The copy in `main.py` is
-the safety net for when the backend is started by hand.
-
-### Set but never read
-
-`SPECTRA_VRAM_MODE` and `SPECTRA_CPU_THREADS` are launcher echo only.
-`SPECTRA_CPU_RAM_MB` is saved and displayed but never enforced.
+The runtime, portability and launcher variable reference lives in the
+[backend guide](BACKEND_GUIDE.md#8-environment-variables). The startup chain above
+names only the values that affect install and launch; the full table is not
+duplicated here.
 
 ---
 
@@ -237,18 +205,23 @@ as latin-1 and a non-ASCII `X-Local-Token` used to raise `TypeError` - producing
 
 ### Endpoints
 
+Every endpoint except `/health` and `/api/token` requires the local token. The
+two SSE streams and the `sendBeacon` release endpoint also accept `?token=`
+because those browser APIs cannot set a request header. No other path accepts a
+query token.
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Liveness plus active session count. No auth needed |
 | GET | `/api/token` | Bootstrap token. No auth needed |
-| GET | `/api/logs` | Tail of the 300-entry in-memory log ring |
-| GET | `/api/logs/stream` | SSE log stream. No auth needed |
-| GET | `/api/models/status` | One-shot model and detector list |
-| GET | `/api/models/stream` | SSE model status, polled every 3 s. No auth needed |
-| POST | `/api/sessions` | Create a session for a model |
+| GET | `/api/logs` | Tail of the 300-entry in-memory log ring. Token header required |
+| GET | `/api/logs/stream` | SSE log stream. Token required; accepts `?token=` |
+| GET | `/api/models/status` | One-shot model and detector list. Token required |
+| GET | `/api/models/stream` | SSE model status, polled every 3 s. Token required; accepts `?token=` |
+| POST | `/api/sessions` | Create a session for a model; `model_name: null` creates a matte-only session |
 | GET | `/api/sessions/{id}` | Session info |
 | DELETE | `/api/sessions/{id}` | Destroy a session |
-| POST | `/api/sessions/{id}/release` | Teardown from `sendBeacon`. No auth needed |
+| POST | `/api/sessions/{id}/release` | Teardown from `sendBeacon`. Token required; accepts `?token=` |
 | POST | `/api/sessions/{id}/image` | Upload, decode, resize, encode |
 | POST | `/api/sessions/{id}/predict` | Stroke or box prompt, returns a mask |
 | POST | `/api/sessions/{id}/segment-batch` | One mask per box, positions preserved |
@@ -263,6 +236,11 @@ as latin-1 and a non-ASCII `X-Local-Token` used to raise `TypeError` - producing
 | POST | `/api/sessions/{id}/detect` | Open-vocabulary detection |
 | POST | `/api/sessions/{id}/export-zip` | Build an archive of composited images |
 | POST | `/api/sessions/{id}/export-image` | Build a single composited image |
+| GET | `/api/matte/models` | Matte model catalog with download and load state |
+| POST | `/api/sessions/{id}/matte` | Auto, stroke, text or box guided soft alpha |
+| POST | `/api/sessions/{id}/matte/clear` | Drop the stored alpha |
+| POST | `/api/sessions/{id}/export-image` | Composite supplied masks into PNG/JPG bytes |
+| POST | `/api/sessions/{id}/export-matte` | Composite the server's latest alpha into PNG/JPG bytes |
 
 ### Error contract for the history endpoints
 
@@ -302,11 +280,12 @@ The log ring is a `deque(maxlen=300)` written to from any thread. Fan-out uses
 an `asyncio.Queue` from a worker thread. Both queues are bounded at 128 and 64, and
 drops are silent by design.
 
-The SSE endpoints cannot use auth (`EventSource` cannot send headers). The **log**
-stream (`/api/logs/stream`) therefore carries a per-IP cap of 5, a maximum
-connection lifetime of 1800 seconds and a 30 s keepalive. Both streams share one
-global subscriber cap of 100 (503 when full); only the log stream enforces the
-per-IP and lifetime limits, so `/api/models/stream` can be held open indefinitely.
+The SSE endpoints require the token. `EventSource` cannot send headers, so the
+frontend appends the token to the stream URL; the backend accepts that query token
+only for `/api/logs/stream`, `/api/models/stream`, and the release endpoint. Each
+stream carries a per-IP cap of 5, a maximum connection lifetime of 1800 seconds and
+a 30 s keepalive for the log stream. Both streams share one global subscriber cap of
+100 (503 when full), and `/api/models/stream` stops at the same lifetime.
 
 See `docs\LOGGING.md` for the full logging story.
 
@@ -322,7 +301,7 @@ history.
 
 | Type | Holds |
 |---|---|
-| `Session` | Session id, model name, backend, image RGB and BGR, `objects`, the SAM3 prompt history and redo stack, `has_image`, `last_active`, and a per-session lock |
+| `Session` | Session id, model name, backend, image RGB and BGR, `objects`, the SAM3 prompt history and redo stack, the latest `matte` state, `has_image`, `last_active`, and a per-session lock |
 | `ObjectState` | One **subject**: `stroke_history`, `redo_stack`, `last_mask`, `last_low_res_mask`, `mask_snapshots`, plus `mask_revision` with the `png_cache`/`png_revision` pair that caches its encoded mask |
 | `MaskSnapshot` | The low-resolution decoder logits for one stroke, or `None` |
 | `StrokeEntry` | `points`, `labels`, `bboxes` |
@@ -438,9 +417,9 @@ snapshot chain costs.
 | `_evict_loaded_models(keep_backend)` | Unloads the detector and every segmentation model except `keep_backend`. A model with inference in flight is **left in the registry**, because removing it while it still holds VRAM would leak. `_last_detector_name` is kept, so the detector can reload itself |
 | `_can_unload(obj)` | Probes the inference lock in one step. This is the safe check behind every unload decision |
 | `_safe_unload(obj)` | Wraps `_can_unload` and calls `unload_model()` only when it is safe |
-| `_ensure_vram_headroom(required_mb, keep_backend)` | Evicts early when the projected footprint would cross the profile's budget. It takes `keep_backend`, which is how `SPECTRA_KEEP_SEG_ON_DETECT` gets honoured instead of defeated |
+| `_ensure_vram_headroom(required_mb, keep_backend)` | Evicts when free VRAM is below the required headroom for the next load or encode. It takes `keep_backend`, which is how `SPECTRA_KEEP_SEG_ON_DETECT` gets honoured instead of defeated |
 | `get_or_load_model` | Validates the model name, serialises loads per name, and leaves `_loaded_models` consistent when a load fails |
-| `create_session` | Reserves its slot under the lock, so N concurrent creations cannot all pass the `MAX_SESSIONS` check |
+| `create_session` | Reserves its slot under the lock, so N concurrent creations cannot all pass the `MAX_SESSIONS` check. A `None` model name creates a matte-only session without loading a backend |
 | `evict_idle_sessions` | Re-reads the timestamps under the lock, uses `_can_unload`, and only unloads idle **SAM3** models. An idle non-SAM3 model is reclaimed by `destroy_session` or by an encode-headroom eviction |
 
 ### Session lifetime
@@ -503,14 +482,14 @@ passes it explicitly, so the mismatch is dormant.
 
 ### UltralyticsBackend (SAM 2)
 
-`DENYLIST` blocks `FastSAM-s.pt`, `FastSAM-x.pt`, `sam3_b.pt` and `sam3_l.pt`.
-`ULTRALYTICS_MODELS` is the allowlist. Loading happens under a module-level lock,
+`ULTRALYTICS_MODELS` is the only allowlist; `load_model` rejects any name outside it. Loading happens under a module-level lock,
 with `torch.load` patched to default `weights_only=True` - that is protection
 against arbitrary code execution from a malicious checkpoint - and with `sys.stderr`
-swapped for `StderrInterceptor`. Any failure on a non-CPU device falls back to
-rebuilding the predictor on CPU. That fallback is too broad: a corrupt checkpoint or
-a plain bug also gets treated as "GPU unavailable". (`SAM3Backend` is the one that
-excludes `ModuleNotFoundError` and `clip` mentions from its fallback.)
+swapped for `StderrInterceptor`. A GPU load failure retries on CPU by default; set
+`SPECTRA_ALLOW_CPU_FALLBACK=0` to make it raise instead. The same switch governs
+inference OOM in the SAM, detector and matte backends. Explicit CPU loads still work
+regardless. This keeps a corrupt checkpoint or a plain bug from masquerading as
+"GPU unavailable" when fallback is disabled.
 
 `_model_dtype()` works out the working precision at runtime, and every prompt
 tensor is built with it. `_offload_encoder` and `_restore_encoder` implement
@@ -551,7 +530,9 @@ That was hundreds of megabytes of avoidable VRAM per prompt, freed only when
 
 `_build_predictor` forces `predictor.imgsz = [encode_dim, encode_dim]` and can
 optionally apply `SAM3_CHANNELS_LAST` and `SAM3_COMPILE`. Both of those swallow
-their errors and keep the working model.
+their errors and keep the working model. On the Windows ROCm wheel, default
+`torch.compile` has no Triton backend, so `SAM3_COMPILE=1` falls back to eager;
+do not treat it as a usable speed-up there.
 
 ### GroundingDetector
 
@@ -559,9 +540,13 @@ Seven detectors: Grounding DINO tiny, Grounding DINO base, `mm-gdino-base-all`,
 `mm-gdino-large-all`, `florence-2-base`, `florence-2-large`, and
 `cogflorence-2.2-large`.
 
-Loading tries a local snapshot first, then `snapshot_download`, then a direct
-`from_pretrained`. `_clean_florence_config` removes conflicting `auto_map` entries,
-and `trust_remote_code` is gated behind a trusted-id check.
+Loading uses only the pinned snapshot in `HF_MODEL_REVISIONS`; a missing pinned
+snapshot is downloaded at that revision, first with `snapshot_download` and then with a
+direct `from_pretrained` fallback. `_florence_auto_map` reads the cached `config.json`,
+drops the conflicting `AutoModelForZeroShotObjectDetection` entry and returns the
+patched map; the loader passes it as `config=`, so the HuggingFace cache is never
+modified. `trust_remote_code` is gated behind a trusted-id check and every repo is
+pinned by commit.
 
 Florence pre-warms at **1024x1024**, because its vision encoder runs at 768x768. A
 64x64 dummy image never allocated the real shapes, so the first real detection
@@ -596,8 +581,8 @@ boxes instead of finishing suppression, so the kept set differs depending on
 whether `supervision` imported.
 
 `SPECTRA_DETECTOR_FP16` only applies on GPU. On CPU the model loads in fp32 and the
-flag is ignored. **The AMD fork sets it to 1 by default and the CUDA fork does not
-set it at all** - that is a real difference in behaviour between the forks.
+flag is ignored. The AMD fork sets it to 1 in `run.cmd`; the CUDA fork sets it from
+the detected capability in `utils/cuda_profile.py` (1 on Volta+, 0 on Maxwell/Pascal).
 
 ### YOLEDetector
 
@@ -729,13 +714,13 @@ environment **and** patches `huggingface_hub.constants.HF_HUB_OFFLINE` and
 `transformers.utils.hub._is_offline_mode`, because both libraries read those at
 call time instead of re-reading the environment.
 
-Every cached HuggingFace load (`AutoProcessor` / `AutoModelForCausalLM` /
+Every cached detector load (`AutoProcessor` / `AutoModelForCausalLM` /
 `AutoModelForZeroShotObjectDetection` with `local_files_only=True`) runs inside
-`offline_guard(True)`, so a downloaded model can never contact the Hub again. The
-download paths call with `local_files_only=False`, which makes the guard
-permissive for that call only. `is_offline()` reports the current state. The module
-re-uses the same `_lock` for every toggle, so overlapping guards cannot restore a
-stale value.
+`offline_guard(True)`, so a downloaded model can never contact the Hub again. Matte
+uses the same `local_files_only=True` rule for a cached snapshot. The download paths
+call with `local_files_only=False`, which makes the guard permissive for that call
+only. `is_offline()` reports the current state. The module reuses the same `_lock` for
+every toggle, so overlapping guards cannot restore a stale value.
 
 ---
 
@@ -772,8 +757,8 @@ DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 
 `server.host: "localhost"` in the config is dead. Both launchers override it with
 `--host 127.0.0.1`. `connect-src` allows both `127.0.0.1:8000` and
-`localhost:8000`, which matches `BASE`. There is no proxy - the frontend talks to
-the backend directly.
+`localhost:8000`; `BASE` follows the page hostname so either origin works. There is
+no proxy - the frontend talks to the backend directly.
 
 ### State
 
@@ -928,7 +913,12 @@ feather radius and the mask revision now, which is exact.
 `useBrushDrawing` captures points in image space with a 2-pixel minimum spacing and
 clamps them to the image bounds. Right-drag sets `activeStrokeModeRef` to
 `"negative"`. The preview uses the active subject's colour for positive strokes and
-red for negative ones.
+red for negative ones. Negative strokes are automatic selections: the stroke
+points go to SAM as positive prompts with a box around the stroke, and the server
+subtracts the selected mask. On the benchmark image this removed 99.8% of the
+stroke and lost 0.2% of the subject; a negative-point prompt lost 99.4%. The
+request carries `stroke_radius` for the selection box and edge cleanup. The Brush
+toolbar has no size slider.
 
 `handlePointerUp` is bound to both `onPointerUp` and `onPointerLeave`. Left drags
 have pointer capture, so leaving the canvas keeps collecting points. Right drags
@@ -940,14 +930,14 @@ gesture.
 | Case | Result |
 |---|---|
 | Fewer than 3 points | One point, label +1 or 0 |
-| Negative | Always an area prompt |
-| Positive and closed | A ring prompt - a donut of up to 8 interior positive points plus the ring as negative |
+| Negative | An area prompt used as a positive selection; SAM selects the painted region and it is subtracted |
+| Positive and closed | A box prompt plus up to 8 interior positive points |
 | Positive and open | An area prompt |
 
 `buildAreaPrompt` rasterises into an offscreen canvas at most 1024 px wide. It
 deliberately **narrows the stroke by 60% of the brush on each side**, so the
 sampled points sit inside the object rather than straddling the boundary. It then
-samples a grid and caps the result at 12 points.
+samples a grid and caps the result at 10 points.
 
 ### Detection mode
 
@@ -996,9 +986,13 @@ indices go stale, and there is no way for it to notice.
 ### Export
 
 `ExportDialog` encodes every mask to a base64 PNG synchronously on the main thread
-- one `w x h` loop plus a `toDataURL` per mask - and posts it to `/export-zip`. 20
-masks at 4096x4096 is a multi-second freeze. `/export-image` exists but is never
-called.
+- one `w x h` loop plus a `toDataURL` per mask. 20 masks at 4096x4096 is a
+multi-second freeze. The encoded set is posted to `/export-zip` for a ZIP, to
+`/export-image` for one combined image, or to `/export-image` once per item for
+separate downloads. The selected PNG/JPG format applies to every ZIP entry, and
+the server rewrites each entry's extension to match the encoded bytes. Separate
+downloads use the same extension. A JPG without a background gets white because
+JPEG cannot store alpha.
 
 `feather` is bound straight to `featherRadiusAtom`, so the export slider changes
 the on-screen feathering live. Brush mask lookup uses
@@ -1010,7 +1004,11 @@ while object ids are contiguous `0..n-1`.
 The panel consumes `/api/logs/stream` through `EventSource`, and it also
 subscribes to the frontend's own log store so both render in one list with a
 `source: "ui" | "backend"` tag. It buffers entries that arrive before the initial
-`/api/logs` fetch settles.
+`/api/logs` fetch settles, and re-fetches history after every SSE open. Successful
+request lines are grouped by operation with an `xN` count; Brush `Stroke submitted`
+DEBUG lines group as `Brush strokes applied`; failures stay individual. Simple
+mode falls back to a short redacted line for unknown backend `INFO` records, so a
+connected feed is not blank just because no known lifecycle line arrived.
 
 `progressRows` folds the `DOWNLOAD` entries into a `Map<name, Row>`. Filtering is
 by level, by source, and by category, with live counts per category. Search matches
@@ -1025,14 +1023,17 @@ full-screen overlay with no way out if a request hangs.
 
 ### `api.ts`
 
-`BASE = "http://localhost:8000"`, hardcoded. `ApiError` carries the HTTP status, so
-callers can tell 404 (recover) from 409 (resync).
+`BASE` is `http://<page-hostname>:8000`, with a `localhost:8000` fallback outside
+the browser; it is no longer hardcoded to `localhost`. `ApiError` carries the HTTP
+status, so callers can tell 404 (recover) from 409 (resync).
 
-The token is memoised in `_token` and `_tokenPromise`. A 401 clears both and
-retries exactly once with a fresh token.
+`getToken` memoises in `_token` and `_tokenPromise`; a 401 clears both and retries
+exactly once with a fresh token. `getFreshToken` fetches a new token for every SSE
+connection, including reconnects, so a backend restart does not leave the stream on
+a stale token.
 
-`releaseSession` fires `sendBeacon` - which cannot set headers, so the backend
-exempts that path from auth - **and** a token-bearing `DELETE`. A page teardown
+`releaseSession` puts the cached token on the `sendBeacon` query string (that one
+release path accepts it) **and** sends a token-bearing `DELETE`. A page teardown
 therefore sends two destroy requests. Both are idempotent.
 
 ---
@@ -1067,17 +1068,17 @@ Ranked, with the reason each one is still open.
    LayersPanel, SubjectsPanel and Select each register their own listener.
 8. **`start.bat` and `stop.bat` interfere across forks.** `start.bat` kills any
    process whose command line contains `main:app`, which includes the AMD backend.
-9. **`install_amd.bat` still installs from a nightly index**, and there is no
-   rollback path.
-10. **`detect_amd_gpu.py` reports 0 MB of VRAM for whole GPU families** - Strix
-    Point, Strix Halo, Krackan, Phoenix, Van Gogh, Rembrandt, Mendocino and every
-    Instinct. `setup_memory.ps1` then quietly substitutes a fallback budget with no
-    warning. (Navi 24 does have entries: RX 6500/6400 and friends report 4096 MB.)
+9. **`install_amd.bat` installs the latest nightly on every run**, and there is no
+   rollback path. A broken upstream build fails the install rather than silently
+   keeping the previous torch wheels.
+10. **Integrated GPUs have no dedicated VRAM figure.** The detector reports 0 MB for
+    iGPUs and selects a conservative profile from the target registry instead of
+    inventing a dedicated size.
 11. **`get_or_create_token()` makes a fresh token on every call.** It is safe only
     because it is called exactly once. A second call would invalidate every token
     already issued.
-12. **`SPECTRA_CPU_RAM_MB`, `SPECTRA_VRAM_MODE` and `SPECTRA_CPU_THREADS` are saved
-    and shown but never enforced.**
+12. **`SPECTRA_VRAM_MODE` and `SPECTRA_CPU_THREADS` are saved and shown but never
+    read by the backend.** `SPECTRA_CPU_RAM_MB` is enforced as a process limit.
 13. **`accelerate`, `timm` and `einops` are declared but never imported by our
     code.** They are not dead: `accelerate` backs transformers'
     `low_cpu_mem_usage`, and `timm` / `einops` are pulled in by the Florence-2
@@ -1088,6 +1089,11 @@ Ranked, with the reason each one is still open.
 15. **Florence-2 / CogFlorence ignore the confidence slider.** Those models return
     no per-box score, so `_detect_florence` hardcodes `score = 1.0`; the threshold
     the user sets cannot filter its boxes.
+16. **`transformers` remains on 4.x for Florence-2 compatibility.** OSV reports
+    advisories against 4.57.6, but 5.10 is yanked and both 5.10 and 5.22 reject the
+    pinned Florence remote config. The app loads only pinned, allow-listed model
+    revisions and does not use the affected Trainer, save_pretrained or LightGlue
+    paths. See `docs/SECURITY.md` for the exception and review trigger.
 
 ---
 
@@ -1114,12 +1120,16 @@ GPU health, after any wheel change:
 
 ```
 checks\check_gpu.bat
+checks\check_gpu_amd.bat --all-models
+checks\check_gpu_nvidia.bat
 ```
 
-That script does not reproduce the launchers' environment -
-`PYTORCH_HIP_ALLOC_CONF`, `HSA_OVERRIDE_GFX_VERSION`, `HSA_ENABLE_SDMA`, the
-attention toggles and the hard cap are all absent. So a regression caused by a
-launcher-set variable cannot be caught by it.
+The auto wrapper selects AMD, NVIDIA or CPU. The two explicit wrappers avoid a
+wrong choice when both vendors are present. The checker applies backend cache
+paths and the 8 GB matte cap, but it does not reproduce every launcher setting
+(`PYTORCH_HIP_ALLOC_CONF`, `HSA_OVERRIDE_GFX_VERSION`, `HSA_ENABLE_SDMA`, the
+attention toggles and the hard cap), so a launcher-only regression still needs a
+real launch. NVIDIA is unverified on physical hardware.
 
 ---
 
@@ -1138,7 +1148,7 @@ Files that legitimately differ, and how:
 | `main.py` | The AMD-only gfx and HIP preamble, `miopen` cache directories, `torch` versus `_torch` aliasing, the `torch.version.hip` branch, `cudnn.benchmark=False` on HIP, `matmul.allow_fp16_reduced_precision_reduction` on HIP, `_log_gpu_mem()` around detect, the AMD no-GPU warning, and `backend_amd_gpu.*` import paths |
 | `utils/device.py` | AMD adds `_detect_rocm()`. **Both** forks only claim NVIDIA when `torch.version.cuda` is set, so the CUDA/CPU fork falls back to CPU on a ROCm build instead of mislabelling the card |
 | `models/sam3_backend.py` | AMD wraps the SAM3 **encode** in `cudnn_disabled` as well (both forks already wrap the two decode paths), and its missing-`clip` hint says `install_amd.bat`. Model resolution and download are shared via `utils/model_integrity.ensure_model_file()` |
-| `models/grounding_detector.py` | Import paths only (`backend.utils.*` vs `backend_amd_gpu.utils.*`); the per-detect `empty_cache` and the 1024-square Florence pre-warm live in both forks |
+| `models/grounding_detector.py` | Import paths only (`backend.utils.*` vs `backend_amd_gpu.utils.*`); the per-detect `empty_cache`, the OOM traceback clearing before it, and the 1024-square Florence pre-warm live in both forks |
 | `models/ultralytics_backend.py` | Nothing: byte-identical, including the `RLock` and the locked `unload_model()` |
 | `models/yoloe_detector.py` | Absolute import paths only (three of them) |
 | `run.cmd` | AMD adds MIOpen env vars and cache dirs, the tunable-op cache, `OCL_SET_SVM_SIZE`, the HIPBLASLt/addmm switches, `SPECTRA_DETECTOR_FP16=1`, and runs `backend_amd_gpu.main:app` |
@@ -1156,3 +1166,30 @@ How to mirror a change:
    imports alone.
 3. Run the checks in section 11 for **both** forks.
 4. Check that only the differences in the table above remain.
+
+---
+
+## 13. Source notes
+
+The notes below record behaviour and the reason behind it:
+
+- `frontend/src/components/Canvas.tsx` - Matte strokes are always positive. The
+  matte model decides what belongs to the subject, and a second erase gesture made
+  the result harder to predict. Matte therefore keeps only the positive stroke
+  points and re-sends them with each guided run.
+- `frontend/src/components/MatteBar.tsx` - Matte model selection is not gated by GPU
+  size. Every checkpoint stays selectable and the model hints say Heavy, Medium or
+  Light; there is no automatic compatibility fallback.
+- `frontend/src/lib/strokePrompt.ts` - A negative brush stroke is not a geometric
+  erase. SAM receives the painted points plus a stroke-sized box and selects the
+  painted region; the server then subtracts that selection from the current mask.
+- `frontend/src/lib/matte.ts` - `applyAlphaControls` caches the shifted alpha per
+  layer. Moving Feather therefore reuses the Edge/Invert result instead of repeating
+  the full-resolution edge pass on every slider tick.
+- `frontend/src/components/ConsolePanel.tsx` - The simple console is for user-facing
+  activity, not server internals. Known lifecycle messages are rewritten, routine
+  noise is hidden, and only the Developer view shows the raw stream. Failures remain
+  visible with a pointer to that detailed view.
+- `backend/main.py`, `backend_amd_gpu/main.py` - Ultralytics resolves a public DNS
+  name during import and may check PyPI afterwards. `YOLO_OFFLINE=1` is set before
+  that import so model work stays local; the app's own downloads still use urllib.

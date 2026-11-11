@@ -101,7 +101,11 @@ class StderrInterceptor:
         if pct < 100 and pct < self._last_pct + self._MIN_PCT_STEP:
             return
         self._last_pct = pct
+        name = self._model or desc or "Download"
+        dl = {"name": name, "phase": "download", "pct": pct}
         if desc:
-            LOGGER.info("%s: %s %d%% complete", self._model or "HF", desc, pct)
+            dl["file"] = desc
+        if desc:
+            LOGGER.info("%s: %s %d%% complete", self._model or "HF", desc, pct, extra={"dl": dl})
         else:
-            LOGGER.info("%s: %d%% complete", self._model or "HF", pct)
+            LOGGER.info("%s: %d%% complete", self._model or "HF", pct, extra={"dl": dl})

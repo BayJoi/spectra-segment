@@ -18,14 +18,17 @@ kind of stale fact this document exists to avoid.
 
 | # | Destination | What it is | Level | Where it is set up |
 |---|---|---|---|---|
-| 1 | Rotating file | `backend\logs\backend.log` | `DEBUG` (everything) | `backend\main.py#_file_handler` (module level) |
+| 1 | Per-launch file | `backend\logs\backend_<YYYYmmdd_HHMMSS>.log` | `DEBUG` (everything) | `backend\main.py#_file_handler` (module level) |
 | 2 | In-memory ring feeding SSE | 300-entry `deque`, sent to `/api/logs/stream` | `SPECTRA_UI_LOG_LEVEL`, default `INFO` | `backend\main.py#_BufferHandler`, `backend\main.py#_ui_level_name` |
 | 3 | In-app console panel | the panel behind the "Logs" button in the header | same ring, plus browser-side entries | `frontend\src\components\ConsolePanel.tsx` |
 
 The root logger is set to `DEBUG` (`backend\main.py#_file_handler`, module level). Two handlers hang off it:
 
 - `_file_handler` - a `RotatingFileHandler`. It keeps every record at `DEBUG` and above.
-  Rotation: `maxBytes = SPECTRA_LOG_MAX_MB * 1024 * 1024`, `backupCount = SPECTRA_LOG_BACKUPS`.
+  The path is chosen once per process: `SPECTRA_LOG_FILE` when set, otherwise a new
+  timestamped `backend_<YYYYmmdd_HHMMSS>.log`. Rotation still applies as a size
+  safeguard: `maxBytes = SPECTRA_LOG_MAX_MB * 1024 * 1024`, `backupCount =
+  SPECTRA_LOG_BACKUPS`.
 - `_buf_handler` (a `_BufferHandler`) - copies records into `_log_buffer` and pushes them
   to every connected SSE subscriber.
 
@@ -37,15 +40,18 @@ Both handlers carry `_ctx_filter`, which stamps `rid` and `sid` onto every recor
 
 | Variable | Default | Meaning | Read at |
 |---|---|---|---|
-| `SPECTRA_LOG_MAX_MB` | `10` | Size of one `backend.log` before it rotates | import time |
+| `SPECTRA_LOG_FILE` | timestamped file in `logs/` | Explicit log path for this launch | import time |
+| `SPECTRA_LOG_MAX_MB` | `10` | Size of one log file before it rotates | import time |
 | `SPECTRA_LOG_BACKUPS` | `3` | How many old files to keep (`.1`, `.2`, `.3`) | import time |
 | `SPECTRA_UI_LOG_LEVEL` | `INFO` | Minimum level that reaches the ring, SSE and the console | import time |
 
-All three are read when `backend\main.py` is imported, so you must set them **before**
-starting the backend. Changing them needs a restart.
+All four are read when `backend\main.py` is imported, so you must set them **before**
+starting the backend. Changing them needs a restart. A relative `SPECTRA_LOG_FILE` is
+resolved under that backend's `logs/` directory; the launch scripts pass an absolute path.
 
-With the defaults you get about 40 MB of history on disk (10 MB x 4 files). The ring only
-ever holds the last 300 entries.
+Each launch creates a new file, so history is not mixed into one ever-growing aggregate
+file. Rotation can still create `.1`, `.2` and `.3` if a single launch exceeds 10 MB.
+The ring only ever holds the last 300 entries.
 
 Note that `SPECTRA_UI_LOG_LEVEL=DEBUG` does not make the file louder - the file already
 takes everything. It only lets more into the SSE stream and the console panel.
@@ -91,8 +97,8 @@ end to end.
 
 ### Following one request across the three layers
 
-1. **File.** `grep` the `rid` in `backend\logs\backend.log`:
-   `findstr /c:"rid=3f9a1c2b" backend\logs\backend.log`
+1. **File.** `grep` the `rid` in this launch's newest log:
+   `findstr /c:"rid=3f9a1c2b" backend\logs\backend_*.log`
    This is the only place with the full picture, because it keeps `DEBUG`.
 2. **Ring / SSE.** Same `rid` rides along in the JSON entry. The console panel shows it
    only if a line's message includes it - the panel does not render `rid` as a column.
@@ -121,6 +127,8 @@ log file by what the app was doing.
 | `detect` | Which device the detector is running on | `backend\models\manager.py#ModelManager.detect` | `DEBUG` |
 | `residency` | A model or detector was loaded, unloaded or kept | many places in `backend\models\manager.py` | `INFO` / `DEBUG` |
 | `vram` | GPU memory bookkeeping | `backend\main.py#lifespan / _handle_vram_oom`, `backend\models\manager.py#ModelManager._ensure_vram_headroom` | `INFO` / `ERROR` |
+| `matte-load` | A BiRefNet matte model is loading | `models/matte_backend.py#BiRefNetBackend.load_model` | `INFO` |
+| `matte-download` | A matte checkpoint is downloading; carries `dl.name`, `dl.phase`, `dl.pct`, `dl.file` | `utils/stderr_progress.py#StderrInterceptor` | `INFO` |
 | `download` | Download progress | the `dl` dict, see section 4 | level forced to `DOWNLOAD` |
 
 ### The `request` level ladder
@@ -206,14 +214,31 @@ U+2501, U+2500 and U+2577 into `-`, and trims. Empty messages are dropped.
 Open it with the **Logs** button in the header. The panel is
 `frontend\src\components\ConsolePanel.tsx`.
 
+**Simple is the default.** It shows UI activity, rewritten lifecycle lines, and an
+unknown backend `INFO` line as a short redacted fallback instead of dropping it.
+Successful request lines are grouped into one row per operation (for example
+`Brush updates`, `Segmentation`, `Detection`, `Matte updates`, `SAM 3 prompts`,
+`Undo and redo`, `Exports`, `Image uploads`), with an `xN` count. In Brush mode a
+`Stroke submitted` DEBUG line is grouped as `Brush strokes applied`, so a run of
+strokes no longer creates one row per stroke. Failed requests stay individual.
+Known low-value transport/allocator lines stay hidden. Duplicate server records are
+removed by their stable request/sequence key when live SSE entries merge with the
+`/api/logs` backfill; consecutive identical visible lines within five seconds still
+merge into one row with an `xN` count. The panel re-fetches `/api/logs` after every
+SSE open, so a connection that starts before the first fetch settles is not left
+empty. The first control switches to **Developer**, which restores the raw stream and
+the source, category and level filters. The preference is the
+`consoleSimpleAtom` localStorage entry.
+
 | Control | What it does |
 |---|---|
+| Simple / Developer | Switch between the friendly feed and the raw developer stream |
 | Filter presets | 6 options in `FILTER_COMBOS`: `Everything`, `App only`, `Server only`, `Warnings & errors`, `Errors only`, `Debug & above`. Each preset sets a level *and* a source at once. |
 | Level ranks | `FILTER_OPTIONS` maps each preset to a `minRank`; the active App/Server source shows as a removable chip |
 | Category chips | One chip per UI category from `uiCategoryLabels`, each with a live count of buffered entries. Only categories with a non-zero count are listed, sorted by count |
 | Search | Free text. Matches message + level + category + source + `name` |
 | Clock button | Show or hide the `HH:MM:SS` timestamp on each row |
-| Copy button | Copies the filtered rows as text, plus a `[downloads]` section |
+| Copy button | Copies the filtered rows as text (friendly text in Simple), plus a `[downloads]` section |
 | X button | Clears the buffer, the unread count and the badge |
 | "Show N older" | Raises the render limit by 200 |
 | "Latest" | Scrolls back to the bottom and re-pins |
@@ -261,10 +286,12 @@ so they can never be consumed by `progressRows`, which needs both.
   byte counts or the file name, and the ETA. A second thinner bar shows
   `files_done / files_total`. A `done` entry removes the row. The bar turns brighter above
   90%.
-- **Backfill on open.** The panel calls `api.getLogs(500)` and merges in anything that
-  arrived while waiting (`pendingRef`), then opens the SSE stream. The SSE client
+- **Backfill on open and on reconnect.** The panel calls `api.getLogs(500)` and merges
+  in anything that arrived while waiting (`pendingRef`), then opens the SSE stream; it
+  runs the same backfill from `onOpen`, so a missed first response is recovered. The
+  stream URL carries a fresh `?token=` (below). The SSE client
   (`frontend\src\lib\sse.ts`) reconnects with exponential backoff, `1s -> 2s -> 4s ...`,
-  capped at 30 s.
+  capped at 30 s, and fetches a fresh token for each attempt.
 - **Badges.** A red dot means an `ERROR` or `CRITICAL` arrived, yellow means a `WARNING`.
   If both, red wins. The number badge counts entries that arrived while the panel was
   closed.
@@ -302,7 +329,7 @@ Rules:
 - Keep log and UI strings **ASCII**. Write `-` instead of an em dash, `->` instead of an
   arrow, `x` instead of a multiplication sign and `...` instead of an ellipsis. A Windows
   console decodes the log file as cp1252, so one UTF-8 byte sequence becomes two or three
-  wrong glyphs in the panel and in `backend.log`.
+  wrong glyphs in the panel and in the per-launch log file.
 
 ### Frontend
 
@@ -333,9 +360,11 @@ Rules:
 
 The frontend already redacts what it renders: `safeText` in `frontend\src\store\logs.ts`
 replaces absolute paths with `[path]`, secret-looking `key: value` pairs with `[redacted]`,
-and long hex strings with `[hash]`. Do not rely on that as an excuse to log them in the
-first place - the backend has no equivalent filter, so anything logged there lands raw in
-`backend.log` and in the SSE entry, and `safeText` is never applied to server entries.
+UUIDs with `[id]`, and long hex strings with `[hash]`. Do not rely on that as an excuse
+to log them in the first place - the backend has no equivalent filter, so anything logged
+there lands raw in the per-launch log and in the SSE entry. The panel now runs `safeText`
+on both UI and server messages before rendering, so paths, UUIDs and tokens are redacted
+in both views.
 
 ---
 
@@ -348,18 +377,18 @@ first place - the backend has no equivalent filter, so anything logged there lan
 | 1. Coerce | `Error` -> `"Name: message"`; string -> itself; anything else -> `JSON.stringify`, falling back to `String()`. |
 | 2. `PATH_RE` | `[A-Za-z]:\\...` and `/home|/Users|/root|/tmp|/var|/opt|/srv|/workspace|/data...` -> `[path]` |
 | 3. `SECRET_RE` | `token`, `bearer` or `x-local-token` followed by `:` or `=` and a value -> `[redacted]` |
-| 4. `LONGHEX_RE` | Any run of 32 or more hex characters -> `[hash]` |
-| 5. Truncate | `max` characters, default 300, with `...` appended |
+| 4. `UUID_RE` | Standard 8-4-4-4-12 UUIDs -> `[id]` |
+| 5. `LONGHEX_RE` | Any run of 32 or more hex characters -> `[hash]` |
+| 6. Truncate | `max` characters, default 300, with `...` appended |
 
-Why these three:
+Why these rules:
 
-- **Paths.** The whole app is portable and relocatable. A log line with
-  `D:\Spectra Group\Spectra Segment\backend\logs` in it is useless to anyone else and
-  identifies the machine.
+- **Paths.** The whole app is portable and relocatable. A log line with an
+  absolute project path in it is useless to anyone else and can identify the machine.
 - **Tokens.** The session token is a bearer credential. A pasted console log is a credential
   leak.
-- **Long hex.** Model hashes and session ids are 32+ hex characters. They are stable
-  fingerprints that add nothing to a log line.
+- **UUIDs and long hex.** Session ids and model hashes are stable fingerprints that add
+  nothing to a log line.
 
 `LONGHEX_RE` is greedy over digits and `a-f` only, so a normal timestamp or a percentage is
 untouched.
@@ -377,8 +406,8 @@ Look for, in order:
 2. `Model <name> ready in <duration>` at `phase=residency` (`backend\models\manager.py#ModelManager.get_or_load_model`),
    with `dur_ms`. If you see `Residency: unloading previous model` right before it, the app
    switched models, which unloads and reloads.
-3. `phase=vram` `reason=over-budget` (`backend\models\manager.py#ModelManager._ensure_vram_headroom`) - the app decided
-   it did not have the memory budget and started evicting models to make room.
+3. `phase=vram` `reason=headroom` (`backend\models\manager.py#ModelManager._ensure_vram_headroom`) - free VRAM
+   fell below the headroom needed, so the app started evicting models to make room.
 4. `phase=residency` `reason=no-co-residency` - a detector and a segmentation model are not
    allowed to live together, so one gets thrown out to load the other.
 5. The request line for the offending call. If it is `DEBUG` only, it was fast and
@@ -426,10 +455,11 @@ Look for, in order:
    long brush stroke was downsampled, which changes the prompt.
 6. In the console, category `brush`: `Stroke submitted (N sample points, positive|negative)`
    at `DEBUG`. `N` is what actually reached the backend after point sampling.
-7. `set_image: encode OOM on <device> - running image encoder on CPU` or
-   `set_image: falling back to full CPU model` at `WARNING`
-   (`UltralyticsBackend._cpu_encoder_reencode` and `_fallback_full_cpu`). A CPU fallback
-   still produces a mask, just a slower one.
+7. `Detector ran out of VRAM ... retrying at N px on the GPU` at `WARNING`
+   (`GroundingDetector.detect`). The detector first re-runs at its configured cap,
+   then 1280/1024/800 px as needed. `Detector exhausted VRAM ... falling back to CPU`
+   appears only after every GPU size fails. With `SPECTRA_ALLOW_CPU_FALLBACK=0`, the
+   detector logs the `automatic CPU fallback is disabled` `ERROR` instead.
 8. In the console, category `subject`: `Mask WxH scaled to the WxH image`
    (`frontend\src\hooks\useCanvasRenderer.ts#noteMaskScale`), emitted once per pair of
    sizes. A mask is drawn over the image rect whether or not the two match, so this line
@@ -440,8 +470,8 @@ Look for, in order:
 1. `phase=vram` `reason=oom` at `ERROR` (`backend\main.py#_handle_vram_oom`). The handler catches
    `torch.OutOfMemoryError` anywhere in a request and returns HTTP 507. The line includes
    free and total MB when it can read them.
-2. `phase=vram` `reason=over-budget` at `INFO` (`backend\models\manager.py#ModelManager._ensure_vram_headroom`), which
-   reports how far over budget it was and how much it needed.
+2. `phase=vram` `reason=headroom` at `INFO` (`backend\models\manager.py#ModelManager._ensure_vram_headroom`), which
+   reports the free, total and required MB.
 3. `VRAM: hard cap set to N% of device memory` at `INFO` at startup
    (`backend\main.py#lifespan`). Default cap is `0.90` (`SPECTRA_VRAM_HARD_CAP`), clipped to at
    most `0.95`.
@@ -459,11 +489,14 @@ The 507 response body is the constant `VRAM_OOM_DETAIL` (`backend\main.py#VRAM_O
 
 1. Check the green dot next to "Console" in the panel header. A grey dot means the SSE
    stream is not connected; the client retries for up to 30 s between attempts.
-2. `GET /api/logs/stream` is exempt from token auth, but it is capped at **5 connections
-   per IP** (`MAX_SSE_PER_IP`) and **100 subscribers total** (`MAX_SSE_SUBSCRIBERS`), and
-   each connection lives at most **1800 seconds** (`MAX_SSE_LIFETIME_SECONDS`). Open tabs
-   you forgot about eat into the per-IP budget. If you hit the cap you get 429; if you hit
-   the global cap, 503.
+2. `GET /api/logs/stream` requires the local token. `EventSource` cannot set a header,
+   so the panel appends it as `?token=...`; the backend accepts a query token only for
+   that stream, `/api/models/stream`, and `POST /api/sessions/{id}/release`. The stream
+   is capped at **5 connections per IP** (`MAX_SSE_PER_IP`) and **100 subscribers total**
+   (`MAX_SSE_SUBSCRIBERS`), and each connection lives at most **1800 seconds**
+   (`MAX_SSE_LIFETIME_SECONDS`). The model-status stream has the same per-IP and lifetime
+   caps. Open tabs you forgot about eat into the per-IP budget. If you hit the cap you get
+   429; if you hit the global cap, 503.
 3. `SPECTRA_UI_LOG_LEVEL` is `INFO` by default. Anything below that never enters the ring,
    so `DEBUG` lines will not appear even though they are in the file.
 4. The ring only holds 300 entries and the panel asks for 500, so a fresh panel never shows
@@ -496,7 +529,7 @@ The 507 response body is the constant `VRAM_OOM_DETAIL` (`backend\main.py#VRAM_O
   have no extras. So a timing breakdown that only exists at `DEBUG` has no field to
   hang off.
 - **`SPECTRA_UI_LOG_LEVEL` is a floor for the ring, not for the file.** Setting it
-  to `CRITICAL` will not shrink `backend.log`. The file is always `DEBUG`.
+  to `CRITICAL` will not shrink the per-launch log file. The file is always `DEBUG`.
 - **`_BufferHandler` drops an entry when two threads emit at once.** The
   re-entrancy guard is thread-local, so a second thread emitting during another
   thread's emit is silently discarded. The file still gets both records, because

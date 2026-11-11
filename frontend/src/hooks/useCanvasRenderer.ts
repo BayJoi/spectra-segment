@@ -204,6 +204,8 @@ interface RendererState {
   featherRadiusRef: React.MutableRefObject<number>;
   sam3InstancesRef: React.MutableRefObject<Sam3Instance[]>;
   selectedSam3InstanceRef: React.MutableRefObject<{ promptIndex: number; instanceIndex: number } | null>;
+  matteAlphaRef: React.MutableRefObject<HTMLCanvasElement | null>;
+  matteActiveRef: React.MutableRefObject<boolean>;
 }
 
 export function useCanvasRenderer(
@@ -216,6 +218,8 @@ export function useCanvasRenderer(
   const maskCacheKeyRef = useRef("");
   const transparentCompositeRef = useRef<HTMLCanvasElement | null>(null);
   const transparentCompositeKeyRef = useRef("");
+  const matteCompositeRef = useRef<HTMLCanvasElement | null>(null);
+  const matteCompositeKeyRef = useRef<HTMLCanvasElement | null>(null);
   const maskRevisionRef = useRef(0);
   const checkerPatternCacheRef = useRef<{ pattern: CanvasPattern; width: number; height: number } | null>(null);
   const subjectMaskCacheRef = useRef<{ canvas: HTMLCanvasElement; key: string } | null>(null);
@@ -670,6 +674,22 @@ export function useCanvasRenderer(
     [refs.detectCanvasRef, state.sam3InstancesRef, state.selectedSam3InstanceRef, state.hideBboxesRef, state.showTransparentRef]
   );
 
+  const buildMatteComposite = useCallback(
+    (img: HTMLImageElement, alphaCanvas: HTMLCanvasElement) => {
+      const iw = img.naturalWidth;
+      const ih = img.naturalHeight;
+      const off = document.createElement("canvas");
+      off.width = iw;
+      off.height = ih;
+      const octx = off.getContext("2d")!;
+      octx.drawImage(img, 0, 0, iw, ih);
+      octx.globalCompositeOperation = "destination-in";
+      octx.drawImage(alphaCanvas, 0, 0, iw, ih);
+      return off;
+    },
+    []
+  );
+
   const redraw = useCallback(() => {
     const container = refs.containerRef.current;
     const img = refs.imageRef.current;
@@ -686,6 +706,7 @@ export function useCanvasRenderer(
     const bw = Math.max(1, Math.floor(cw * dpr));
     const bh = Math.max(1, Math.floor(ch * dpr));
 
+    const matteCanvas = state.matteActiveRef.current ? state.matteAlphaRef.current : null;
     const imgCanvas = refs.imageCanvasRef.current;
     if (imgCanvas) {
       if (imgCanvas.width !== bw) imgCanvas.width = bw;
@@ -694,7 +715,7 @@ export function useCanvasRenderer(
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, cw, ch);
 
-      if (state.showTransparentRef.current) {
+      if (matteCanvas || state.showTransparentRef.current) {
         const sz = 16;
         if (!checkerPatternCacheRef.current || checkerPatternCacheRef.current.width !== cw || checkerPatternCacheRef.current.height !== ch) {
           const tile = document.createElement("canvas");
@@ -711,6 +732,15 @@ export function useCanvasRenderer(
         }
         ctx.fillStyle = checkerPatternCacheRef.current.pattern;
         ctx.fillRect(0, 0, cw, ch);
+        if (matteCanvas) {
+          if (matteCompositeKeyRef.current !== matteCanvas) {
+            matteCompositeRef.current = buildMatteComposite(img, matteCanvas);
+            matteCompositeKeyRef.current = matteCanvas;
+          }
+          if (matteCompositeRef.current) {
+            ctx.drawImage(matteCompositeRef.current, ox, oy, w, h);
+          }
+        }
       } else {
         ctx.drawImage(img, ox, oy, w, h);
       }
@@ -726,14 +756,15 @@ export function useCanvasRenderer(
       }
     }
 
-    renderMasks(canvasState);
+    if (!state.matteActiveRef.current) renderMasks(canvasState);
     renderDetections(canvasState);
     renderSam3Boxes(canvasState);
     return { dpr, width: bw, height: bh };
-  }, [refs, computeState, renderMasks, renderDetections, renderSam3Boxes, state.showTransparentRef, zoomRef, panRef]);
+  }, [refs, computeState, renderMasks, renderDetections, renderSam3Boxes, buildMatteComposite, state.showTransparentRef, state.matteActiveRef, state.matteAlphaRef, zoomRef, panRef]);
 
   const invalidateCache = useCallback(() => {
     maskCacheKeyRef.current = "";
+    matteCompositeKeyRef.current = null;
     transparentCompositeKeyRef.current = "";
     if (subjectMaskCacheRef.current) subjectMaskCacheRef.current.key = "";
     maskRevisionRef.current += 1;

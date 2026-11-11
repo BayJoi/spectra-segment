@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { useAtom } from "jotai";
 import { useSession } from "@/hooks/useSession";
 import { modelNameAtom, sam3ReadyAtom } from "@/store/session";
-import { uploadHoveredAtom, modeSwitchTargetAtom } from "@/store/ui";
+import { uploadHoveredAtom, modeSwitchTargetAtom, modeLockAtom } from "@/store/ui";
 import { sam3ModeAtom } from "@/store/sam3";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { cn } from "@/lib/utils";
@@ -12,13 +12,16 @@ export function EmptyState() {
   const [modelName] = useAtom(modelNameAtom);
   const [sam3Mode] = useAtom(sam3ModeAtom);
   const [sam3Ready] = useAtom(sam3ReadyAtom);
+  const [modeLock] = useAtom(modeLockAtom);
+  const matteMode = modeLock === "matte";
+  const uploadBlocked = sam3Mode ? !sam3Ready : matteMode ? false : !modelName;
   const [, setUploadHovered] = useAtom(uploadHoveredAtom);
   const [, setModeSwitchTarget] = useAtom(modeSwitchTargetAtom);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
   const handleToggleMode = useCallback(
-    (target: "sam3" | "brush") => {
+    (target: "sam3" | "brush" | "matte") => {
       setModeSwitchTarget(target);
     },
     [setModeSwitchTarget]
@@ -36,13 +39,13 @@ export function EmptyState() {
     (e: React.DragEvent) => {
       e.preventDefault();
       setIsDragOver(false);
-      if (sam3Mode ? !sam3Ready : !modelName) return;
+      if (uploadBlocked) return;
       const file = e.dataTransfer.files[0];
       if (file && file.type.startsWith("image/")) {
         uploadImage(file);
       }
     },
-    [uploadImage, modelName, sam3Mode, sam3Ready]
+    [uploadImage, uploadBlocked]
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -70,27 +73,31 @@ export function EmptyState() {
       <div className="text-center hero-entrance hero-delay-2">
         <p className="text-neutral-300 text-sm font-medium font-sans">Add an image to get started</p>
         <p className="text-neutral-600 text-xs mt-1.5 font-sans">
-          {!modelName && !sam3Mode
+          {!modelName && !sam3Mode && !matteMode
             ? "Choose a mode, then drop or upload an image"
-            : sam3Mode && !sam3Ready
-              ? "Loading SAM 3 model - upload will be available shortly"
-              : sam3Mode
-                ? "Type a text prompt to segment every matching object - e.g. \"person\", \"car\", \"red bottle\""
-              : isDragOver
+            : matteMode
+              ? isDragOver
                 ? "Release to upload"
-                : "Drop an image here or click Upload"}
+                : "Drop an image and cut out the subject - no prompt needed; matte is slightly heavier than Brush/Detect"
+              : sam3Mode && !sam3Ready
+                ? "Loading SAM 3 model - upload will be available shortly"
+                : sam3Mode
+                  ? "Type a text prompt to segment every matching object - e.g. \"person\", \"car\", \"red bottle\""
+                  : isDragOver
+                    ? "Release to upload"
+                    : "Drop an image here or click Upload"}
         </p>
       </div>
 
-      <div className="hero-entrance hero-delay-2 inline-flex items-center gap-1 p-1 rounded-xl border border-neutral-800/60 bg-neutral-900/50">
+      <div className="hero-entrance hero-delay-2 inline-flex items-center gap-1 p-1 rounded-xl border border-neutral-800/60 bg-neutral-900/50 grain-bg">
         <Tooltip tip="Switch between Brush and Detect mode" side="bottom">
           <button
             onClick={() => handleToggleMode("brush")}
             className={cn(
-              "inline-flex items-center gap-1.5 h-8 px-3.5 rounded-lg text-[11px] font-medium font-sans transition-all duration-200 cursor-pointer select-none grain-bg",
-              !sam3Mode
-                ? "bg-neutral-800 text-neutral-100 border border-neutral-700 shadow"
-                : "text-neutral-500 hover:text-neutral-300 border border-transparent hover:scale-105 active:scale-95"
+              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[10px] font-medium font-sans transition-all duration-200 cursor-pointer select-none grain-bg",
+              !sam3Mode && !matteMode
+                ? "bg-orange-500/15 text-orange-100 border border-orange-500/35 shadow shadow-orange-500/10"
+                : "text-neutral-500 hover:text-orange-300 border border-transparent hover:scale-105 active:scale-95"
             )}
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -99,11 +106,27 @@ export function EmptyState() {
             B/D Mode
           </button>
         </Tooltip>
+        <Tooltip tip="Soft alpha cutout - slightly heavier than Brush/Detect" side="bottom">
+          <button
+            onClick={() => handleToggleMode("matte")}
+            className={cn(
+              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[10px] font-medium font-sans transition-all duration-200 cursor-pointer select-none grain-bg",
+              matteMode
+                ? "bg-orange-500/15 text-orange-100 border border-orange-500/40 shadow shadow-orange-500/10"
+                : "text-neutral-500 hover:text-orange-300 border border-transparent hover:scale-105 active:scale-95"
+            )}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3v18" /><path d="M4 8.5A8.5 8.5 0 0 1 12 3v18a8.5 8.5 0 0 1-8-8.5Z" />
+            </svg>
+            Matte
+          </button>
+        </Tooltip>
         <Tooltip tip="Text-based SAM 3 segmentation" side="bottom">
           <button
             onClick={() => handleToggleMode("sam3")}
             className={cn(
-              "inline-flex items-center gap-1.5 h-8 px-3.5 rounded-lg text-[11px] font-semibold font-sans transition-all duration-200 cursor-pointer select-none grain-bg",
+              "inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[10px] font-semibold font-sans transition-all duration-200 cursor-pointer select-none grain-bg",
               sam3Mode
                 ? "bg-gradient-to-r from-orange-500 to-orange-600 text-white border border-orange-500 shadow-lg shadow-orange-500/20 grain-bg-strong"
                 : "text-neutral-500 hover:text-orange-300 border border-transparent hover:scale-105 active:scale-95"
@@ -117,18 +140,18 @@ export function EmptyState() {
         </Tooltip>
       </div>
 
-      <Tooltip tip={!modelName && !sam3Mode ? "Choose a mode first" : sam3Mode && !sam3Ready ? "Loading SAM 3 model..." : "Upload image"} side="bottom">
+      <Tooltip tip={matteMode ? "Upload image" : !modelName && !sam3Mode ? "Choose a mode first" : sam3Mode && !sam3Ready ? "Loading SAM 3 model..." : "Upload image"} side="bottom">
         <span
-          onMouseEnter={() => !modelName && !sam3Mode && setUploadHovered(true)}
+          onMouseEnter={() => !matteMode && !modelName && !sam3Mode && setUploadHovered(true)}
           onMouseLeave={() => setUploadHovered(false)}
           className="hero-entrance hero-delay-2 mt-1 inline-flex"
         >
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={sam3Mode ? !sam3Ready : !modelName}
+            disabled={uploadBlocked}
             className={cn(
               "inline-flex items-center justify-center gap-2 h-10 px-5 rounded-xl text-sm font-medium font-sans transition-all duration-200 select-none grain-bg grain-bg-strong",
-              (sam3Mode ? !sam3Ready : !modelName)
+              uploadBlocked
                 ? "bg-neutral-800/50 border border-neutral-800/50 text-neutral-600 cursor-not-allowed opacity-50"
                 : "bg-gradient-to-r from-orange-500 to-orange-600 text-white hover:from-orange-400 hover:to-orange-500 hover:shadow-lg hover:shadow-orange-500/20 hover:scale-105 active:scale-95 cursor-pointer"
             )}

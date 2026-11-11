@@ -3,7 +3,8 @@ param(
     [string]$Backend = "NVIDIA",
     [int]$DetectedVramMb = 0,
     [switch]$Reconfigure,
-    [switch]$ForceCpu
+    [switch]$ForceCpu,
+    [switch]$ForceGpu
 )
 
 $ErrorActionPreference = "Stop"
@@ -138,7 +139,6 @@ function Emit-ProfileEnv {
 
     if ($mode -eq "cpu") {
         $lines.Add("SPECTRA_FORCE_CPU=1")
-        $lines.Add("SPECTRA_VRAM_FRACTION=0")
         $lines.Add("SPECTRA_VRAM_HARD_CAP=0")
         $lines.Add("SAM2_OFFLOAD_ENCODER=0")
         $lines.Add("SAM3_IDLE_UNLOAD_TIMEOUT=300")
@@ -160,7 +160,6 @@ function Emit-ProfileEnv {
         $splitMb = Get-SplitMb -mode $mode -vramMb $vramMb
         $conf = "garbage_collection_threshold:0.8,max_split_size_mb:$splitMb"
         $lines.Add("SPECTRA_FORCE_CPU=0")
-        $lines.Add("SPECTRA_VRAM_FRACTION=$(Format-Invariant $ModeFraction[$mode])")
         $lines.Add("SPECTRA_VRAM_HARD_CAP=$(Format-Invariant $HardCapFraction)")
         $lines.Add("SAM2_OFFLOAD_ENCODER=$offload")
         $lines.Add("SAM3_IDLE_UNLOAD_TIMEOUT=$idle")
@@ -183,7 +182,11 @@ function Format-Invariant {
 
 $cfg = Read-Config
 
-if (-not $Reconfigure -and $cfg.ContainsKey("vram_mode") -and ($cfg["vram_mode"] -in $ValidModes) -and (-not $ForceCpu -or $cfg["vram_mode"] -eq "cpu")) {
+$reuseStored = (-not $Reconfigure) -and $cfg.ContainsKey("vram_mode") -and ($cfg["vram_mode"] -in $ValidModes)
+if ($reuseStored -and $ForceCpu -and $cfg["vram_mode"] -ne "cpu") { $reuseStored = $false }
+if ($reuseStored -and $ForceGpu -and $cfg["vram_mode"] -eq "cpu") { $reuseStored = $false }
+
+if ($reuseStored) {
     $mode = $cfg["vram_mode"]
     $threads = ""
     if ($cfg.ContainsKey("cpu_threads") -and [string]$cfg["cpu_threads"] -match '^\d+$') { $threads = [string]$cfg["cpu_threads"] }
@@ -195,7 +198,7 @@ if (-not $Reconfigure -and $cfg.ContainsKey("vram_mode") -and ($cfg["vram_mode"]
     if ($Backend -eq "NVIDIA") { $vramMb = Get-NvidiaVramMb } else { $vramMb = $DetectedVramMb }
     Write-Host ""
     Write-Host "  [INFO]  Memory profile: $mode (from $ConfigPath)"
-    Write-Host "          To change it, run the launcher with: -reconfigure"
+    Write-Host "          To change it, run the launcher with: --reconfigure"
     Emit-ProfileEnv -mode $mode -threads $threads -ram $ram -backend $Backend -vramMb $vramMb
     exit 0
 }
@@ -219,16 +222,16 @@ Write-Host "  Detected GPU VRAM : $vramDesc"
 Write-Host "  Suggested profile : $suggested"
 Write-Host ""
 Write-Host "  Profiles:"
-Write-Host "    high     - keep models resident, biggest memory budget (budget ~90% VRAM)"
-Write-Host "    balanced - default behavior (budget ~60% VRAM)"
-Write-Host "    medium   - ~50% VRAM budget, tighter caches"
-Write-Host "    low      - ~30% VRAM budget, encoder offload, no co-residency"
+Write-Host "    high     - keep models resident, largest allocator split (~90% VRAM)"
+Write-Host "    balanced - default behavior (allocator split ~60% VRAM)"
+Write-Host "    medium   - allocator split ~50% VRAM, shorter idle timeout"
+Write-Host "    low      - allocator split ~30% VRAM, encoder offload, no co-residency"
 Write-Host "    cpu      - force CPU (uses only RAM + threads)"
 Write-Host ""
-Write-Host "  The profile is a residency target; the backend still uses the GPU and"
-Write-Host "  may transiently exceed it to finish the job. An absolute 90% ceiling"
-Write-Host "  guarantees VRAM is never crossed; only workloads that cannot fit in 90%"
-Write-Host "  of VRAM fall back to CPU encoding (slower, but full quality)."
+Write-Host "  The profile sets the allocator split and residency policy. Every GPU"
+Write-Host "  profile requests the same 90% hard cap; the backend logs whether the"
+Write-Host "  platform accepted it. When free VRAM drops below the next load's"
+Write-Host "  headroom, resident models are evicted before loading another model."
 Write-Host ""
 
 $map = @{
@@ -262,7 +265,7 @@ if ($mode -eq "cpu") {
 
 $ram = ""
 if ($ramMb -gt 0) {
-    $rinput = Read-Host "  CPU RAM budget (MB) [$ramMb]"
+    $rinput = Read-Host "  CPU RAM hard limit (MB) [$ramMb]"
     if (-not [string]::IsNullOrWhiteSpace($rinput)) {
         $rv = 0
         if ([int]::TryParse($rinput.Trim(), [ref]$rv) -and $rv -gt 0) { $ram = "$rv" }
@@ -274,6 +277,6 @@ $cfg = @{ "vram_mode" = $mode; "cpu_threads" = $threads; "cpu_ram_mb" = $ram }
 Write-Config -cfg $cfg
 Write-Host ""
 Write-Host "  [ OK ]  Saved memory profile: $mode (threads: $threads, RAM: $ram MB)"
-Write-Host "          To change later, run the launcher with: -reconfigure"
+Write-Host "          To change later, run the launcher with: --reconfigure"
 Emit-ProfileEnv -mode $mode -threads $threads -ram $ram -backend $Backend -vramMb $vramMb
 exit 0

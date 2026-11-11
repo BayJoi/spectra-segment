@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 import re
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import torch
 
 from .detector_base import Detection, DetectorBackend
-from ..utils.device import MODEL_WEIGHTS_DIR, release_gpu_memory
+from ..utils.device import MODEL_WEIGHTS_DIR, cpu_fallback_enabled, release_gpu_memory
 from ..utils.offline import offline_guard
 from ..utils.stderr_progress import StderrInterceptor as _StderrInterceptor
 
@@ -49,6 +52,16 @@ HF_MODEL_IDS = {
     "cogflorence-2.2-large": "thwri/CogFlorence-2.2-Large",
 }
 
+HF_MODEL_REVISIONS = {
+    "grounding-dino-tiny": "a2bb814dd30d776dcf7e30523b00659f4f141c71",
+    "grounding-dino-base": "12bdfa3120f3e7ec7b434d90674b3396eccf88eb",
+    "mm-gdino-base-all": "b32293f50a56f7218d9f73ff940ffb9eba84d63c",
+    "mm-gdino-large-all": "0445d0a0ae5f0fa6be689cf7243d4d0ef4ba7de0",
+    "florence-2-base": "5ca5edf5bd017b9919c05d08aebef5e4c7ac3bac",
+    "florence-2-large": "21a599d414c4d928c9032694c424fb94458e3594",
+    "cogflorence-2.2-large": "19f2c614fdfd18ba49c81d567d70d3a68313e0bb",
+}
+
 TRUSTED_HF_IDS = set(HF_MODEL_IDS.values())
 
 _FLORENCE_MODELS = {"florence-2-base", "florence-2-large", "cogflorence-2.2-large"}
@@ -57,11 +70,17 @@ _WEIGHTS_MIN_BYTES = 50 * 1024 * 1024
 _WEIGHTS_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth")
 
 
-def hf_weights_downloaded(hf_id: str, cache_root: Any = None) -> bool:
+def hf_weights_downloaded(
+    hf_id: str,
+    cache_root: Any = None,
+    revision: str | None = None,
+) -> bool:
     from pathlib import Path
 
     root = Path(cache_root) if cache_root else MODEL_WEIGHTS_DIR / "hf_cache"
     snapshots = root / "hub" / f"models--{hf_id.replace('/', '--')}" / "snapshots"
+    if revision:
+        snapshots = snapshots / revision
     if not snapshots.exists():
         return False
     for entry in snapshots.rglob("*"):
@@ -101,7 +120,12 @@ def _emit(model_name: str, **fields: Any) -> None:
     )
 
 
-def _snapshot_fetch(hf_id: str, cache_dir: Any, model_name: str) -> bool:
+def _snapshot_fetch(
+    hf_id: str,
+    cache_dir: Any,
+    model_name: str,
+    revision: str | None = None,
+) -> bool:
     try:
         from huggingface_hub import HfApi, hf_hub_download, snapshot_download
         from huggingface_hub.utils.tqdm import tqdm as hf_tqdm
@@ -129,14 +153,14 @@ def _snapshot_fetch(hf_id: str, cache_dir: Any, model_name: str) -> bool:
         )
 
     try:
-        info = HfApi().model_info(repo_id=hf_id, files_metadata=True)
+        info = HfApi().model_info(repo_id=hf_id, revision=revision, files_metadata=True)
         files = [(s.rfilename, int(s.size or 0)) for s in info.siblings if (s.size or 0) > 0]
     except Exception as e:
         LOGGER.debug("File listing failed for %s (%s)", hf_id, e)
         files = []
     if not files:
         try:
-            snapshot_download(repo_id=hf_id, cache_dir=hub_dir)
+            snapshot_download(repo_id=hf_id, revision=revision, cache_dir=hub_dir)
             return True
         except Exception as e:
             LOGGER.warning("Snapshot fetch failed for %s (%s) - falling back", hf_id, e)
@@ -192,7 +216,7 @@ def _snapshot_fetch(hf_id: str, cache_dir: Any, model_name: str) -> bool:
         others = [n for n, _ in files if n != main_name]
 
         def fetch_one(fname: str) -> None:
-            hf_hub_download(repo_id=hf_id, filename=fname, cache_dir=hub_dir)
+            hf_hub_download(repo_id=hf_id, filename=fname, revision=revision, cache_dir=hub_dir)
             with state_lock:
                 state["files_done"] += 1
             emit_combined()
@@ -261,41 +285,21 @@ def _florence_config_paths(hf_id: str) -> list[str]:
     return out
 
 
-def _clean_florence_config(cache_dir, hf_id: str, local_only: bool = False) -> None:
+def _florence_auto_map(hf_id: str) -> dict | None:
     import json
 
     for config_path in _florence_config_paths(hf_id):
-        config_path = Path(config_path)
         try:
-            with open(config_path) as f:
-                cfg = json.load(f)
+            cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
         except Exception:
             continue
-
-        auto_map = cfg.get("auto_map") or {}
+        auto_map = cfg.get("auto_map")
         if not isinstance(auto_map, dict):
             continue
-        cleaned_map = _normalize_auto_map(auto_map)
-        changed = cleaned_map != auto_map
-
-        if "AutoModelForZeroShotObjectDetection" in cleaned_map:
-            del cleaned_map["AutoModelForZeroShotObjectDetection"]
-            changed = True
-
-        if not changed:
-            continue
-
-        if cleaned_map:
-            cfg["auto_map"] = cleaned_map
-        else:
-            cfg.pop("auto_map", None)
-
-        try:
-            with open(config_path, "w") as f:
-                json.dump(cfg, f, indent=2)
-            LOGGER.debug("Cleaned %s auto_map at %s", config_path.name, config_path)
-        except OSError as e:
-            LOGGER.warning("Could not rewrite Florence %s: %s", config_path.name, e)
+        cleaned = _normalize_auto_map(auto_map)
+        cleaned.pop("AutoModelForZeroShotObjectDetection", None)
+        return cleaned
+    return None
 
 
 _FLORENCE_SDPA_BROKEN = [False]
@@ -305,8 +309,29 @@ def _florence_sdpa_broken() -> bool:
     return bool(_FLORENCE_SDPA_BROKEN[0])
 
 
-def _load_florence_model(hf_id: str, dtype: Any, local_only: bool = False) -> Any:
-    from transformers import AutoModelForCausalLM
+def _load_florence_model(
+    hf_id: str,
+    dtype: Any,
+    local_only: bool = False,
+    revision: str | None = None,
+) -> Any:
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = None
+    auto_map = _florence_auto_map(hf_id)
+    if auto_map is not None:
+        try:
+            with offline_guard(local_only):
+                config = AutoConfig.from_pretrained(
+                    hf_id,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                    revision=revision,
+                )
+            config.auto_map = auto_map
+        except Exception as exc:
+            LOGGER.debug("Florence: could not build a patched config: %s", exc)
+            config = None
 
     last_err: Exception | None = None
     for impl in ("sdpa", "eager"):
@@ -317,11 +342,13 @@ def _load_florence_model(hf_id: str, dtype: Any, local_only: bool = False) -> An
             with offline_guard(local_only):
                 model = AutoModelForCausalLM.from_pretrained(
                     hf_id,
+                    config=config,
                     torch_dtype=dtype,
                     trust_remote_code=True,
                     attn_implementation=impl,
                     local_files_only=local_only,
                     low_cpu_mem_usage=True,
+                    revision=revision,
                 )
             LOGGER.info("Florence: active attention implementation: %s", impl)
             return model
@@ -384,7 +411,56 @@ def _enable_florence_generation(model: Any) -> None:
         lm.generation_config = _florence_language_generation_config(model, lm)
 
 
-def _load_florence_detector(hf_id: str, model_name: str, device: str, local_only: bool = False) -> tuple[Any, Any, str]:
+def _florence_processor_source(hf_id: str) -> str | None:
+    from pathlib import Path
+    import json
+    import shutil
+    import tempfile
+
+    source = Path(hf_id)
+    config_path = source / "preprocessor_config.json"
+    if not source.is_dir() or not config_path.is_file():
+        return None
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    auto_map = config.get("auto_map")
+    if not isinstance(auto_map, dict):
+        return None
+    normalized = _normalize_auto_map(auto_map)
+    if normalized == auto_map:
+        return None
+    class_ref = normalized.get("AutoProcessor", "")
+    module_name = class_ref.split(".", 1)[0]
+    if not module_name or not (source / f"{module_name}.py").is_file():
+        return None
+
+    target = Path(tempfile.mkdtemp(prefix="spectra-florence-processor-"))
+    try:
+        for child in source.iterdir():
+            if not child.is_file() or child.suffix.lower() in {
+                ".bin", ".pth", ".pt", ".safetensors"
+            }:
+                continue
+            shutil.copy2(child, target / child.name)
+        config["auto_map"] = normalized
+        (target / "preprocessor_config.json").write_text(
+            json.dumps(config, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        shutil.rmtree(target, ignore_errors=True)
+        return None
+    return str(target)
+
+
+def _load_florence_detector(
+    hf_id: str,
+    model_name: str,
+    device: str,
+    local_only: bool = False,
+    revision: str | None = None,
+) -> tuple[Any, Any, str]:
     if hf_id not in TRUSTED_HF_IDS and not _is_trusted_local_path(hf_id):
         raise ValueError(
             f"Refusing trust_remote_code load of untrusted model '{hf_id}'. "
@@ -402,13 +478,22 @@ def _load_florence_detector(hf_id: str, model_name: str, device: str, local_only
     LOGGER.debug("Florence: transformers imported OK")
 
     LOGGER.debug("Florence: loading processor from %s ...", hf_id)
+    processor_source = _florence_processor_source(hf_id)
     old_stderr = sys.stderr
     sys.stderr = _StderrInterceptor("Florence-2")
     try:
         with offline_guard(local_only):
-            processor = AutoProcessor.from_pretrained(hf_id, trust_remote_code=True, local_files_only=local_only)
+            processor = AutoProcessor.from_pretrained(
+                processor_source or hf_id,
+                trust_remote_code=True,
+                local_files_only=local_only,
+                revision=revision,
+            )
     finally:
         sys.stderr = old_stderr
+        if processor_source is not None:
+            import shutil
+            shutil.rmtree(processor_source, ignore_errors=True)
     LOGGER.debug("Florence: processor loaded")
 
     try:
@@ -426,7 +511,7 @@ def _load_florence_detector(hf_id: str, model_name: str, device: str, local_only
             LOGGER.debug("Florence: loading model (with flash_attn patch)...")
             sys.stderr = _StderrInterceptor("Florence-2")
             try:
-                model = _load_florence_model(hf_id, dtype, local_only)
+                model = _load_florence_model(hf_id, dtype, local_only, revision)
             finally:
                 sys.stderr = old_stderr
     except Exception:
@@ -443,6 +528,8 @@ def _load_florence_detector(hf_id: str, model_name: str, device: str, local_only
         try:
             model = model.to(device)
         except Exception as e:
+            if not cpu_fallback_enabled():
+                raise
             LOGGER.warning("Device %s failed for Florence (%s), using CPU", device, e)
             actual_device = "cpu"
             model = model.to("cpu")
@@ -471,7 +558,13 @@ def _load_florence_detector(hf_id: str, model_name: str, device: str, local_only
     return processor, model, actual_device
 
 
-def _load_grounding_dino(hf_id: str, model_name: str, device: str, local_only: bool = False) -> tuple[Any, Any, str]:
+def _load_grounding_dino(
+    hf_id: str,
+    model_name: str,
+    device: str,
+    local_only: bool = False,
+    revision: str | None = None,
+) -> tuple[Any, Any, str]:
     from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
     import os
@@ -484,12 +577,17 @@ def _load_grounding_dino(hf_id: str, model_name: str, device: str, local_only: b
     sys.stderr = _StderrInterceptor("GroundingDINO")
     try:
         with offline_guard(local_only):
-            processor = AutoProcessor.from_pretrained(hf_id, local_files_only=local_only)
+            processor = AutoProcessor.from_pretrained(
+                hf_id,
+                local_files_only=local_only,
+                revision=revision,
+            )
             model = AutoModelForZeroShotObjectDetection.from_pretrained(
                 hf_id,
                 torch_dtype=dtype,
                 local_files_only=local_only,
                 low_cpu_mem_usage=True,
+                revision=revision,
             )
     finally:
         sys.stderr = old_stderr
@@ -499,6 +597,8 @@ def _load_grounding_dino(hf_id: str, model_name: str, device: str, local_only: b
         try:
             model = model.to(device)
         except Exception as e:
+            if not cpu_fallback_enabled():
+                raise
             LOGGER.warning("Device %s failed for detector (%s), using CPU", device, e)
             actual_device = "cpu"
             model = model.to("cpu")
@@ -526,6 +626,46 @@ def _load_grounding_dino(hf_id: str, model_name: str, device: str, local_only: b
     return processor, model, actual_device
 
 
+def _is_oom(exc: Exception) -> bool:
+    return isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower()
+
+
+def _limit_image(image: np.ndarray, max_side: int) -> tuple[np.ndarray, float]:
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest <= max_side:
+        return image, 1.0
+    scale = max_side / float(longest)
+    resized = cv2.resize(
+        image,
+        (max(1, round(width * scale)), max(1, round(height * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
+    return resized, scale
+
+
+def _scale_detections(
+    detections: list[Detection], scale: float, width: int, height: int
+) -> list[Detection]:
+    output: list[Detection] = []
+    for det in detections:
+        x1, y1, x2, y2 = det.bbox
+        output.append(
+            Detection(
+                bbox=[
+                    min(max(x1 / scale, 0.0), float(width)),
+                    min(max(y1 / scale, 0.0), float(height)),
+                    min(max(x2 / scale, 0.0), float(width)),
+                    min(max(y2 / scale, 0.0), float(height)),
+                ],
+                score=det.score,
+                label=det.label,
+                mask=det.mask,
+            )
+        )
+    return output
+
+
 class GroundingDetector(DetectorBackend):
     def __init__(self, device: str = "cpu") -> None:
         self._device = device
@@ -533,6 +673,10 @@ class GroundingDetector(DetectorBackend):
         self._model: Any = None
         self._is_florence: bool = False
         self._actual_device: str = device
+        self._max_side = max(800, int(os.environ.get("SPECTRA_DETECT_MAX_SIDE", "1280")))
+        self._active_side = self._max_side
+        self._allow_cpu_fallback = cpu_fallback_enabled()
+        self._infer_lock = threading.Lock()
 
     def load_model(self, model_path: str | None = None) -> None:
         model_name = model_path or "grounding-dino-tiny"
@@ -546,6 +690,7 @@ class GroundingDetector(DetectorBackend):
         from pathlib import Path
 
         hf_id = HF_MODEL_IDS[model_name]
+        revision = HF_MODEL_REVISIONS[model_name]
         cache_dir = MODEL_WEIGHTS_DIR / "hf_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         os.environ["HF_HOME"] = str(cache_dir)
@@ -553,6 +698,7 @@ class GroundingDetector(DetectorBackend):
         model_cache = Path(cache_dir) / "hub" / f"models--{hf_id.replace('/', '--')}"
         no_exist_dir = model_cache / ".no_exist"
         snapshots_dir = model_cache / "snapshots"
+        pinned_snapshot = snapshots_dir / revision
         if no_exist_dir.exists() and not snapshots_dir.exists():
             try:
                 no_exist_dir.rename(snapshots_dir)
@@ -569,65 +715,53 @@ class GroundingDetector(DetectorBackend):
         actual_device = None
         loaded = False
         try:
-            if snapshots_dir.exists():
-                snapshot_dirs = sorted(
-                    (d for d in snapshots_dir.iterdir() if d.is_dir()),
-                    key=lambda p: p.stat().st_mtime, reverse=True
-                )
-                if snapshot_dirs:
-                    local_path = str(snapshot_dirs[0])
-                    LOGGER.info("Loading %s (cached)", hf_id)
-                    try:
-                        if is_florence:
-                            _clean_florence_config(cache_dir, hf_id, local_only=True)
-                            processor, model, actual_device = _load_florence_detector(
-                                local_path, model_name, effective_device, local_only=True
-                            )
-                        else:
-                            processor, model, actual_device = _load_grounding_dino(
-                                local_path, model_name, effective_device, local_only=True
-                            )
-                        loaded = True
-                    except Exception as e:
-                        LOGGER.debug(
-                            "Local cache load failed for %s: %s - trying network", hf_id, e
+            if pinned_snapshot.is_dir():
+                local_path = str(pinned_snapshot)
+                LOGGER.info("Loading %s (cached, pinned %s)", hf_id, revision[:12])
+                try:
+                    if is_florence:
+                        processor, model, actual_device = _load_florence_detector(
+                            local_path, model_name, effective_device, local_only=True
                         )
-                        processor = model = actual_device = None
+                    else:
+                        processor, model, actual_device = _load_grounding_dino(
+                            local_path, model_name, effective_device, local_only=True
+                        )
+                    loaded = True
+                except Exception as e:
+                    LOGGER.debug(
+                        "Pinned cache load failed for %s: %s - trying network", hf_id, e
+                    )
+                    processor = model = actual_device = None
 
             if not loaded:
                 LOGGER.info("Not cached - downloading %s", model_name)
-                from backend.utils.net_check import is_connected
+                from ..utils.net_check import is_connected
                 if not is_connected():
                     raise RuntimeError(
                         f"Model '{hf_id}' not cached and no internet connection available.\n"
                         f"  Connect to the internet to download, or place the model in:\n"
                         f"  {cache_dir / 'hub'}"
                     ) from None
-                fetched = _snapshot_fetch(hf_id, cache_dir, model_name)
-                if fetched and snapshots_dir.exists():
-                    snapshot_dirs = sorted(
-                        (d for d in snapshots_dir.iterdir() if d.is_dir()),
-                        key=lambda p: p.stat().st_mtime, reverse=True
+                fetched = _snapshot_fetch(hf_id, cache_dir, model_name, revision)
+                if fetched and pinned_snapshot.is_dir():
+                    local_path = str(pinned_snapshot)
+                    LOGGER.info("Downloaded %s - loading from %s", model_name, hf_id)
+                    LOGGER.info(
+                        "%s: download complete",
+                        model_name,
+                        extra={"dl": {"name": model_name, "phase": "done",
+                                      "files_done": None, "files_total": None, "pct": 100}},
                     )
-                    if snapshot_dirs:
-                        local_path = str(snapshot_dirs[0])
-                        LOGGER.info("Downloaded %s - loading from %s", model_name, hf_id)
-                        LOGGER.info(
-                            "%s: download complete",
-                            model_name,
-                            extra={"dl": {"name": model_name, "phase": "done",
-                                          "files_done": None, "files_total": None, "pct": 100}},
+                    if is_florence:
+                        processor, model, actual_device = _load_florence_detector(
+                            local_path, model_name, effective_device, local_only=True
                         )
-                        if is_florence:
-                            _clean_florence_config(cache_dir, hf_id, local_only=True)
-                            processor, model, actual_device = _load_florence_detector(
-                                local_path, model_name, effective_device, local_only=True
-                            )
-                        else:
-                            processor, model, actual_device = _load_grounding_dino(
-                                local_path, model_name, effective_device, local_only=True
-                            )
-                        loaded = True
+                    else:
+                        processor, model, actual_device = _load_grounding_dino(
+                            local_path, model_name, effective_device, local_only=True
+                        )
+                    loaded = True
                 if not loaded:
                     LOGGER.info("Downloading %s via direct load", model_name)
                     disable_progress_bars = None
@@ -638,13 +772,12 @@ class GroundingDetector(DetectorBackend):
                         pass
                     try:
                         if is_florence:
-                            _clean_florence_config(cache_dir, hf_id, local_only=False)
                             processor, model, actual_device = _load_florence_detector(
-                                hf_id, model_name, effective_device, local_only=False
+                                hf_id, model_name, effective_device, local_only=False, revision=revision
                             )
                         else:
                             processor, model, actual_device = _load_grounding_dino(
-                                hf_id, model_name, effective_device, local_only=False
+                                hf_id, model_name, effective_device, local_only=False, revision=revision
                             )
                         loaded = True
                     finally:
@@ -663,6 +796,9 @@ class GroundingDetector(DetectorBackend):
         self._model = model
         self._actual_device = actual_device
         self._is_florence = is_florence
+        self._active_side = self._max_side
+        self._set_processor_size(self._active_side)
+        release_gpu_memory()
         LOGGER.debug("Loaded grounding detector: %s (%s)", model_name, hf_id)
 
     def unload_model(self) -> None:
@@ -670,6 +806,24 @@ class GroundingDetector(DetectorBackend):
         self._model = None
         self._is_florence = False
         release_gpu_memory()
+
+    def _set_processor_size(self, longest_side: int) -> None:
+        """Make the image processor honour the detector limit.
+
+        Grounding DINO otherwise rescales every input to its 1333 px default,
+        which made a 1280 -> 1024 retry use the same tensor and fail twice.
+        """
+        image_processor = getattr(self._processor, "image_processor", None)
+        if image_processor is None:
+            return
+        shortest = max(384, int(round(longest_side * 0.6)))
+        try:
+            image_processor.size = {
+                "shortest_edge": shortest,
+                "longest_edge": longest_side,
+            }
+        except Exception as exc:
+            LOGGER.debug("Could not set detector input size to %d px: %s", longest_side, exc)
 
     def detect(
         self,
@@ -681,9 +835,112 @@ class GroundingDetector(DetectorBackend):
         if self._model is None or self._processor is None:
             raise RuntimeError("Detector not loaded. Call load_model() first.")
 
+        with self._infer_lock:
+            sides: list[int] = []
+            for side in (self._active_side, min(self._max_side, 1280), 1024, 800):
+                side = min(side, self._max_side)
+                if side not in sides:
+                    sides.append(side)
+
+            last_oom: Exception | None = None
+            last_limited = image
+            last_side = sides[-1]
+            last_scale = 1.0
+            for index, side in enumerate(sides):
+                limited, scale = _limit_image(image, side)
+                self._set_processor_size(side)
+                try:
+                    detections = self._run_detect(limited, query, confidence, max_detections)
+                except Exception as exc:
+                    if not _is_oom(exc) or self._actual_device == "cpu":
+                        raise
+                    last_oom = exc
+                    last_limited = limited
+                    last_side = side
+                    last_scale = scale
+                    # Drop the failed forward's frame locals (input/output
+                    # tensors) before asking the allocator to release VRAM.
+                    if exc.__traceback__ is not None:
+                        traceback.clear_frames(exc.__traceback__)
+                    release_gpu_memory()
+                    if index < len(sides) - 1:
+                        next_side = sides[index + 1]
+                        LOGGER.warning(
+                            "Detector ran out of VRAM on %s at %d px; retrying at %d px on the GPU",
+                            self._actual_device,
+                            side,
+                            next_side,
+                            extra={
+                                "phase": "vram",
+                                "reason": "oom-retry",
+                                "max_side": next_side,
+                            },
+                        )
+                        continue
+                    break
+
+                self._active_side = side
+                if scale != 1.0:
+                    LOGGER.info(
+                        "Detection image limited to %d px (scale %.3f) to fit the AMD profile",
+                        side,
+                        scale,
+                        extra={"phase": "detect", "max_side": side, "scale": round(scale, 4)},
+                    )
+                    return _scale_detections(detections, scale, image.shape[1], image.shape[0])
+                return detections
+
+            if last_oom is None:
+                raise RuntimeError("Detector failed without an error")
+            if self._allow_cpu_fallback:
+                LOGGER.warning(
+                    "Detector exhausted VRAM on %s at %d px; falling back to CPU",
+                    self._actual_device,
+                    last_side,
+                    extra={"phase": "vram", "reason": "oom-cpu-opt-in"},
+                )
+                self._fallback_cpu()
+                self._set_processor_size(last_side)
+                detections = self._run_detect(
+                    last_limited, query, confidence, max_detections
+                )
+                if last_scale != 1.0:
+                    return _scale_detections(
+                        detections, last_scale, image.shape[1], image.shape[0]
+                    )
+                return detections
+            LOGGER.error(
+                "Detector exhausted VRAM on %s and automatic CPU fallback is disabled",
+                self._actual_device,
+                extra={"phase": "vram", "reason": "oom-no-fallback"},
+            )
+            raise torch.OutOfMemoryError(str(last_oom)) from last_oom
+
+    def _run_detect(
+        self,
+        image: np.ndarray,
+        query: str,
+        confidence: float | None,
+        max_detections: int,
+    ) -> list[Detection]:
         if self._is_florence:
             return self._detect_florence(image, query, max_detections, confidence)
         return self._detect_grounding_dino(image, query, confidence, max_detections)
+
+    def _fallback_cpu(self) -> None:
+        model = self._model
+        self._actual_device = "cpu"
+        if model is not None:
+            try:
+                model = model.float()
+            except Exception:
+                pass
+            try:
+                model = model.to("cpu")
+            except Exception as exc:
+                LOGGER.warning("Detector could not move to CPU: %s", exc)
+        self._model = model
+        release_gpu_memory()
 
     def _move_inputs_to_device(self, inputs: dict) -> dict:
         if self._actual_device != "cpu":
@@ -727,7 +984,8 @@ class GroundingDetector(DetectorBackend):
         inputs = self._move_inputs_to_device(inputs)
 
         is_half = next(self._model.parameters()).dtype == torch.float16
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=is_half):
+        autocast_device = "cpu" if self._actual_device == "cpu" else "cuda"
+        with torch.autocast(device_type=autocast_device, dtype=torch.float16, enabled=is_half):
             with torch.inference_mode():
                 generated_ids = self._model.generate(
                     input_ids=inputs["input_ids"],
@@ -791,7 +1049,8 @@ class GroundingDetector(DetectorBackend):
         inputs = self._move_inputs_to_device(inputs)
 
         is_half = next(self._model.parameters()).dtype == torch.float16
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=is_half):
+        autocast_device = "cpu" if self._actual_device == "cpu" else "cuda"
+        with torch.autocast(device_type=autocast_device, dtype=torch.float16, enabled=is_half):
             with torch.inference_mode():
                 outputs = self._model(**inputs)
 

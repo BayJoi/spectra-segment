@@ -4,9 +4,10 @@ Spectra Segment - Third-Party Licenses
 This project uses the following third-party packages and assets.
 
 Most dependencies are permissive (MIT / BSD / Apache-2.0) and combine with the
-project's GPL-3.0-only license. Two are special and are called out at the end:
-the ultralytics package is AGPL-3.0, which makes the combined, distributed work
-AGPL-3.0 (not GPL-3.0); and Meta's SAM weights ship under the Meta SAM License.
+project's GPL-3.0-only license. Three are special and are called out at the end:
+the ultralytics package and its CLIP text encoder are AGPL-3.0, which makes the
+combined, distributed work AGPL-3.0 (not GPL-3.0); and Meta's SAM weights ship
+under the Meta SAM License.
 Read the "LICENSE NOTE" section before distributing this project.
 
 
@@ -20,6 +21,9 @@ fastapi
 uvicorn
   License: BSD-3-Clause
   Copyright: Copyright (c) 2017-present Encode OSS Ltd.
+  Note: if installed with the `standard` extra, it also brings httptools
+  (MIT), watchfiles (MIT), websockets (BSD-3-Clause) and, on non-Windows
+  platforms, uvloop (MIT). These are runtime dependencies of that extra.
 
 python-multipart
   License: Apache-2.0
@@ -36,10 +40,20 @@ numpy
 opencv-python-headless
   License: Apache-2.0
   Copyright: Copyright (C) 2000-2025, Intel Corporation, all rights reserved.
+  Note: the prebuilt wheels bundle an FFmpeg build for video I/O. This project
+  uses still images only, but the bundled FFmpeg libraries remain part of the
+  wheel and carry their own LGPL/GPL terms depending on how they were built.
 
 ultralytics
   License: AGPL-3.0
   Copyright: Copyright (c) 2016-present, Ultralytics
+
+ultralytics CLIP (SAM 3 text encoder)
+  License: AGPL-3.0
+  Copyright: Copyright (c) 2016-present, Ultralytics
+  Source: https://github.com/ultralytics/CLIP
+  Note: the installers clone the repository source archive and install it into the
+  venv; it is only used for SAM 3 text prompts.
 
 transformers
   License: Apache-2.0
@@ -231,5 +245,25 @@ against a sha256 digest before it is used. Provenance is not uniform, though:
   * `sam3.pt` comes from a community mirror and its digest could not be confirmed
     against any official source. Treat it as third-party.
 
-Because the SAM 3 checkpoint and the ultralytics package are combined at runtime,
-review both the Meta SAM License and the AGPL-3.0 obligation before distributing.
+Because the SAM 3 checkpoint, the ultralytics package and the ultralytics CLIP
+text encoder are combined at runtime, review both the Meta SAM License and the
+AGPL-3.0 obligation before distributing.
+
+MATTE MODE (BiRefNet)
+---------------------
+
+BiRefNet code and weights
+  License: MIT
+  Source: https://github.com/ZhengPeng7/BiRefNet
+  Models: ZhengPeng7/BiRefNet, ZhengPeng7/BiRefNet_lite,
+          ZhengPeng7/BiRefNet_lite-matting, ZhengPeng7/BiRefNet-matting,
+          ZhengPeng7/BiRefNet_dynamic, ZhengPeng7/BiRefNet_dynamic-matting,
+          ZhengPeng7/BiRefNet-portrait, ZhengPeng7/BiRefNet_HR,
+          ZhengPeng7/BiRefNet_HR-matting, ZhengPeng7/BiRefNet_512x512
+          (Hugging Face, pinned revisions)
+  Note: the remote modeling code runs via trust_remote_code and is pinned to a
+        commit so the executed code cannot change silently.
+
+kornia
+  License: Apache-2.0
+  Note: imported by the BiRefNet remote code (Laplacian edge term).

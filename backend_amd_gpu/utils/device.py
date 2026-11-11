@@ -40,6 +40,11 @@ def _detect_nvidia() -> tuple[bool, str]:
     return False, ""
 
 
+def cpu_fallback_enabled() -> bool:
+    raw = os.environ.get("SPECTRA_ALLOW_CPU_FALLBACK", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off", "disabled")
+
+
 def detect_device() -> DeviceInfo:
     if os.environ.get("SPECTRA_FORCE_CPU") == "1":
         LOGGER.debug("CPU forced by memory profile (SPECTRA_FORCE_CPU=1)")
@@ -72,6 +77,10 @@ def detect_device() -> DeviceInfo:
 def release_gpu_memory() -> None:
     import gc
     import torch
+    # Collect first: an OOM traceback can keep the failed inference's GPU
+    # tensors referenced. Emptying the cache before those references are gone
+    # returns nothing to the driver.
+    gc.collect()
     if torch.cuda.is_available():
         try:
             torch.cuda.synchronize()
@@ -82,4 +91,3 @@ def release_gpu_memory() -> None:
                 getattr(torch.cuda, fn)()
             except Exception as exc:
                 LOGGER.debug("cuda.%s() failed during release: %s", fn, exc)
-    gc.collect()

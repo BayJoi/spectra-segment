@@ -6,7 +6,14 @@ set "VENV_PYTHON=%ROOT%backend\.venv\Scripts\python.exe"
 set "PIDFILE=%ROOT%\backend\.backend_pid"
 
 set "RC_ARG="
+:parse_args
+if "%~1"=="" goto :args_done
 if /i "%~1"=="-reconfigure" set "RC_ARG=-Reconfigure"
+if /i "%~1"=="--reconfigure" set "RC_ARG=-Reconfigure"
+if /i "%~1"=="/reconfigure" set "RC_ARG=-Reconfigure"
+shift
+goto :parse_args
+:args_done
 
 title Spectra Segment - Launcher (NVIDIA / CPU)
 
@@ -19,26 +26,48 @@ echo  ^|  Portable, self-contained. Everything stays in this folder ^|
 echo  +------------------------------------------------------------+
 echo(
 
-call :section "[ 1 / 5 ]  Preflight"
+call :section "[ 1 / 6 ]  Preflight"
 if not exist "%VENV_PYTHON%" (
     echo   [FAIL]  Virtual environment not found. Run install.bat first.
     pause
     exit /b 1
 )
+"%VENV_PYTHON%" -c "import sys" >nul 2>&1
+if errorlevel 1 (
+    echo   [FAIL]  Python environment is present but cannot start.
+    pause
+    exit /b 1
+)
+echo   [ OK ]  Python environment is ready.
 
-call :section "[ 2 / 5 ]  Memory profile"
+call :section "[ 2 / 6 ]  Memory profile"
 set "FORCE_CPU_ARG="
+set "FORCE_GPU_ARG="
 powershell -NoProfile -Command "if (Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'NVIDIA' }) { exit 0 } else { exit 1 }" >nul 2>&1
 if errorlevel 1 (
     echo   [INFO]  No NVIDIA GPU detected - using CPU mode.
     set "FORCE_CPU_ARG=-ForceCpu"
 ) else (
-    echo   [INFO]  NVIDIA GPU detected.
-    choice /c GC /n /m "  [INFO]  Use (G)PU or (C)PU? "
-    if errorlevel 2 set "FORCE_CPU_ARG=-ForceCpu"
+    pushd "%ROOT%"
+    "%VENV_PYTHON%" -c "import sys; from backend.utils.cuda_profile import get_cuda_profile; p=get_cuda_profile(); sys.exit(0 if p.available and p.supported else 1)" >nul 2>&1
+    set "CUDA_OK=!errorlevel!"
+    popd
+    if not "!CUDA_OK!"=="0" (
+        echo   [WARN]  NVIDIA GPU detected, but the installed PyTorch cannot run it.
+        echo           Re-run install.bat; using CPU for this launch.
+        set "FORCE_CPU_ARG=-ForceCpu"
+    ) else (
+        echo   [INFO]  NVIDIA GPU detected.
+        choice /c GC /n /m "  [INFO]  Use (G)PU or (C)PU? "
+        if errorlevel 2 (
+            set "FORCE_CPU_ARG=-ForceCpu"
+        ) else (
+            set "FORCE_GPU_ARG=-ForceGpu"
+        )
+    )
 )
 if not exist "%ROOT%launcher" mkdir "%ROOT%launcher" 2>nul
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launcher\setup_memory.ps1" -ConfigPath "%ROOT%backend\spectra_launcher.cfg" -Backend NVIDIA %RC_ARG% %FORCE_CPU_ARG%
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launcher\setup_memory.ps1" -ConfigPath "%ROOT%backend\spectra_launcher.cfg" -Backend NVIDIA %RC_ARG% %FORCE_CPU_ARG% %FORCE_GPU_ARG%
 if errorlevel 1 (
     echo   [FAIL]  Memory profile setup failed.
     pause
@@ -51,11 +80,19 @@ if exist "%ROOT%backend\spectra_launcher.cfg.env" (
 if defined SPECTRA_VRAM_MODE (
     echo   [INFO]  Active memory profile: !SPECTRA_VRAM_MODE!
     if defined SPECTRA_CPU_THREADS echo   [INFO]  CPU threads: !SPECTRA_CPU_THREADS!
-    if defined SPECTRA_CPU_RAM_MB echo   [INFO]  CPU RAM budget: !SPECTRA_CPU_RAM_MB! MB
+    if defined SPECTRA_CPU_RAM_MB echo   [INFO]  CPU RAM hard limit: !SPECTRA_CPU_RAM_MB! MB
+    if defined SPECTRA_VRAM_HARD_CAP if not "!SPECTRA_VRAM_HARD_CAP!"=="0" echo   [INFO]  VRAM hard cap ^(fraction^): !SPECTRA_VRAM_HARD_CAP!
     if "!SPECTRA_VRAM_MODE!"=="cpu" echo   [INFO]  CPU mode: forcing CPU inference
 )
 
-call :section "[ 3 / 5 ]  Checking Bun"
+call :section "[ 3 / 6 ]  Preparing model caches"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launcher\prepare_caches.ps1" -ModelWeights "%ROOT%backend\model_weights"
+if errorlevel 1 (
+    echo   [FAIL]  Could not prepare model caches.
+    pause
+    exit /b 1
+)
+call :section "[ 4 / 6 ]  Checking Bun"
 set "BUN_DIR_OVERRIDE=%ROOT%tools\bun-cpu"
 call "%ROOT%frontend\bun_env.cmd"
 if !errorlevel! neq 0 (
@@ -65,12 +102,16 @@ if !errorlevel! neq 0 (
     exit /b 1
 )
 
-call :section "[ 4 / 5 ]  Starting backend"
+call :section "[ 5 / 6 ]  Starting backend"
 powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and $p.CommandLine -like '*main:app*') { Stop-Process -Id $_ -Force } }; exit 0"
 powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and ($p.CommandLine -like '*run dev*' -or $p.CommandLine -like '*vite*')) { Stop-Process -Id $_ -Force } }; exit 0"
 if exist "%PIDFILE%" del "%PIDFILE%" >nul 2>&1
 if not exist "%ROOT%backend\logs" mkdir "%ROOT%backend\logs"
-start /b cmd /c ""%ROOT%backend\run.cmd" > "%ROOT%backend\backend_launch.log" 2>&1"
+for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"`) do set "LAUNCH_STAMP=%%t"
+if not defined LAUNCH_STAMP set "LAUNCH_STAMP=%RANDOM%"
+set "SPECTRA_LOG_FILE=%ROOT%backend\logs\backend_%LAUNCH_STAMP%.log"
+set "BACKEND_LAUNCH_LOG=%ROOT%backend\logs\launcher_%LAUNCH_STAMP%.log"
+start /b cmd /c ""%ROOT%backend\run.cmd" > "%BACKEND_LAUNCH_LOG%" 2>&1"
 echo   [ OK ]  backend started (port 8000)
 echo   [WAIT]  Waiting for backend at http://127.0.0.1:8000/health ...
 
@@ -81,14 +122,14 @@ if not errorlevel 1 set "CURL_OK=1"
 set "WAIT_SECONDS=0"
 :wait_backend
 if !WAIT_SECONDS! geq 30 (
-    echo   [FAIL]  Backend failed to start within 30 seconds.
-    if exist "%ROOT%\backend\backend_launch.log" (
-        echo   --- %ROOT%\backend\backend_launch.log ^(tail^) ---
-        powershell -NoProfile -Command "Get-Content -LiteralPath '%ROOT%\backend\backend_launch.log' -Tail 15"
+    echo   [FAIL]  Backend failed to start ^(waited up to 30 seconds^).
+    if exist "%BACKEND_LAUNCH_LOG%" (
+        echo   --- %BACKEND_LAUNCH_LOG% ^(tail^) ---
+        powershell -NoProfile -Command "Get-Content -LiteralPath '%BACKEND_LAUNCH_LOG%' -Tail 15"
     )
-    if exist "%ROOT%\backend\logs\backend.log" (
-        echo   --- %ROOT%\backend\logs\backend.log ^(tail^) ---
-        powershell -NoProfile -Command "Get-Content -LiteralPath '%ROOT%\backend\logs\backend.log' -Tail 15"
+    if exist "%SPECTRA_LOG_FILE%" (
+        echo   --- %SPECTRA_LOG_FILE% ^(tail^) ---
+        powershell -NoProfile -Command "Get-Content -LiteralPath '%SPECTRA_LOG_FILE%' -Tail 15"
     )
     pause
     exit /b 1
@@ -109,10 +150,10 @@ for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENIN
     echo %%p > "%ROOT%\backend\.backend_pid"
 )
 
-call :section "[ 5 / 5 ]  Starting frontend"
+call :section "[ 6 / 6 ]  Starting frontend"
 echo   [ OK ]  Backend ready at http://127.0.0.1:8000
 set "WEB_DIR=%ROOT%backend\web"
-call "%ROOT%frontend\use_web.bat" "%WEB_DIR%" >nul 2>&1
+call "%ROOT%frontend\use_web.bat" "%WEB_DIR%"
 if errorlevel 1 (
     echo   [FAIL]  Could not set up frontend workspace at %WEB_DIR%
     goto :frontend_done

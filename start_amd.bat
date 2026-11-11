@@ -9,25 +9,46 @@ set "VENV_PYTHON=%AMD_DIR%\.venv\Scripts\python.exe"
 set "MODEL_WEIGHTS=%AMD_DIR%\model_weights"
 
 set "RC_ARG="
+set "CLI_MODE="
+:parse_args
+if "%~1"=="" goto :args_done
 if /i "%~1"=="-reconfigure" set "RC_ARG=-Reconfigure"
+if /i "%~1"=="--reconfigure" set "RC_ARG=-Reconfigure"
+if /i "%~1"=="/reconfigure" set "RC_ARG=-Reconfigure"
+if /i "%~1"=="-cpu" set "CLI_MODE=-ForceCpu"
+if /i "%~1"=="--cpu" set "CLI_MODE=-ForceCpu"
+if /i "%~1"=="/cpu" set "CLI_MODE=-ForceCpu"
+if /i "%~1"=="-gpu" set "CLI_MODE=-ForceGpu"
+if /i "%~1"=="--gpu" set "CLI_MODE=-ForceGpu"
+if /i "%~1"=="/gpu" set "CLI_MODE=-ForceGpu"
+shift
+goto :parse_args
+:args_done
 
 echo(
 echo  +------------------------------------------------------------+
 echo  ^|                      SPECTRA SEGMENT                       ^|
-echo  ^|                  Launcher (AMD GPU / CPU)                  ^|
+echo  ^|                    Launcher (AMD ROCm)                     ^|
 echo  ^|  Portable, self-contained. Everything stays in this folder ^|
 echo  +------------------------------------------------------------+
 echo(
 
-call :section "[ 1 / 6 ]  Preflight"
+call :section "[ 1 / 6 ]  Environment"
 if not exist "%VENV_PYTHON%" (
     echo   [FAIL]  AMD venv not found at %AMD_DIR%\.venv
     echo           Run install_amd.bat first.
     pause
     exit /b 1
 )
+"%VENV_PYTHON%" -c "import sys" >nul 2>&1
+if errorlevel 1 (
+    echo   [FAIL]  AMD Python environment is present but cannot start.
+    pause
+    exit /b 1
+)
+echo   [ OK ]  AMD Python environment is ready.
 
-call :section "[ 2 / 6 ]  Configuring AMD GPU"
+call :section "[ 2 / 6 ]  GPU"
 set "PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512"
 set "PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512"
 set "MIOPEN_DEBUG_DISABLE_FIND_DB=0"
@@ -35,85 +56,69 @@ set "PYTORCH_TUNABLEOP_CACHE_DIR=%MODEL_WEIGHTS%\tunableop_cache"
 set "HSA_ENABLE_SDMA=0"
 if not defined TORCH_BLAS_PREFER_HIPBLASLT set "TORCH_BLAS_PREFER_HIPBLASLT=1"
 if not defined DISABLE_ADDMM_CUDA_LT set "DISABLE_ADDMM_CUDA_LT=1"
-if not defined SPECTRA_DETECTOR_FP16 set "SPECTRA_DETECTOR_FP16=1"
 set "MIMALLOC_PURGE_DELAY=0"
-if defined AMD_GFX_OVERRIDE (
-    set "AMD_GFX=%AMD_GFX_OVERRIDE%"
-    echo   [INFO]  AMD GPU arch: !AMD_GFX!  ^(from AMD_GFX_OVERRIDE^)
-    goto :gpu_configured
-)
 
-if not exist "%MODEL_WEIGHTS%" mkdir "%MODEL_WEIGHTS%"
+set "HARDWARE_CFG=%AMD_DIR%\spectra_amd_hardware.cfg"
+set "LAUNCHER_CFG=%AMD_DIR%\spectra_launcher.cfg"
+if not exist "%MODEL_WEIGHTS%" mkdir "%MODEL_WEIGHTS%" 2>nul
+if defined AMD_GFX_OVERRIDE (
+    "%VENV_PYTHON%" "%AMD_DIR%\detect_amd_gpu.py" --gfx "%AMD_GFX_OVERRIDE%" --write-config "%HARDWARE_CFG%" --write-launcher-config "%LAUNCHER_CFG%" >nul 2>&1
+)
+if not exist "%HARDWARE_CFG%" (
+    "%VENV_PYTHON%" "%AMD_DIR%\detect_amd_gpu.py" --write-config "%HARDWARE_CFG%" --write-launcher-config "%LAUNCHER_CFG%" >nul 2>&1
+)
+set "AMD_GFX="
 set "AMD_VRAM=0"
-"%VENV_PYTHON%" "%AMD_DIR%\detect_amd_gpu.py" >"%MODEL_WEIGHTS%\.gpu_arch.txt" 2>nul
-if exist "%MODEL_WEIGHTS%\.gpu_arch.txt" (
-    set "AMD_GFX="
-    set "AMD_VRAM=0"
-    set "LN=0"
-    for /f "usebackq delims=" %%a in ("%MODEL_WEIGHTS%\.gpu_arch.txt") do (
-        set /a LN+=1
-        if !LN!==1 (set "AMD_GFX=%%a") else if !LN!==2 (set "AMD_VRAM=%%a") else (if not "%%a"=="" set "AMD_HSA_OVERRIDE_AUTO=%%a")
-    )
+if exist "%HARDWARE_CFG%" for /f "usebackq tokens=1,* delims==" %%a in ("%HARDWARE_CFG%") do set "%%a=%%b"
+if defined AMD_VRAM_MB set "AMD_VRAM=%AMD_VRAM_MB%"
+if not defined AMD_GFX goto :no_amd_gpu
+
+echo   [INFO]  GPU: !AMD_GPU_NAME! - !AMD_GFX! - !AMD_FAMILY!
+echo   [INFO]  Profile: !AMD_PROFILE! - detector !AMD_DETECT_MAX_SIDE! px - matte !SPECTRA_MATTE_INPUT_SIZE! px
+if /i not "!AMD_GPU_SUPPORT!"=="release" echo   [WARN]  GPU support: !AMD_GPU_SUPPORT!
+if defined AMD_AOTRITON if "!AMD_AOTRITON!"=="1" set "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1"
+if defined AMD_QUANTIZE (
+    if not defined SAM2_QUANTIZE set "SAM2_QUANTIZE=!AMD_QUANTIZE!"
+    if not defined SAM3_QUANTIZE set "SAM3_QUANTIZE=!AMD_QUANTIZE!"
 )
-del "%MODEL_WEIGHTS%\.gpu_arch.txt" 2>nul
-if defined AMD_GFX (
-    echo   [INFO]  AMD GPU arch: !AMD_GFX!
-    set "IS_LEGACY_SDP=1"
-    if "!AMD_GFX:~0,6!"=="gfx110" set "IS_LEGACY_SDP="
-    if "!AMD_GFX:~0,6!"=="gfx115" set "IS_LEGACY_SDP="
-    if "!AMD_GFX:~0,5!"=="gfx12" set "IS_LEGACY_SDP="
-    if defined IS_LEGACY_SDP (
-        echo   [INFO]  RDNA2/older - Flash/MemEff SDP unsupported, using Math SDP
-        set "TORCH_BACKENDS_CUDA_MEM_EFF_SDP_ENABLED=0"
-        set "TORCH_BACKENDS_CUDA_FLASH_SDP_ENABLED=0"
-        set "TORCH_BACKENDS_CUDA_MATH_SDP_ENABLED=1"
-    ) else (
-        set "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1"
-    )
-) else (
-    echo   [INFO]  AMD GPU not detected - starting anyway ^(CPU fallback^)
+if defined AMD_FP16 if "!AMD_FP16!"=="0" set "SPECTRA_DETECTOR_FP16=0"
+if defined AMD_FP16 if "!AMD_FP16!"=="0" set "SPECTRA_MATTE_FP16=0"
+if defined AMD_DETECT_MAX_SIDE set "SPECTRA_DETECT_MAX_SIDE=!AMD_DETECT_MAX_SIDE!"
+if defined AMD_HSA_OVERRIDE if not defined HSA_OVERRIDE_GFX_VERSION (
+    set "HSA_OVERRIDE_GFX_VERSION=!AMD_HSA_OVERRIDE!"
+    echo   [INFO]  HSA override: !HSA_OVERRIDE_GFX_VERSION!
 )
+goto :gpu_configured
+
+:no_amd_gpu
+echo   [WARN]  No supported AMD GPU detected - using CPU.
 
 :gpu_configured
-
-if defined AMD_GFX (
-    if not defined HSA_OVERRIDE_GFX_VERSION (
-        if defined AMD_HSA_OVERRIDE (
-            set "HSA_OVERRIDE_GFX_VERSION=!AMD_HSA_OVERRIDE!"
-            echo   [INFO]  HSA_OVERRIDE_GFX_VERSION=!HSA_OVERRIDE_GFX_VERSION! ^(user AMD_HSA_OVERRIDE^)
-        )
-        if not defined HSA_OVERRIDE_GFX_VERSION if defined AMD_HSA_OVERRIDE_AUTO (
-            set "HSA_OVERRIDE_GFX_VERSION=!AMD_HSA_OVERRIDE_AUTO!"
-            echo   [INFO]  HSA_OVERRIDE_GFX_VERSION=!HSA_OVERRIDE_GFX_VERSION! ^(wheel kernel family mapping^)
-        )
-        if not defined HSA_OVERRIDE_GFX_VERSION (
-            set "GFX5=!AMD_GFX:~0,5!"
-            set "AMD_HSA_MAP="
-            if "!GFX5!"=="gfx101" set "AMD_HSA_MAP=10.1.0"
-            if "!GFX5!"=="gfx103" set "AMD_HSA_MAP=10.3.0"
-            if "!GFX5!"=="gfx110" set "AMD_HSA_MAP=11.0.0"
-            if defined AMD_HSA_MAP (
-                set "HSA_OVERRIDE_GFX_VERSION=!AMD_HSA_MAP!"
-                echo   [INFO]  HSA_OVERRIDE_GFX_VERSION=!HSA_OVERRIDE_GFX_VERSION! ^(wheel kernel family mapping^)
-            ) else (
-                set "GFX4=!AMD_GFX:~0,4!"
-                if "!GFX4!"=="gfx9" echo   [WARN]  !AMD_GFX! has no kernels in therock multi-arch wheels - CPU fallback expected.
-            )
-        )
-    )
-)
-
-call :section "[ 3 / 6 ]  Memory profile"
+call :section "[ 3 / 6 ]  Memory"
 set "FORCE_CPU_ARG="
-if defined AMD_GFX (
-    choice /c GC /n /m "  [INFO]  AMD GPU detected - use (G)PU or (C)PU? "
-    if errorlevel 2 set "FORCE_CPU_ARG=-ForceCpu"
+set "FORCE_GPU_ARG="
+set "STORED_MODE="
+if exist "%LAUNCHER_CFG%" for /f "usebackq tokens=1,* delims==" %%a in ("%LAUNCHER_CFG%") do if /i "%%a"=="vram_mode" set "STORED_MODE=%%b"
+if defined RC_ARG (
+    if defined AMD_GFX (
+        choice /c GC /n /m "  [INFO]  AMD GPU detected - use (G)PU or (C)PU? "
+        if errorlevel 2 (set "FORCE_CPU_ARG=-ForceCpu") else (set "FORCE_GPU_ARG=-ForceGpu")
+    ) else (
+        set "FORCE_CPU_ARG=-ForceCpu"
+    )
+) else if /i "!STORED_MODE!"=="cpu" (
+    set "FORCE_CPU_ARG=-ForceCpu"
+) else if defined AMD_GFX (
+    set "FORCE_GPU_ARG=-ForceGpu"
 ) else (
-    echo   [INFO]  No AMD GPU detected - using CPU mode.
     set "FORCE_CPU_ARG=-ForceCpu"
 )
 if not exist "%ROOT%launcher" mkdir "%ROOT%launcher" 2>nul
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launcher\setup_memory.ps1" -ConfigPath "%AMD_DIR%\spectra_launcher.cfg" -Backend AMD -DetectedVramMb "!AMD_VRAM!" %RC_ARG% %FORCE_CPU_ARG%
+if defined CLI_MODE (
+    set "FORCE_CPU_ARG="
+    set "FORCE_GPU_ARG="
+)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launcher\setup_memory.ps1" -ConfigPath "%AMD_DIR%\spectra_launcher.cfg" -Backend AMD -DetectedVramMb "!AMD_VRAM!" %RC_ARG% %FORCE_CPU_ARG% %FORCE_GPU_ARG% %CLI_MODE%
 if errorlevel 1 (
     echo   [FAIL]  Memory profile setup failed.
     pause
@@ -123,27 +128,14 @@ if exist "%AMD_DIR%\spectra_launcher.cfg.env" (
     for /f "usebackq delims=" %%a in ("%AMD_DIR%\spectra_launcher.cfg.env") do set "%%a"
     del "%AMD_DIR%\spectra_launcher.cfg.env" 2>nul
 )
-if defined SPECTRA_VRAM_MODE (
-    echo   [INFO]  Active memory profile: !SPECTRA_VRAM_MODE!
-    if defined SPECTRA_CPU_THREADS echo   [INFO]  CPU threads: !SPECTRA_CPU_THREADS!
-    if defined SPECTRA_CPU_RAM_MB echo   [INFO]  CPU RAM budget: !SPECTRA_CPU_RAM_MB! MB
-    if "!SPECTRA_VRAM_MODE!"=="cpu" echo   [INFO]  CPU mode: forcing CPU inference
+call :section "[ 4 / 6 ]  Caches"
+if not exist "%MODEL_WEIGHTS%" mkdir "%MODEL_WEIGHTS%" 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launcher\prepare_caches.ps1" -ModelWeights "%MODEL_WEIGHTS%"
+if errorlevel 1 (
+    echo   [FAIL]  Could not prepare model caches.
+    pause
+    exit /b 1
 )
-
-call :section "[ 4 / 6 ]  Preparing model caches"
-md "%MODEL_WEIGHTS%\hf_cache" 2>nul
-md "%MODEL_WEIGHTS%\torch_cache" 2>nul
-md "%MODEL_WEIGHTS%\cache" 2>nul
-md "%MODEL_WEIGHTS%\config" 2>nul
-md "%MODEL_WEIGHTS%\data" 2>nul
-md "%MODEL_WEIGHTS%\matplotlib" 2>nul
-md "%MODEL_WEIGHTS%\tunableop_cache" 2>nul
-md "%MODEL_WEIGHTS%\miopen\cache" 2>nul
-md "%MODEL_WEIGHTS%\tmp" 2>nul
-md "%MODEL_WEIGHTS%\hf_datasets" 2>nul
-md "%MODEL_WEIGHTS%\sentence_transformers" 2>nul
-md "%MODEL_WEIGHTS%\triton" 2>nul
-md "%MODEL_WEIGHTS%\numba" 2>nul
 
 set "HF_HOME=%MODEL_WEIGHTS%\hf_cache"
 set "HF_HUB_CACHE=%MODEL_WEIGHTS%\hf_cache\hub"
@@ -168,13 +160,17 @@ set "MIOPEN_USER_DB_PATH=%MODEL_WEIGHTS%\miopen"
 set "MIOPEN_CUSTOM_CACHE_DIR=%MODEL_WEIGHTS%\miopen\cache"
 set "PYTORCH_TUNABLEOP_CACHE_DIR=%MODEL_WEIGHTS%\tunableop_cache"
 
-call :section "[ 5 / 6 ]  Starting backend"
+call :section "[ 5 / 6 ]  Backend"
 powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and $p.CommandLine -like '*main:app*') { Stop-Process -Id $_ -Force } }; exit 0"
 powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -Expand OwningProcess -Unique | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_); if ($p -and ($p.CommandLine -like '*run dev*' -or $p.CommandLine -like '*vite*')) { Stop-Process -Id $_ -Force } }; exit 0"
 
 if not exist "%AMD_DIR%\logs" mkdir "%AMD_DIR%\logs"
+for /f "usebackq delims=" %%t in (`powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"`) do set "LAUNCH_STAMP=%%t"
+if not defined LAUNCH_STAMP set "LAUNCH_STAMP=%RANDOM%"
+set "SPECTRA_LOG_FILE=%AMD_DIR%\logs\backend_%LAUNCH_STAMP%.log"
+set "BACKEND_LAUNCH_LOG=%AMD_DIR%\logs\launcher_%LAUNCH_STAMP%.log"
 echo   [INFO]  Starting backend (port 8000)...
-start /B "Spectra-Segment-Backend-AMD" cmd /c ""%AMD_DIR%\run.cmd" > "%AMD_DIR%\backend_launch.log" 2>&1"
+start /B "Spectra-Segment-Backend-AMD" cmd /c ""%AMD_DIR%\run.cmd" > "%BACKEND_LAUNCH_LOG%" 2>&1"
 
 echo   [WAIT]  Waiting for backend at http://127.0.0.1:8000/health ...
 set "CURL_OK="
@@ -184,22 +180,22 @@ set "RETRIES=0"
 :health_loop
 timeout /t 2 /nobreak >nul
 set /a RETRIES+=1
-if !RETRIES! gtr 30 (
-    echo   [FAIL]  Backend did not start within 60 seconds
-    if exist "%AMD_DIR%\backend_launch.log" (
-        echo   --- %AMD_DIR%\backend_launch.log ^(tail^) ---
-        powershell -NoProfile -Command "Get-Content -LiteralPath '%AMD_DIR%\backend_launch.log' -Tail 15"
+if !RETRIES! geq 30 (
+    echo   [FAIL]  Backend did not start ^(waited up to 60 seconds^)
+    if exist "%BACKEND_LAUNCH_LOG%" (
+        echo   --- %BACKEND_LAUNCH_LOG% ^(tail^) ---
+        powershell -NoProfile -Command "Get-Content -LiteralPath '%BACKEND_LAUNCH_LOG%' -Tail 15"
     )
-    if exist "%AMD_DIR%\logs\backend.log" (
-        echo   --- %AMD_DIR%\logs\backend.log ^(tail^) ---
-        powershell -NoProfile -Command "Get-Content -LiteralPath '%AMD_DIR%\logs\backend.log' -Tail 15"
+    if exist "%SPECTRA_LOG_FILE%" (
+        echo   --- %SPECTRA_LOG_FILE% ^(tail^) ---
+        powershell -NoProfile -Command "Get-Content -LiteralPath '%SPECTRA_LOG_FILE%' -Tail 15"
     )
-    echo           Check: %AMD_DIR%\logs\backend.log
+    echo           Check: %SPECTRA_LOG_FILE%
     pause
     exit /b 1
 )
 if defined CURL_OK (
-    curl -s -o nul --max-time 3 http://127.0.0.1:8000/health >nul 2>&1
+    curl -s -o nul --max-time 2 http://127.0.0.1:8000/health >nul 2>&1
     if not errorlevel 1 goto :backend_ready
 ) else (
     for /f "tokens=*" %%a in ('powershell -NoProfile -Command "try { $null = (New-Object System.Net.WebClient).DownloadString('http://127.0.0.1:8000/health'); 'ok' } catch { 'no' }" 2^>nul') do (
@@ -211,7 +207,7 @@ goto :health_loop
 :backend_ready
 echo   [ OK ]  Backend is ready
 
-call :section "[ 6 / 6 ]  Starting frontend"
+call :section "[ 6 / 6 ]  Frontend"
 set "WEB_DIR=%AMD_DIR%\web"
 set "BUN_DIR_OVERRIDE=%ROOT%tools\bun-amd"
 call "%ROOT%frontend\bun_env.cmd"
@@ -221,7 +217,7 @@ if errorlevel 1 (
     echo   [WARN]  Frontend not started
     goto :amd_done
 )
-call "%ROOT%frontend\use_web.bat" "%WEB_DIR%" >nul 2>&1
+call "%ROOT%frontend\use_web.bat" "%WEB_DIR%"
 if errorlevel 1 (
     echo   [FAIL]  Could not set up frontend workspace at %WEB_DIR%
     echo           Backend is running - use stop_amd.bat to stop it.
@@ -247,15 +243,12 @@ echo  ^|  Backend:  http://127.0.0.1:8000                           ^|
 echo  ^|  Frontend: http://127.0.0.1:3000                           ^|
 echo  +------------------------------------------------------------+
 echo(
-echo   [INFO]  Logs: %AMD_DIR%\logs\backend.log
+echo   [INFO]  Logs: %SPECTRA_LOG_FILE%
 echo(
 endlocal
 exit /b 0
 
 :section
 echo(
-echo   ================================================================
-echo    %~1
-echo   ----------------------------------------------------------------
-echo(
+echo   %~1
 exit /b 0

@@ -33,6 +33,14 @@ import {
   selectedSam3InstanceAtom,
 } from "@/store/sam3";
 import { api, ApiError, resetObjectMaskCache } from "@/lib/api";
+import {
+  matteActiveLayerIdAtom,
+  matteGuideAtom,
+  matteInfoAtom,
+  matteLayersAtom,
+  matteStrokesAtom,
+} from "@/store/matte";
+import { createMatteLayer } from "@/lib/matte";
 import { emitUi, logErr } from "@/store/logs";
 import { isSupportedImage, fitImageFile } from "@/lib/utils";
 import { HistoryQueue, availableSteps, type HistoryKind } from "@/lib/historyQueue";
@@ -78,7 +86,7 @@ export function useSession() {
   const [, setSelectedLayers] = useAtom(selectedLayersAtom);
   const [, setDetections] = useAtom(detectionsAtom);
   const [, setSelectedDetection] = useAtom(selectedDetectionAtom);
-  const [, setModeLock] = useAtom(modeLockAtom);
+  const [modeLock, setModeLock] = useAtom(modeLockAtom);
   const [, setModeDialogOpen] = useAtom(modeDialogOpenAtom);
   const [, setShowTransparent] = useAtom(showTransparentAtom);
   const [, setHideBboxes] = useAtom(hideBboxesAtom);
@@ -86,6 +94,11 @@ export function useSession() {
   const [, setImageEncoding] = useAtom(imageEncodingAtom);
   const [, setEncodingMessage] = useAtom(encodingMessageAtom);
   const [sam3Mode] = useAtom(sam3ModeAtom);
+  const [, setMatteInfo] = useAtom(matteInfoAtom);
+  const [, setMatteStrokes] = useAtom(matteStrokesAtom);
+  const [, setMatteLayers] = useAtom(matteLayersAtom);
+  const [, setMatteActiveLayerId] = useAtom(matteActiveLayerIdAtom);
+  const [, setMatteGuide] = useAtom(matteGuideAtom);
   const [, setSam3Prompts] = useAtom(sam3PromptsAtom);
   const [, setSam3RedoStack] = useAtom(sam3RedoStackAtom);
   const [, setSam3Prompting] = useAtom(sam3PromptingAtom);
@@ -169,20 +182,29 @@ export function useSession() {
     setBrushObjects([0]);
     setActiveObjectId(0);
     setSubjectMeta({ 0: { id: 0, name: subjectName(0), color: subjectColor(0) } });
+    setMatteInfo(null);
+    setMatteStrokes({ points: [], labels: [] });
+    setMatteLayers([createMatteLayer(0)]);
+    setMatteActiveLayerId(0);
+    setMatteGuide("auto");
   }, [
     setObjectUndoCounts, setObjectRedoCounts, setObjectHistory, setObjectMasks,
     setMasks, setBrushObjects, setActiveObjectId, setSubjectMeta,
+    setMatteInfo, setMatteStrokes,
+    setMatteLayers, setMatteActiveLayerId, setMatteGuide,
   ]);
 
   const sam3ModeRef = useRef(sam3Mode);
   sam3ModeRef.current = sam3Mode;
   const modelNameRef = useRef(modelName);
   modelNameRef.current = modelName;
+  const modeLockRef = useRef(modeLock);
+  modeLockRef.current = modeLock;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
   const createSession = useCallback(
-    async (model: string, fileToReUpload?: File | null) => {
+    async (model: string | null, fileToReUpload?: File | null) => {
       try {
         const res = await api.createSession(model);
         sessionIdRef.current = res.session_id;
@@ -228,16 +250,17 @@ export function useSession() {
       uploadGuard.busy = true;
       let launched = false;
       try {
+        const matteOnly = modeLockRef.current === "matte";
         let sid = sessionId;
         if (!sid) {
-          const activeModel = modelNameRef.current;
-          if (!activeModel) {
+          const activeModel = matteOnly ? null : modelNameRef.current;
+          if (!matteOnly && !activeModel) {
             emitUi("upload", "WARNING", "Upload dropped - no model selected yet");
             return;
           }
           try {
             const res = await api.createSession(activeModel);
-            if (modelNameRef.current !== activeModel) {
+            if (!matteOnly && modelNameRef.current !== activeModel) {
               api.destroySession(res.session_id).catch(() => {});
               emitUi("upload", "WARNING", "Upload dropped - model changed mid-flight");
               return;
@@ -252,6 +275,7 @@ export function useSession() {
             return;
           }
         }
+        const replacing = !!imageFile;
         if (previousBlobUrlRef.current) {
           URL.revokeObjectURL(previousBlobUrlRef.current);
         }
@@ -268,7 +292,7 @@ export function useSession() {
         setSelectedLayers(new Set<string>());
         setShowTransparent(false);
         setHideBboxes(false);
-        setModeLock(null);
+        if (!matteOnly && !replacing) setModeLock(null);
         setSam3Prompts([]);
         setSam3RedoStack([]);
         setSam3Instances([]);
@@ -284,7 +308,7 @@ export function useSession() {
             if (resized) {
               emitUi("upload", "INFO", `Image resized to ${res.width}x${res.height} before upload`);
             }
-            if (!sam3ModeRef.current) setModeDialogOpen(true);
+            if (!sam3ModeRef.current && !matteOnly && !replacing) setModeDialogOpen(true);
           })
           .catch((err) => {
             logErr("upload", err);
@@ -299,7 +323,7 @@ export function useSession() {
         if (!launched) uploadGuard.busy = false;
       }
     },
-    [sessionId, sam3Mode, setSessionId, setModelName, setImageUrl, setImageFile, setMasks, setLayers, setImageWidth, setImageHeight, setImageEncoding, setEncodingMessage, setModeLock, setModeDialogOpen, setDetections, setSelectedDetection, setSelectedLayers, setShowTransparent, setHideBboxes, setSam3Prompts, setSam3RedoStack, resetUndoRedoState, setUnsupportedFile]
+    [sessionId, sam3Mode, imageFile, setSessionId, setModelName, setImageUrl, setImageFile, setMasks, setLayers, setImageWidth, setImageHeight, setImageEncoding, setEncodingMessage, setModeLock, setModeDialogOpen, setDetections, setSelectedDetection, setSelectedLayers, setShowTransparent, setHideBboxes, setSam3Prompts, setSam3RedoStack, resetUndoRedoState, setUnsupportedFile]
   );
 
   const switchModel = useCallback(
@@ -388,7 +412,7 @@ export function useSession() {
     emitUi("session", "WARNING", "Session expired on the server - recovering");
     resetUndoRedoState();
     setLayers((prev) => prev.filter((l) => l.type !== "brush"));
-    await createSession(modelName, imageFile);
+    await createSession(modeLockRef.current === "matte" ? null : modelName, imageFile);
   }, [sessionId, modelName, imageFile, createSession, resetUndoRedoState, setLayers]);
 
   const applyPredict = useCallback(
@@ -412,7 +436,13 @@ export function useSession() {
   }, []);
 
   const predict = useCallback(
-    (params: { object_id?: number; points?: number[][]; labels?: number[]; bboxes?: number[] }) => {
+    (params: {
+      object_id?: number;
+      points?: number[][];
+      labels?: number[];
+      bboxes?: number[];
+      stroke_radius?: number;
+    }) => {
       const sid = sessionIdRef.current;
       if (!sid) return Promise.resolve(null);
       const oid = params.object_id ?? activeObjectIdRef.current;

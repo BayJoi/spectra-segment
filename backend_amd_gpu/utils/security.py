@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import re
 import secrets
 import time
@@ -16,9 +17,23 @@ from .humantime import format_duration
 
 LOGGER = logging.getLogger(__name__)
 
-ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
+ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
-BACKEND_PORT = 8000
+BACKEND_PORT = int(os.environ.get("SPECTRA_BACKEND_PORT", "8000"))
+
+
+def _split_host(host_header: str) -> tuple[str, str | None]:
+    if host_header.startswith("["):
+        end = host_header.find("]")
+        if end == -1:
+            return host_header, None
+        rest = host_header[end + 1 :]
+        port = rest[1:] if rest.startswith(":") else None
+        return host_header[1:end], port
+    if ":" in host_header:
+        name, port = host_header.rsplit(":", 1)
+        return name, port
+    return host_header, None
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
@@ -37,15 +52,14 @@ def get_or_create_token() -> str:
 class HostValidationMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         host_header = request.headers.get("host", "").lower()
-        host_name = host_header.rsplit(":", 1)[0]
+        host_name, port_str = _split_host(host_header)
         if host_name not in ALLOWED_HOSTS:
             LOGGER.debug("Rejected request with invalid Host: %s", host_header)
             return JSONResponse(
                 status_code=403,
                 content={"detail": "Forbidden: invalid Host header"},
             )
-        if ":" in host_header:
-            port_str = host_header.rsplit(":", 1)[1]
+        if port_str is not None:
             if not port_str.isdigit():
                 LOGGER.debug("Rejected request with invalid port: %s", host_header)
                 return JSONResponse(
@@ -62,8 +76,9 @@ class HostValidationMiddleware(BaseHTTPMiddleware):
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
-    _EXEMPT_PATHS = frozenset({"/health", "/api/token", "/api/logs/stream", "/api/models/stream"})
-    _EXEMPT_PATTERNS = (re.compile(r"^/api/sessions/[^/]+/release$"),)
+    _EXEMPT_PATHS = frozenset({"/health", "/api/token"})
+    _QUERY_TOKEN_PATHS = frozenset({"/api/logs/stream", "/api/models/stream"})
+    _QUERY_TOKEN_PATTERNS = (re.compile(r"^/api/sessions/[^/]+/release$"),)
 
     def __init__(self, app, token_getter):
         super().__init__(app)
@@ -71,10 +86,15 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if path in self._EXEMPT_PATHS or any(p.match(path) for p in self._EXEMPT_PATTERNS):
+        if path in self._EXEMPT_PATHS:
             return await call_next(request)
 
         token = request.headers.get("x-local-token", "")
+        if not token and (
+            path in self._QUERY_TOKEN_PATHS
+            or any(p.match(path) for p in self._QUERY_TOKEN_PATTERNS)
+        ):
+            token = request.query_params.get("token", "")
         current_token = self._token_getter()
         if not token:
             return JSONResponse(

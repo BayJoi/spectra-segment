@@ -200,7 +200,7 @@ export function Sam3PromptBar() {
               className={cn(iconBtnCls, layersOpen && "bg-neutral-800/50 text-neutral-200")}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="shrink-0"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>
-              <span className="text-[10px] font-mono tabular-nums">{sam3Instances.length}</span>
+              <span className="text-[10px] font-sans tabular-nums">{sam3Instances.length}</span>
             </button>
           </Tooltip>
         </div>
@@ -258,7 +258,7 @@ export function Sam3PromptBar() {
 
           {optionsOpen && (
             <div className="absolute bottom-full mb-2 right-0 z-50 w-72 p-3 rounded-2xl bg-[#0a0a0a]/95 border border-neutral-800/80 shadow-2xl shadow-black/80 backdrop-blur-xl grain-bg animate-drop-in">
-              <p className="text-[10px] uppercase tracking-widest text-neutral-500 font-mono mb-2">Performance</p>
+              <p className="text-[10px] uppercase tracking-widest text-neutral-500 font-sans mb-2">Performance</p>
               <button
                 type="button"
                 role="switch"
@@ -266,7 +266,7 @@ export function Sam3PromptBar() {
                 onClick={toggleKeepLoaded}
                 disabled={keepPending}
                 className={cn(
-                  "w-full flex items-center justify-between gap-2 h-8 px-2.5 rounded-lg text-[11px] font-medium font-sans border transition-all duration-200 cursor-pointer select-none",
+                  "w-full flex items-center justify-between gap-2 h-7 px-2.5 rounded-lg text-[11px] font-medium font-sans border transition-all duration-200 cursor-pointer select-none",
                   keepLoaded
                     ? "bg-orange-500/15 border-orange-500/40 text-orange-300 hover:bg-orange-500/25"
                     : "bg-neutral-900/80 border-neutral-700/80 text-neutral-300 hover:border-neutral-500 hover:text-neutral-100"
@@ -291,7 +291,7 @@ export function Sam3PromptBar() {
                 Keeps the model in memory between prompts, avoiding the slow reload that happens after ~25s of idle time.
               </p>
 
-              <p className="text-[10px] uppercase tracking-widest text-neutral-500 font-mono mt-3 mb-2">Encoding quality</p>
+              <p className="text-[10px] uppercase tracking-widest text-neutral-500 font-sans mt-3 mb-2">Encoding quality</p>
               <div className="flex items-center gap-1 p-1 rounded-lg bg-neutral-900/50 border border-neutral-800/60">
                 {ENCODE_OPTIONS.map((opt) => (
                   <button
@@ -300,7 +300,7 @@ export function Sam3PromptBar() {
                     onClick={() => changeEncodeDim(opt.value)}
                     disabled={reencoding}
                     className={cn(
-                      "flex-1 h-7 px-2 rounded-md text-[10px] font-medium font-mono transition-all duration-200 cursor-pointer select-none",
+                      "flex-1 h-7 px-2 rounded-md text-[10px] font-medium font-sans transition-all duration-200 cursor-pointer select-none",
                       encodeDim === opt.value
                         ? "bg-gradient-to-r from-orange-500 to-orange-600 text-white grain-bg grain-bg-strong"
                         : "text-neutral-500 hover:text-neutral-200"
@@ -319,7 +319,7 @@ export function Sam3PromptBar() {
                   <svg className="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                     <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                   </svg>
-                  <span className="text-[9px] font-mono">
+                  <span className="text-[9px] font-sans">
                     Re-encoding image... this can take up to a minute
                   </span>
                 </div>

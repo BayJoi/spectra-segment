@@ -13,7 +13,7 @@ console panel in `docs\LOGGING.md`.
 | Piece | Version | Job |
 |---|---|---|
 | React | 19.2.8 | The UI |
-| Vite | 8.2.1 | Dev server and bundler |
+| Vite | 8.2.4 | Dev server and bundler |
 | UnoCSS | 66.7.5 | Utility CSS, atomic output |
 | jotai | 2.20.2 | State, using the default module store |
 | TypeScript | 7.0.2 | Types, with `strict` and `noUnusedLocals` on |
@@ -59,10 +59,12 @@ passes an in-repo path.
 
 ### Talking to the backend
 
-`lib\api.ts` hardcodes `BASE = "http://localhost:8000"`. There is no environment
-override, no proxy in `vite.config.ts`, and no relative URLs. The browser therefore
-makes cross-origin requests to port 8000, which is why the backend's
-`CORSMiddleware` allow-lists `localhost:3000` and `127.0.0.1:3000`.
+`lib\api.ts` derives `BASE` from `window.location.hostname` and port 8000, with a
+`localhost:8000` fallback outside the browser. Opening the UI at either `localhost`
+or `127.0.0.1` therefore keeps the API on the same hostname. There is no environment
+override, no proxy in `vite.config.ts`, and no relative API URL. The browser still
+makes a cross-origin request because the API is on port 8000, which is why the
+backend's `CORSMiddleware` allow-lists `localhost:3000` and `127.0.0.1:3000`.
 
 `vite.config.ts` sets a Content-Security-Policy for the dev server. `connect-src`
 allows both `127.0.0.1:8000` and `localhost:8000` so the API and the log stream
@@ -77,7 +79,7 @@ serve through the junctions. The repo root is deliberately excluded.
 
 ## 2. State
 
-Five stores, all plain `atom()` on jotai's default store. There is no custom
+Six stores, all plain `atom()` on jotai's default store. There is no custom
 `Provider` anywhere, so every `useAtom` call in every component shares one store.
 
 | Store | Holds |
@@ -87,13 +89,14 @@ Five stores, all plain `atom()` on jotai's default store. There is no custom
 | `detection.ts` | Detection mode, brush and feather values, detector state, the detections array |
 | `layers.ts` | The layer list and the layer selection set |
 | `sam3.ts` | SAM3 mode, prompt history, redo stack, instances, settings |
+| `matte.ts` | Matte models, per-layer alpha/history, local edge controls, export flag |
 
 ### What persists
 
-Four atoms use `atomWithStorage`, so they survive a reload in `localStorage`:
-`consoleFilterAtom`, `consoleSourceAtom`, `consoleCategoryAtom` and
-`consoleShowTimeAtom`. Everything else is in-memory only, so a reload loses the
-image, the masks and the session.
+Six atoms use `atomWithStorage`, so they survive a reload in `localStorage`:
+`consoleFilterAtom`, `consoleSourceAtom`, `consoleCategoryAtom`,
+`consoleShowTimeAtom`, `consoleSimpleAtom` and `matteModelAtom`. Everything else is
+in-memory only, so a reload loses the image, masks, matte layers and session.
 
 ### The three mask atoms
 
@@ -253,6 +256,41 @@ The three render functions (`renderMasks`, `renderDetections`, `renderSam3Boxes`
 each set the same transform on their own context, because assigning `canvas.width`
 resets it.
 
+### The matte preview
+
+Matte is selected on the home screen, so its session is created with
+`model_name: null` and no segmentation model is loaded or downloaded. Nothing runs
+on upload: `MatteBar` calls the matte route only when Cut out is pressed, and again
+on model change once an alpha exists. The bar exposes only Auto and Stroke (`text`
+and `box` stay API-only). Edge and Feather pair the range input with
+`ui/NumberInput`, so an exact value can be typed instead of dragged. Edge, Feather
+and Invert run locally on the stored alpha, not through the model.
+
+Matte mode does not use `PackedMask`: its data is one byte per pixel holding 0 or 1,
+and `decodeDetectionMask` thresholds at 127, so a soft alpha cannot round-trip
+through it. `lib/matte.ts#decodeAlphaPng` decodes the server's grayscale PNG into a
+canvas whose **alpha channel** is the luminance. `applyAlphaControls` then applies
+Edge/Invert through a 256-entry lookup table and Feather through `ctx.filter`; a
+shifted canvas is cached per layer so changing Feather does not repeat the full
+edge pass. If `ctx.filter` is unavailable, a three-pass separable box blur is used
+instead of downscaling, so the alpha keeps its resolution.
+
+Each matte layer owns its raw alpha, strokes, guide, info, history and redo stack.
+`useMatte` appends a compressed-alpha snapshot before every Auto/Stroke run (capped
+at 12), and undo/redo swaps that snapshot back in and re-applies the current local
+controls. Switching layers selects controls, not what is displayed. `Canvas` merges
+the real alpha of every visible subject and applies the local edge controls once;
+`useCanvasRenderer` composites that union as `image + destination-in(alpha)` over
+the checkerboard. Hidden subjects contribute nothing, so the remaining subjects
+stay real cutouts. `renderMasks` is skipped in that state because matte has no
+binary subject masks to draw.
+
+Strokes are captured only when the guide is `stroke`. `Canvas.tsx` appends the sampled
+points and a label (right-drag is 0) to the active layer's stroke set, then calls the
+matte endpoint; the same points are re-sent on every run until the user clears them.
+Adding a subject creates a new Stroke layer rather than trying to make Auto guess a
+second subject.
+
 ### The per-subject mask overlay
 
 `rebuildSubjectMaskCache` builds one overlay for all subjects, tinting each subject's
@@ -352,7 +390,14 @@ provides `canvasToImage`, `isInsideImage` and `drawBrushPreview`. The pointer
 handlers and the actual capture live in `Canvas.tsx`'s `handlePointerMove`, which
 pushes into `strokePointsRef` with a minimum spacing of 2 px
 (`STROKE_COLLECT_SPACING`) and clamps to the image bounds. Right-drag sets
-`activeStrokeModeRef` to `"negative"` and the preview turns red.
+`activeStrokeModeRef` to `"negative"` and the preview turns red. In Brush mode a
+negative stroke is an automatic SAM selection: the points are sent as positive
+prompts with a box around the stroke, the server subtracts the selected mask from
+the current subject, and a small dilation closes the selected edge. A benchmark
+on a 1920x1075 frame removed 99.8% of the stroke and lost 0.2% outside it;
+a negative-point prompt lost 99.4% of the subject. The request carries
+`stroke_radius` (`brushSize / 2`) to size the selection box and edge cleanup. The
+Brush toolbar no longer exposes a brush-size slider.
 
 `handlePointerUp` is wired to both `onPointerUp` and `onPointerLeave`. A left drag
 has pointer capture, so leaving the canvas keeps collecting points. A right drag
@@ -364,20 +409,21 @@ expects:
 | Case | What it produces |
 |---|---|
 | Fewer than 3 points | One point, label `+1` or `0` |
-| Negative stroke | Always an area prompt |
-| Positive and closed (gap within `max(brushSize * 1.5, 4)` or 12% of the diagonal, and at least 4 points) | A ring prompt |
+| Negative stroke | An area prompt used as a positive selection; SAM selects the painted region and the server subtracts it |
+| Positive and closed (gap within `max(brushSize * 1.5, 4)` or 12% of the diagonal, and at least 4 points) | A box prompt plus up to 8 interior positive points |
 | Positive and open | An area prompt |
 
-`buildRingPrompt` builds a donut: it downsamples the ring to 32 points, works out a
-centroid and mean radius, and emits up to 8 interior positive points plus the ring
-itself as negative. The interior points are pulled in by
+`buildRingPrompt` downsamples the ring to 32 points and uses its bounding box as a
+box prompt, with up to 8 interior positive points. The ring outline is no longer
+sent as negative points. On the ball benchmark this raised coverage from 74.7% to
+99.8%, with 0.4% extra. The interior points are pulled in by
 `clamp(brushSize / avgRadius, 0.15, 0.5)` of the radius.
 
 `buildAreaPrompt` rasterises the stroke into an offscreen canvas at most 1024 px
 wide. The line width is deliberately **narrowed by 60% of the brush on each side**,
 so the sampled points sit inside the object instead of straddling the boundary. It
 then samples on a grid of at least 4 image px, transforms back to image
-coordinates, and caps the result at 12 points.
+coordinates, and caps the result at 10 points.
 
 All coordinates are clamped to the image, so the server never receives anything out
 of range.
@@ -496,13 +542,17 @@ be replayed against the next one.
 
 - **Token.** `getToken()` memoises in `_token` and `_tokenPromise`. A 401 clears both
   and retries exactly once with a fresh token. The token never touches disk.
+- **Fresh token for SSE.** `getFreshToken()` fetches `/api/token` for every new
+  `EventSource`, including reconnects, so a backend restart supplies a new token.
+  `connectSse` accepts an async URL provider; both the log and model-status streams
+  pass `?token=` because `EventSource` cannot send headers.
 - **`ApiError`** carries the HTTP `status`, so callers can distinguish "the session
   is gone" (404, rebuild it) from "this subject has no strokes" (409, resync and
   stop). The old code threw a plain `Error` and every failure looked the same.
-- **`sendBeacon` release.** `releaseSession` fires `navigator.sendBeacon` (which
-  cannot set headers, so the backend exempts that path from auth) **and then** a
-  token-bearing `DELETE`. A page teardown therefore sends two destroy requests. Both
-  are idempotent.
+- **`sendBeacon` release.** `releaseSession` puts the cached token on the beacon's
+  query string (the backend accepts a query token on that one release path) **and
+  then** sends a token-bearing `DELETE`. A page teardown therefore sends two destroy
+  requests. Both are idempotent.
 - **Object mask decoding is cached by response string.** `decodeObjectMasks` keeps
   one entry per subject id holding the last base64 it decoded. A response that
   repeats a subject's mask byte-for-byte reuses the existing `PackedMask` instead of
@@ -510,10 +560,16 @@ be replayed against the next one.
   that subject. Changed masks decode in parallel (`Promise.all`), so a response that
   carries several changed subjects waits for one decode, not for their sum.
   `resetObjectMaskCache()` clears it on session/image changes.
-- **Export encoding.** `encodeMaskPng` loops over every mask pixel on the main
-  thread and calls `toDataURL`, then posts base64 to `/export-zip`. For 20 masks at
-  4096x4096 that is a multi-second freeze with no progress feedback beyond a spinner.
-  `/export-image` exists but is never called by the UI.
+- **Export encoding and delivery.** `encodeMaskPng` loops over every mask pixel on
+  the main thread and calls `toDataURL`. For 20 masks at 4096x4096 that is a
+  multi-second freeze with no progress feedback beyond a spinner. The dialog now
+  offers three deliveries: ZIP (`/export-zip`), one combined image via
+  `/export-image`, or separate direct image downloads using one `/export-image`
+  request per item. The image-format selector now applies to every ZIP entry, not
+  only the whole image, and filenames follow the chosen extension; JPEG forces a
+  solid background because it has no alpha channel. Matte exports bypass the server
+  entirely: the combined, active or separate visible-subject alphas are composited
+  locally and downloaded as image files. Hidden subjects are excluded.
 
 ---
 
@@ -530,6 +586,17 @@ Frontend-only pieces:
   Both then render in one list, with a `source: "ui" | "backend"` discriminator.
   Messages pass through `safeText`, which strips paths, tokens and long hex
   strings before they reach the panel.
+- **Simple vs Developer.** Simple is the default and shows UI messages, known
+  lifecycle lines, and a short fallback for other backend `INFO` lines instead of
+  dropping them; transport/allocator noise stays hidden. Successful request lines
+  are grouped by operation (`Brush updates`, `Segmentation`, `Detection`, `Matte
+  updates`, and so on) with an `xN` count, and Brush strokes are grouped as
+  `Brush strokes applied`. Failed requests stay individual. Stable server keys
+  remove duplicate live/backfill records, and visible identical lines within five
+  seconds are still merged with an `xN` count. Developer shows the raw stream,
+  source/category/level filters and the original timestamps. The panel re-fetches
+  history whenever the SSE stream opens, so an early connection cannot leave the
+  feed empty. The choice persists as `consoleSimpleAtom`.
 
 ---
 
@@ -546,9 +613,9 @@ Frontend-only pieces:
 | Log render | Only the newest 120 rows render, with a "show older" button for the rest. Stable ids are used as React keys |
 | Log entries | 500 cap, 150 reserved for UI entries |
 | Toast retention | Last 3, 4 seconds each |
-| SSE reconnect | Backoff 1s doubling to a 30s cap, reset on open. The backend also caps the log stream at 30 minutes (the model-status stream has no lifetime cap) |
+| SSE reconnect | Backoff 1s doubling to a 30s cap, reset on open. Each attempt fetches a fresh token and puts it in the URL; the backend caps both SSE streams at 30 minutes |
 | Upload fitting | `fitImageFile` decodes the file once, reads `naturalWidth`/`naturalHeight` from that decode and resizes from it; a file that will not decode is sent unchanged. Probed twice before, so an oversized photo paid for three full decodes |
-| Export | Mask encoding is synchronous on the main thread |
+| Export | Mask encoding is synchronous on the main thread; direct image downloads avoid building a ZIP |
 | Brush preview | Redraws the whole point list per pointer move, so cost is O(n^2) per stroke with nothing capping the point count |
 
 There is no `AbortController` anywhere. A hung request leaves `isDetectingAtom`,
@@ -580,4 +647,5 @@ rejects with no toast, so the detection silently keeps no mask.
 - **The export feather slider and the on-screen feather** are the same atom, so
   changing one changes the other.
 - **The right-drag brush commits early** when the pointer leaves the canvas, because
-  it has no pointer capture.
+  it has no pointer capture. The erase itself is still exact for the points that
+  were collected.

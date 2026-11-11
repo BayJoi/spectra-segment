@@ -107,10 +107,6 @@ export function useBrushDrawing(
       ctx.strokeStyle = `rgba(212, 117, 52, ${0.5 * pulse})`;
       ctx.lineWidth = 2;
       ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(px, py, 4, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(212, 117, 52, 0.8)`;
-      ctx.fill();
 
       ringAnimFrameRef.current = requestAnimationFrame(drawRing);
     };

@@ -5,10 +5,11 @@ import { Tooltip } from "@/components/ui/Tooltip";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { TierIcon } from "@/components/ui/TierIcon";
 import { imageWidthAtom, imageHeightAtom, hasImageAtom, masksAtom, modelNameAtom, perDetectionMasksAtom, sam3ReadyAtom, modelsAtom, type ModelInfo } from "@/store/session";
-import { showTransparentAtom, settingsOpenAtom, uploadHoveredAtom, endSessionOpenAtom, imageEncodingAtom, pushToast } from "@/store/ui";
+import { matteModeAtom, matteModelAtom, matteModelsAtom } from "@/store/matte";
+import { showTransparentAtom, settingsOpenAtom, uploadHoveredAtom, endSessionOpenAtom, imageEncodingAtom, pushToast, replaceImageFileAtom } from "@/store/ui";
 import { loadedDetectorAtom, detectorsAtom } from "@/store/detection";
 import { useSession } from "@/hooks/useSession";
-import { api, BASE } from "@/lib/api";
+import { api, BASE, getFreshToken } from "@/lib/api";
 import { connectSse } from "@/lib/sse";
 import { logErr } from "@/store/logs";
 import { cn } from "@/lib/utils";
@@ -31,17 +32,21 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
   const [downloading, setDownloading] = useState(false);
   const [models, setModels] = useAtom(modelsAtom);
   const [modelName] = useAtom(modelNameAtom);
+  const [matteMode] = useAtom(matteModeAtom);
+  const [matteModel, setMatteModel] = useAtom(matteModelAtom);
+  const [matteModels, setMatteModels] = useAtom(matteModelsAtom);
   const [, setLoadedDetector] = useAtom(loadedDetectorAtom);
   const [, setDetectors] = useAtom(detectorsAtom);
   const [loadingLabel, setLoadingLabel] = useState<string>("");
   const [unloading, setUnloading] = useState(false);
+  const [, setReplaceFile] = useAtom(replaceImageFileAtom);
 
   const unloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 
   const segModels = models.filter((m) => m.type === "segment");
   const hasAnyDownloaded = models.some((m) => m.downloaded);
-  const showHighlight = uploadHovered && !modelName;
+  const showHighlight = uploadHovered && !modelName && !matteMode;
 
   const syncDetectors = useCallback(
     (modelList: ModelInfo[]) => {
@@ -75,7 +80,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
       .then((res) => applyModelList(res.models))
       .catch((err) => logErr("detect", err));
 
-    const handle = connectSse(`${BASE}/api/models/stream`, (data) => {
+    const handle = connectSse(async () => `${BASE}/api/models/stream?token=${encodeURIComponent(await getFreshToken())}`, (data) => {
       try {
         const parsed = JSON.parse(data);
         if (parsed.models) applyModelList(parsed.models);
@@ -97,6 +102,26 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
             setDownloading(false);
             setLoadingLabel("");
           }, 600000);
+        } else if (parsed.event === "matte-downloading" || parsed.event === "matte-loading") {
+          const isDownload = parsed.event === "matte-downloading";
+          setLoadingLabel(isDownload ? "Downloading matte model..." : "Loading matte model...");
+          setDownloading(isDownload);
+          setUnloading(true);
+          if (unloadTimerRef.current) window.clearTimeout(unloadTimerRef.current);
+          unloadTimerRef.current = window.setTimeout(() => {
+            setUnloading(false);
+            setDownloading(false);
+            setLoadingLabel("");
+          }, isDownload ? 600000 : 60000);
+        } else if (parsed.event === "matte-loaded") {
+          if (unloadTimerRef.current) window.clearTimeout(unloadTimerRef.current);
+          setUnloading(false);
+          setDownloading(false);
+          setLoadingLabel("");
+          api
+            .listMatteModels()
+            .then((res) => setMatteModels(res.models))
+            .catch((err) => logErr("matte", err));
         } else if (parsed.event === "loading") {
           setLoadingLabel("Loading model...");
           setDownloading(false);
@@ -124,7 +149,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
         unloadTimerRef.current = null;
       }
     };
-  }, [syncDetectors, setModels, setLoadedDetector]);
+  }, [syncDetectors, setModels, setMatteModels, setLoadedDetector]);
 
   const prevLoadingRef = useRef(false);
   useEffect(() => {
@@ -141,12 +166,19 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (file) uploadImage(file);
+      e.target.value = "";
+      if (!file) return;
+      if (hasImage) setReplaceFile(file);
+      else uploadImage(file);
     },
-    [uploadImage]
+    [hasImage, uploadImage, setReplaceFile]
   );
 
   const handleModelSwitch = useCallback(async (model: string) => {
+    if (matteMode) {
+      setMatteModel(model);
+      return;
+    }
     if (model === modelName) return;
     const target = models.find((m) => m.name === model);
     const isDownloaded = target?.downloaded ?? false;
@@ -162,7 +194,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
       setModelLoading(false);
       setDownloading(false);
     }
-  }, [switchModel, models, sessionId, modelName]);
+  }, [switchModel, models, sessionId, modelName, matteMode, setMatteModel]);
 
   const sam3Loaded = models.some((m) => m.type === "sam3" && m.loaded);
 
@@ -170,13 +202,22 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
     setSam3Ready(sam3Loaded);
   }, [sam3Loaded, setSam3Ready]);
 
-  const sourceModels = sam3 ? models.filter((m) => m.type === "sam3") : segModels;
+  useEffect(() => {
+    if (!matteMode) return;
+    api
+      .listMatteModels()
+      .then((res) => setMatteModels(res.models))
+      .catch((err) => logErr("matte", err));
+  }, [matteMode, setMatteModels]);
+
+  const uploadBlocked = matteMode ? false : sam3 ? !sam3Loaded : !modelName;
+  const sourceModels = sam3 ? models.filter((m) => m.type === "sam3") : matteMode ? matteModels : segModels;
   const modelOptions = sourceModels.map((m) => ({
     value: m.name,
-    label: m.downloaded ? `\u2713 ${m.display_name}` : m.display_name,
+    label: `${m.downloaded ? "\u2713 " : ""}${m.display_name}`,
     icon: sam3 ? undefined : <TierIcon tier={m.tier} />,
     hint: sam3 ? undefined : m.perf,
-    loaded: m.name === modelName,
+    loaded: m.name === (matteMode ? matteModel : modelName),
   }));
 
   return (
@@ -214,10 +255,10 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
               </div>
             )}
             <SelectNative
-              value={modelName}
+              value={matteMode ? matteModel : modelName}
               onChange={handleModelSwitch}
               options={modelOptions}
-              placeholder={sam3 ? "Choose a SAM 3 model..." : "Choose a model..."}
+              placeholder={sam3 ? "Choose a SAM 3 model..." : matteMode ? "Choose a matte model..." : "Choose a model..."}
               className={cn(modelLoading && "animate-model-load pointer-events-none")}
             />
             <div
@@ -227,12 +268,12 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
               )}
             >
               <div className="shimmer-overlay" />
-              <span className="text-[10px] text-orange-400 font-mono animate-pulse relative z-10">
+              <span className="text-[10px] text-orange-400 font-sans animate-pulse relative z-10">
                 {loadingLabel}
               </span>
             </div>
           </div>
-        {!sam3 && !modelName && !modelLoading && segModels.length > 0 && (
+        {!sam3 && !matteMode && !modelName && !modelLoading && segModels.length > 0 && (
           <div className={cn("flex items-center gap-2 ml-1 transition-opacity duration-200", showHighlight && "opacity-100")}>
             <span className={cn(
               "text-xs font-sans whitespace-nowrap select-none",
@@ -242,7 +283,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
             )}>
               {hasAnyDownloaded ? "Select a model" : "Select a model to download and start"}
             </span>
-            <div className={cn("hidden lg:flex items-center gap-2 text-[9px] text-neutral-600 font-mono ml-1 transition-opacity duration-200", showHighlight && "opacity-40")}>
+            <div className={cn("hidden lg:flex items-center gap-2 text-[9px] text-neutral-600 font-sans ml-1 transition-opacity duration-200", showHighlight && "opacity-40")}>
               <span className="flex items-center gap-1"><TierIcon tier="tiny" /> fast</span>
               <span className="flex items-center gap-1"><TierIcon tier="small" /> balanced</span>
               <span className="flex items-center gap-1"><TierIcon tier="medium" /> accurate</span>
@@ -254,7 +295,7 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
 
       <div className="flex items-center gap-1.5">
         {hasImage && (
-          <span className={cn("text-[11px] text-neutral-500 mr-2 tabular-nums font-mono bg-neutral-900/50 px-2 py-1 rounded-lg border border-neutral-800/40 transition-opacity duration-200", showHighlight && "opacity-30")}>
+          <span className={cn("text-[11px] text-neutral-500 mr-2 tabular-nums font-sans bg-neutral-900/50 px-2 py-1 rounded-lg border border-neutral-800/40 transition-opacity duration-200", showHighlight && "opacity-30")}>
             {imageWidth}x{imageHeight}
           </span>
         )}
@@ -298,18 +339,18 @@ export function Header({ sam3 = false }: { sam3?: boolean }) {
             </button>
           </Tooltip>
         )}
-        <Tooltip tip={!modelName && !sam3 ? "Select a model first" : sam3 && !modelName ? "Select a SAM 3 model first" : sam3 && !sam3Loaded ? "Loading SAM 3 model..." : hasImage ? "Replace image" : "Upload image"} side="bottom">
+        <Tooltip tip={matteMode ? (hasImage ? "Replace image" : "Upload image") : !modelName && !sam3 ? "Select a model first" : sam3 && !modelName ? "Select a SAM 3 model first" : sam3 && !sam3Loaded ? "Loading SAM 3 model..." : hasImage ? "Replace image" : "Upload image"} side="bottom">
           <span
-            onMouseEnter={() => !modelName && !sam3 && setUploadHovered(true)}
+            onMouseEnter={() => !matteMode && !modelName && !sam3 && setUploadHovered(true)}
             onMouseLeave={() => setUploadHovered(false)}
             className="inline-flex"
           >
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={sam3 ? !sam3Loaded : !modelName}
+              disabled={uploadBlocked}
               className={cn(
                 "inline-flex items-center justify-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-medium font-sans transition-all duration-200 select-none grain-bg grain-bg-strong",
-                (sam3 ? !sam3Loaded : !modelName)
+                uploadBlocked
                   ? "bg-neutral-800/50 border border-neutral-800/50 text-neutral-600 cursor-not-allowed opacity-50"
                   : "bg-gradient-to-r from-orange-500 to-orange-600 text-white hover:from-orange-400 hover:to-orange-500 hover:shadow-lg hover:shadow-orange-500/20 hover:scale-105 active:scale-95 cursor-pointer"
               )}

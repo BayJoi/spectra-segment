@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
-title Spectra Segment - Installer (CPU)
+title Spectra Segment - Installer (NVIDIA / CPU)
 
 set "ROOT=%~dp0"
 set "TOOLS_DIR=%ROOT%tools"
@@ -26,7 +26,7 @@ if not exist "%UV_CACHE%" mkdir "%UV_CACHE%" 2>nul
 echo(
 echo  +------------------------------------------------------------+
 echo  ^|                      SPECTRA SEGMENT                       ^|
-echo  ^|                       Installer  (CPU)                     ^|
+echo  ^|                  Installer  (CPU / NVIDIA)                 ^|
 echo  ^|  Portable, self-contained. Everything stays in this folder ^|
 echo  +------------------------------------------------------------+
 echo(
@@ -72,6 +72,11 @@ if exist "%UV_DIR%\uv-x86_64-pc-windows-msvc\uv.exe" (
     rmdir /s /q "%UV_DIR%\uv-x86_64-pc-windows-msvc" >nul 2>&1
 )
 del "%UV_DIR%\uv.zip" >nul 2>&1
+if not exist "%UV_EXE%" (
+    echo   [FAIL]  uv extraction failed.
+    pause
+    exit /b 1
+)
 echo   [ OK ]  uv ready.
 
 :skip_uv_download
@@ -106,29 +111,79 @@ echo   [ OK ]  Virtual environment created.
 call :section "[ 5 / 5 ]  Detecting GPU and installing dependencies"
 set "GPU_TYPE=cpu"
 set "GPU_NAME="
+set "GPU_CC="
+set "GPU_DRIVER="
+set "GPU_REASON=No NVIDIA GPU detected"
+set "TORCH_INDEX="
+set "TORCH_SPEC="
+set "TORCH_LABEL=CPU"
+set "TORCH_FALLBACK_INDEX="
+set "TORCH_FALLBACK_SPEC="
 
-for /f "tokens=*" %%G in ('nvidia-smi --query-gpu^=name --format^=csv^,noheader 2^>nul') do (
-    set "GPU_TYPE=nvidia"
-    set "GPU_NAME=%%G"
-)
-
-if "!GPU_TYPE!"=="nvidia" (
-    echo   [INFO]  NVIDIA GPU detected: !GPU_NAME!
-) else (
-    echo   [INFO]  No NVIDIA GPU detected - using CPU.
-)
-
-if "!GPU_TYPE!"=="nvidia" (
-    echo   [INFO]  Installing CUDA 13.0 PyTorch...
-    "%UV_EXE%" pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130 --python "%VENV_PYTHON%" --cache-dir "%UV_CACHE%"
-    if !errorlevel! neq 0 (
-        echo   [WARN]  CUDA install failed, falling back to CPU...
-        "%UV_EXE%" pip install torch torchvision --python "%VENV_PYTHON%" --cache-dir "%UV_CACHE%"
+for /f "tokens=1,2,3 delims=," %%G in ('nvidia-smi --query-gpu^=name^,compute_cap^,driver_version --format^=csv^,noheader 2^>nul') do (
+    if not defined GPU_NAME (
+        set "GPU_NAME=%%G"
+        set "GPU_CC=%%H"
+        set "GPU_DRIVER=%%I"
     )
-) else (
-    echo   [INFO]  Installing CPU PyTorch...
-    "%UV_EXE%" pip install torch torchvision --python "%VENV_PYTHON%" --cache-dir "%UV_CACHE%"
 )
+
+if defined GPU_CC for /f "tokens=* delims= " %%A in ("!GPU_CC!") do set "GPU_CC=%%A"
+if defined GPU_DRIVER for /f "tokens=* delims= " %%A in ("!GPU_DRIVER!") do set "GPU_DRIVER=%%A"
+
+if defined GPU_NAME (
+    for /f "tokens=1-7 delims=|" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%launcher\select_nvidia_runtime.ps1" -ComputeCapability "!GPU_CC!" -DriverVersion "!GPU_DRIVER!"') do (
+        set "GPU_TYPE=%%A"
+        set "TORCH_INDEX=%%B"
+        set "TORCH_SPEC=%%C"
+        set "TORCH_LABEL=%%D"
+        set "GPU_REASON=%%E"
+        set "TORCH_FALLBACK_INDEX=%%F"
+        set "TORCH_FALLBACK_SPEC=%%G"
+    )
+)
+if "!TORCH_INDEX!"=="-" set "TORCH_INDEX="
+if "!TORCH_SPEC!"=="-" set "TORCH_SPEC="
+if "!TORCH_FALLBACK_INDEX!"=="-" set "TORCH_FALLBACK_INDEX="
+if "!TORCH_FALLBACK_SPEC!"=="-" set "TORCH_FALLBACK_SPEC="
+
+if "!GPU_TYPE!"=="nvidia" (
+    echo   [INFO]  NVIDIA GPU detected: !GPU_NAME! ^(compute !GPU_CC!, driver !GPU_DRIVER!^)
+    echo   [INFO]  !GPU_REASON!
+    echo   [INFO]  Installing !TORCH_LABEL! PyTorch...
+) else (
+    echo   [INFO]  No usable NVIDIA GPU detected - using CPU.
+    if defined GPU_NAME echo   [WARN]  !GPU_REASON!
+)
+
+set "TORCH_OK=0"
+if "!GPU_TYPE!"=="nvidia" (
+    "%UV_EXE%" pip install --reinstall !TORCH_SPEC! --index-url !TORCH_INDEX! --python "%VENV_PYTHON%" --cache-dir "%UV_CACHE%"
+    if !errorlevel! equ 0 set "TORCH_OK=1"
+    if "!TORCH_OK!"=="0" if defined TORCH_FALLBACK_INDEX (
+        echo   [WARN]  !TORCH_LABEL! PyTorch install failed; trying the CUDA 12.6 legacy build...
+        "%UV_EXE%" pip install --reinstall !TORCH_FALLBACK_SPEC! --index-url !TORCH_FALLBACK_INDEX! --python "%VENV_PYTHON%" --cache-dir "%UV_CACHE%"
+        if !errorlevel! equ 0 (
+            set "TORCH_OK=1"
+            set "TORCH_LABEL=CUDA 12.6 legacy"
+        )
+    )
+)
+
+if "!TORCH_OK!"=="0" (
+    if "!GPU_TYPE!"=="nvidia" echo   [WARN]  CUDA PyTorch install failed - falling back to CPU PyTorch.
+    echo   [INFO]  Installing CPU PyTorch...
+    "%UV_EXE%" pip install --reinstall torch torchvision --index-url https://download.pytorch.org/whl/cpu --python "%VENV_PYTHON%" --cache-dir "%UV_CACHE%"
+    if !errorlevel! neq 0 (
+        echo   [FAIL]  Could not install PyTorch.
+        pause
+        exit /b 1
+    )
+)
+
+echo   [INFO]  Verifying PyTorch...
+"%VENV_PYTHON%" -c "import torch; print('PyTorch:', torch.__version__); print('CUDA runtime:', torch.version.cuda or 'none'); print('GPU available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'); print('Arch list:', ','.join(torch.cuda.get_arch_list()) if torch.cuda.is_available() else 'none')"
+if !errorlevel! neq 0 echo   [WARN]  PyTorch installed, but the verification command failed.
 
 echo   [INFO]  Installing Python packages...
 if exist "%ROOT%backend\requirements.txt" (

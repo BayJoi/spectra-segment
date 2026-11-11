@@ -15,5 +15,6 @@ export const detectQueryAtom = atom("");
 export const detectionsAtom = atom<Detection[]>([]);
 export const selectedDetectionAtom = atom<number | null>(null);
 export const isDetectingAtom = atom(false);
+export const isSegmentingAtom = atom(false);
 
 export const yoloeMasksEnabledAtom = atom(false);

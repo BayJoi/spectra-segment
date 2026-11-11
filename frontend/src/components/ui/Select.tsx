@@ -67,7 +67,7 @@ export function SelectNative({
         aria-haspopup="listbox"
         aria-expanded={open}
         className={cn(
-          "w-full h-8 px-3 rounded-lg text-xs font-sans text-left transition-interactive duration-150 flex items-center justify-between gap-1.5 grain-bg",
+          "w-full h-7 px-2.5 rounded-lg text-xs font-sans text-left transition-interactive duration-150 flex items-center justify-between gap-1.5 grain-bg",
           disabled
             ? "bg-neutral-900 border border-neutral-800 text-neutral-600 cursor-not-allowed opacity-60"
             : open
@@ -154,7 +154,7 @@ export function SelectNative({
                       )}
                     </span>
                     {opt.loaded && (
-                      <span className="shrink-0 inline-flex items-center gap-1 h-4 px-1.5 rounded-md text-[9px] font-semibold font-mono bg-green-500/15 border border-green-500/30 text-green-400">
+                      <span className="shrink-0 inline-flex items-center gap-1 h-4 px-1.5 rounded-md text-[9px] font-semibold font-sans bg-green-500/15 border border-green-500/30 text-green-400">
                         <span className="w-1 h-1 rounded-full bg-green-400" />
                         Loaded
                       </span>

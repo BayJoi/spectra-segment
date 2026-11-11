@@ -5,11 +5,13 @@ type StrokeMode = "positive" | "negative";
 interface StrokePromptResult {
   points: number[][];
   labels: number[];
+  bboxes?: number[];
 }
 
 const MAX_RING_POINTS = 32;
 const MAX_INTERIOR_POINTS = 8;
-const MAX_AREA_POINTS = 12;
+const MAX_AREA_POINTS = 10;
+const MAX_NEGATIVE_POINTS = 5;
 const AREA_ERODE_FRACTION = 0.3;
 const RASTER_MAX_DIM = 1024;
 
@@ -43,6 +45,16 @@ function capPoints(points: number[][], max: number): number[][] {
   const down: number[][] = [];
   for (let i = 0; i < points.length; i += stride) down.push(points[i]);
   return down;
+}
+
+function pickEvenly<T>(items: T[], max: number): T[] {
+  if (items.length <= max) return items;
+  if (max <= 1) return [items[0]];
+  const out: T[] = [];
+  for (let i = 0; i < max; i++) {
+    out.push(items[Math.round((i * (items.length - 1)) / (max - 1))]);
+  }
+  return out;
 }
 
 function buildRingPrompt(
@@ -88,10 +100,33 @@ function buildRingPrompt(
   }
 
   const positives = capPoints(interior, MAX_INTERIOR_POINTS);
+  const pad = Math.max(1, Math.round(brushSize * 0.25));
+  const xs = ring.map((p) => p[0]);
+  const ys = ring.map((p) => p[1]);
   return {
-    points: [...positives, ...ring],
-    labels: [...positives.map(() => 1), ...ring.map(() => 0)],
+    points: positives,
+    labels: positives.map(() => 1),
+    bboxes: [
+      Math.max(0, Math.min(...xs) - pad),
+      Math.max(0, Math.min(...ys) - pad),
+      Math.min(imgW - 1, Math.max(...xs) + pad),
+      Math.min(imgH - 1, Math.max(...ys) + pad),
+    ],
   };
+}
+
+function buildNegativePrompt(
+  stroke: StrokePoint[],
+  imgW: number,
+  imgH: number,
+): StrokePromptResult {
+  const minDim = Math.min(imgW, imgH);
+  const spacing = Math.max(6, Math.round(minDim / 96));
+  const line = pickEvenly(downsample(stroke, spacing), MAX_NEGATIVE_POINTS).map((p) =>
+    roundPoint(p, imgW, imgH),
+  );
+  const points = line.length > 0 ? line : [roundPoint(stroke[0], imgW, imgH)];
+  return { points, labels: points.map(() => 0) };
 }
 
 function buildAreaPrompt(
@@ -162,7 +197,7 @@ export function buildStrokePrompt(
     return { points: [roundPoint(stroke[0], imgW, imgH)], labels: [label] };
   }
   if (mode === "negative") {
-    return buildAreaPrompt(stroke, brushSize, "negative", imgW, imgH);
+    return buildNegativePrompt(stroke, imgW, imgH);
   }
 
   const first = stroke[0];
